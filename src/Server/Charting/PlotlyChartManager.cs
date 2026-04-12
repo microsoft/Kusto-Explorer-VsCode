@@ -165,11 +165,11 @@ public class PlotlyChartManager : IChartManager
             ChartType.TreeMap => BuildTreeMapChart(data, options),
             ChartType.Sankey => BuildSankeyChart(data, options),
             // Plotly is handled specially in RenderChartToHtmlDiv before reaching here
+            ChartType.TimeLineChart => BuildTimeLineChart(data, options),
             // The following visualization types are not yet supported
             ChartType.Graph => null,
             ChartType.PivotChart => null,
             ChartType.TimeLadderChart => null,
-            ChartType.TimeLineChart => null,
             ChartType.TimeLineWithAnomalyChart => null,
             ChartType.TimePivot => null,
             _ => null
@@ -320,6 +320,150 @@ public class PlotlyChartManager : IChartManager
         return Build2dChart(builder, data, options, 
             (builder, x, y, name, yAxis) => builder.Add2DScatterTrace(x, y, name, yAxis: yAxis)
             );
+    }
+
+    private PlotlyChartBuilder? BuildTimeLineChart(DataTable data, ChartOptions options)
+    {
+        if (data.Rows.Count == 0 || data.Columns.Count == 0)
+            return null;
+
+        // Find the datetime column for X axis
+        var xColumn = options.XColumn != null
+            ? data.Columns[options.XColumn]
+            : data.Columns.OfType<DataColumn>().FirstOrDefault(c =>
+                c.DataType == typeof(DateTime) || c.DataType == typeof(DateTimeOffset));
+
+        if (xColumn == null)
+            return null;
+
+        // Find numeric columns for Y values
+        var yColumns = options.YColumns != null
+            ? options.YColumns.Select(name => data.Columns[name]).OfType<DataColumn>().ToArray()
+            : data.Columns.OfType<DataColumn>().Where(c => c != xColumn && IsNumeric(c.DataType)).ToArray();
+
+        if (yColumns.Length == 0)
+            return null;
+
+        // Find series columns (string columns that are not X or Y)
+        var seriesColumns = options.Series != null
+            ? options.Series.Select(name => data.Columns[name]).OfType<DataColumn>().ToArray()
+            : data.Columns.OfType<DataColumn>()
+                .Where(c => c != xColumn && !yColumns.Contains(c) && !IsNumeric(c.DataType))
+                .ToArray();
+
+        var builder = new PlotlyChartBuilder();
+
+        if (options.Title != null)
+            builder = builder.WithTitle(options.Title);
+        if (options.XTitle != null)
+            builder = builder.SetXAxisTitle(options.XTitle);
+        if (options.YTitle != null)
+            builder = builder.SetYAxisTitle(options.YTitle);
+        if (options.Legend == ChartLegendMode.Hidden)
+            builder = builder.HideLegend();
+
+        builder = ApplyCommonOptions(builder, options);
+
+        double globalYMax = double.MinValue;
+        double globalYMin = double.MaxValue;
+
+        if (seriesColumns.Length > 0)
+        {
+            // Pivot: group rows by series column values, creating one trace per group
+            var groups = new Dictionary<string, List<DataRow>>();
+            foreach (DataRow row in data.Rows)
+            {
+                var seriesKey = string.Join(" / ",
+                    seriesColumns.Select(c => row[c]?.ToString() ?? ""));
+                if (!groups.TryGetValue(seriesKey, out var list))
+                {
+                    list = new List<DataRow>();
+                    groups[seriesKey] = list;
+                }
+                list.Add(row);
+            }
+
+            foreach (var (seriesName, rows) in groups)
+            {
+                // Sort rows by datetime in ascending order
+                var sortedRows = rows.OrderBy(r => r[xColumn]).ToList();
+
+                foreach (var yCol in yColumns)
+                {
+                    var xValues = new List<object>();
+                    var yValues = new List<double>();
+                    foreach (var row in sortedRows)
+                    {
+                        var xVal = row[xColumn];
+                        var yVal = row[yCol];
+                        if (xVal != null && xVal != DBNull.Value
+                            && yVal != null && yVal != DBNull.Value)
+                        {
+                            xValues.Add(xVal);
+                            var yNum = SanitizeDoubleValue(Convert.ToDouble(yVal));
+                            yValues.Add(yNum);
+                            if (yNum > globalYMax) globalYMax = yNum;
+                            if (yNum < globalYMin) globalYMin = yNum;
+                        }
+                    }
+                    if (xValues.Count > 0)
+                    {
+                        var traceName = yColumns.Length > 1
+                            ? $"{seriesName} - {yCol.ColumnName}"
+                            : seriesName;
+                        builder = builder.Add2DLineTrace(
+                            xValues.ToArray(), yValues.ToArray(), traceName);
+                    }
+                }
+            }
+        }
+        else
+        {
+            // No series columns: one trace per Y column (simple wide-format data)
+            // Sort the data table by datetime ascending
+            var sortedRows = data.Rows.OfType<DataRow>().OrderBy(r => r[xColumn]).ToList();
+
+            foreach (var yCol in yColumns)
+            {
+                var xValues = new List<object>();
+                var yValues = new List<double>();
+                foreach (var row in sortedRows)
+                {
+                    var xVal = row[xColumn];
+                    var yVal = row[yCol];
+                    if (xVal != null && xVal != DBNull.Value
+                        && yVal != null && yVal != DBNull.Value && IsNumeric(yVal.GetType()))
+                    {
+                        xValues.Add(xVal);
+                        var yNum = SanitizeDoubleValue(Convert.ToDouble(yVal));
+                        yValues.Add(yNum);
+                        if (yNum > globalYMax) globalYMax = yNum;
+                        if (yNum < globalYMin) globalYMin = yNum;
+                    }
+                }
+                if (xValues.Count > 0)
+                {
+                    builder = builder.Add2DLineTrace(xValues.ToArray(), yValues.ToArray(), yCol.ColumnName);
+                }
+            }
+        }
+
+        // Force x-axis to date type for proper time-series formatting
+        var xAxis = builder.Layout.XAxis ?? new PlotlyAxis();
+        builder = builder.WithXAxis(xAxis with { Type = PlotlyAxisTypes.Date });
+
+        // Add Y-axis headroom: extend range above max value (5% padding)
+        if (globalYMax > double.MinValue && globalYMin < double.MaxValue)
+        {
+            var yRange = globalYMax - globalYMin;
+            var padding = yRange > 0 ? yRange * 0.05 : Math.Abs(globalYMax) * 0.05;
+            var yAxisMin = Math.Min(0, globalYMin);
+            var yAxisMax = globalYMax + padding;
+            var yAxis = builder.Layout.YAxis ?? new PlotlyAxis();
+            builder = builder.WithYAxis(yAxis with { Range = new object[] { yAxisMin, yAxisMax }, AutoRange = false });
+        }
+
+        return builder;
     }
 
     private PlotlyChartBuilder? BuildPieChart(DataTable data, ChartOptions options)

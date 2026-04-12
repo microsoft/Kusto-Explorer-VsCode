@@ -1020,6 +1020,13 @@ public sealed record PlotlyAxis
     public object[]? Range { get; init; }
 
     /// <summary>
+    /// How the axis range relates to the data. Use "normal" (default), "tozero" (include zero), or "nonnegative" (non-negative only).
+    /// If null, defaults to "normal".
+    /// </summary>
+    [JsonPropertyName("rangemode")]
+    public string? RangeMode { get; init; }
+
+    /// <summary>
     /// Whether to automatically determine the axis range from data. If null, defaults to true.
     /// </summary>
     [JsonPropertyName("autorange")]
