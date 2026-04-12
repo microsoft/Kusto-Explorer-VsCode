@@ -1869,8 +1869,6 @@ export class PlotlyChartProvider implements IChartProvider {
         const xColumn = this.get2dXColumn(data, options);
         if (!xColumn) return undefined;
 
-        const yColumns = this.get2dYColumns(data, options, xColumn);
-
         if (options.title) builder = builder.withTitle(options.title);
         if (options.xTitle) builder = builder.setXAxisTitle(options.xTitle);
         if (options.yTitle) builder = builder.setYAxisTitle(options.yTitle);
@@ -1893,6 +1891,16 @@ export class PlotlyChartProvider implements IChartProvider {
         builder = applyCommonOptions(builder, options);
 
         const sort = isTimeChartType(options.type);
+
+        // Detect series (dimension) columns: columns that split data into separate traces.
+        // These are non-numeric, non-X columns that are not explicitly listed as yColumns.
+        const seriesCols = this.getSeriesColumns(data, options, xColumn);
+
+        if (seriesCols.length > 0) {
+            return this.build2dChartWithSeries(builder, data, options, xColumn, seriesCols, sort, addTrace);
+        }
+
+        const yColumns = this.get2dYColumns(data, options, xColumn);
         let traceIndex = 0;
         for (const valueColumn of yColumns) {
             const result = this.get2DChartData(data, xColumn, valueColumn, sort);
@@ -1903,6 +1911,112 @@ export class PlotlyChartProvider implements IChartProvider {
         }
 
         return builder;
+    }
+
+    /**
+     * Build a 2D chart where data is pivoted by one or more series (dimension) columns.
+     * Each unique combination of series values becomes a separate trace.
+     */
+    private build2dChartWithSeries(
+        builder: PlotlyChartBuilder,
+        data: ResultTable,
+        options: ChartOptions,
+        xColumn: ColumnRef,
+        seriesCols: ColumnRef[],
+        sort: boolean,
+        addTrace: (b: PlotlyChartBuilder, x: unknown[], y: number[], name: string, yAxis: string | undefined, traceIndex: number) => PlotlyChartBuilder,
+    ): PlotlyChartBuilder {
+        // Find numeric Y columns (exclude X and series columns)
+        const excluded = new Set([xColumn.index, ...seriesCols.map(c => c.index)]);
+        const yColumns: ColumnRef[] = [];
+        if (options.yColumns) {
+            for (const name of options.yColumns) {
+                const ref = getColumnRef(data, name);
+                if (ref && !excluded.has(ref.index)) yColumns.push(ref);
+            }
+        } else {
+            for (let i = 0; i < data.columns.length; i++) {
+                if (!excluded.has(i)) {
+                    const ref = getColumnRefByIndex(data, i);
+                    if (ref && isNumericType(ref.column.type)) yColumns.push(ref);
+                }
+            }
+        }
+        if (yColumns.length === 0) return builder;
+
+        // Group rows by series key
+        const groups = new Map<string, number[]>();
+        for (let rowIdx = 0; rowIdx < data.rows.length; rowIdx++) {
+            const row = data.rows[rowIdx];
+            if (!row) continue;
+            const key = seriesCols.map(c => String(row[c.index] ?? '')).join(' \u2014 ');
+            let list = groups.get(key);
+            if (!list) { list = []; groups.set(key, list); }
+            list.push(rowIdx);
+        }
+
+        let traceIndex = 0;
+        for (const [seriesName, rowIndices] of groups) {
+            for (const yCol of yColumns) {
+                if (!isNumericType(yCol.column.type)) continue;
+                let x: unknown[] = [];
+                let y: number[] = [];
+                for (const ri of rowIndices) {
+                    const row = data.rows[ri];
+                    if (!row) continue;
+                    const xv = row[xColumn.index];
+                    const yv = row[yCol.index];
+                    if (xv != null && yv != null) {
+                        x.push(xv);
+                        y.push(sanitizeDouble(toNumber(yv)));
+                    }
+                }
+                if (x.length === 0) continue;
+
+                if (sort && x.length > 1) {
+                    const indices = x.map((_, i) => i);
+                    indices.sort((a, b) => {
+                        const va = x[a], vb = x[b];
+                        if (va == null && vb == null) return 0;
+                        if (va == null) return -1;
+                        if (vb == null) return 1;
+                        return va < vb ? -1 : va > vb ? 1 : 0;
+                    });
+                    x = indices.map(i => x[i]!);
+                    y = indices.map(i => y[i]!);
+                }
+
+                const name = yColumns.length > 1 ? `${seriesName} - ${yCol.column.name}` : seriesName;
+                builder = addTrace(builder, x, y, name, undefined, traceIndex);
+                traceIndex++;
+            }
+        }
+
+        return builder;
+    }
+
+    /**
+     * Returns series (dimension) columns: non-numeric, non-X columns used to split data into traces.
+     * Uses options.series if specified, otherwise auto-detects string columns (Kusto.Explorer behavior).
+     */
+    private getSeriesColumns(data: ResultTable, options: ChartOptions, xColumn: ColumnRef): ColumnRef[] {
+        if (options.series && options.series.length > 0) {
+            return options.series
+                .map(name => getColumnRef(data, name))
+                .filter((c): c is ColumnRef => c !== undefined);
+        }
+        // Auto-detect: non-X, non-numeric columns that aren't in yColumns
+        const ySet = new Set(options.yColumns ?? []);
+        const result: ColumnRef[] = [];
+        for (let i = 0; i < data.columns.length; i++) {
+            if (i === xColumn.index) continue;
+            const col = data.columns[i];
+            if (col && !isNumericType(col.type) && !isDateTimeType(col.type) && !ySet.has(col.name)) {
+                const ref = getColumnRefByIndex(data, i);
+                if (ref) result.push(ref);
+            }
+        }
+        return result;
     }
 
     // ─── Data Column Helpers ────────────────────────────────────────────
