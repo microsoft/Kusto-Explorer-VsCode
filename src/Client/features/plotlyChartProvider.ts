@@ -1373,6 +1373,9 @@ export class PlotlyChartProvider implements IChartProvider {
             case ChartType.Sankey:
                 builder = this.buildSankeyChart(data, options);
                 break;
+            case ChartType.TimePivot:
+                builder = this.buildTimePivotChart(data, options);
+                break;
             default:
                 return undefined;
         }
@@ -1852,6 +1855,106 @@ export class PlotlyChartProvider implements IChartProvider {
 
         builder = builder.addSankeyTrace(nodeLabels, linkSources, linkTargets, linkValues, valueColumn.column.name);
 
+        if (options.showLegend === false) builder = builder.hideLegend();
+        builder = applyCommonOptions(builder, options);
+
+        return builder;
+    }
+
+    // ─── TimePivot ──────────────────────────────────────────────────────
+
+    private buildTimePivotChart(data: ResultTable, options: ChartOptions): PlotlyChartBuilder | undefined {
+        if (data.rows.length === 0 || data.columns.length < 2) return undefined;
+
+        // Find datetime columns — look for a start/end pair or a single timestamp.
+        const dateTimeCols: ColumnRef[] = [];
+        for (let i = 0; i < data.columns.length; i++) {
+            const col = data.columns[i];
+            if (col && isDateTimeType(col.type)) {
+                const ref = getColumnRefByIndex(data, i);
+                if (ref) dateTimeCols.push(ref);
+            }
+        }
+        if (dateTimeCols.length === 0) return undefined;
+
+        const startCol = dateTimeCols[0]!;
+        const endCol = dateTimeCols.length > 1 ? dateTimeCols[1]! : undefined;
+
+        // Determine the series/pivot column from options.series or first string column.
+        let seriesCol: ColumnRef | undefined;
+        if (options.series && options.series.length > 0) {
+            seriesCol = getColumnRef(data, options.series[0]!);
+        }
+        if (!seriesCol) {
+            for (let i = 0; i < data.columns.length; i++) {
+                const col = data.columns[i];
+                if (col && !isDateTimeType(col.type) && !isNumericType(col.type)) {
+                    seriesCol = getColumnRefByIndex(data, i);
+                    break;
+                }
+            }
+        }
+        if (!seriesCol) return undefined;
+
+        // Extract column values.
+        const seriesValues = getColumnValues(data, seriesCol);
+        const startValues = getColumnValues(data, startCol);
+        const endValues = endCol ? getColumnValues(data, endCol) : undefined;
+
+        // Collect unique categories preserving insertion order.
+        const categories: string[] = [];
+        const categorySet = new Set<string>();
+        for (const val of seriesValues) {
+            const label = String(val ?? '');
+            if (!categorySet.has(label)) {
+                categorySet.add(label);
+                categories.push(label);
+            }
+        }
+
+        let builder = new PlotlyChartBuilder();
+        if (options.title) builder = builder.withTitle(options.title);
+
+        const hasEndTime = endValues !== undefined;
+
+        // One trace per category, rendered as horizontal bar segments (Gantt)
+        // when start+end are available, or as scatter markers otherwise.
+        for (const category of categories) {
+            const xData: unknown[] = [];
+            const yData: unknown[] = [];
+
+            for (let i = 0; i < data.rows.length; i++) {
+                if (String(seriesValues[i] ?? '') !== category) continue;
+                const start = startValues[i];
+                if (start == null) continue;
+
+                if (hasEndTime) {
+                    const end = endValues![i];
+                    if (end == null) continue;
+                    // Line segment from start to end, null to break between events.
+                    xData.push(start, end, null);
+                    yData.push(category, category, null);
+                } else {
+                    xData.push(start);
+                    yData.push(category);
+                }
+            }
+
+            if (xData.length > 0) {
+                const trace: ScatterTrace = {
+                    type: 'scatter',
+                    x: xData,
+                    y: yData,
+                    mode: hasEndTime ? PlotlyScatterModes.Lines : PlotlyScatterModes.Markers,
+                    name: category,
+                    line: hasEndTime ? { width: 16 } : undefined,
+                };
+                builder = builder.addTrace(trace);
+            }
+        }
+
+        if (options.xTitle) builder = builder.setXAxisTitle(options.xTitle);
+        if (options.yTitle) builder = builder.setYAxisTitle(options.yTitle);
         if (options.showLegend === false) builder = builder.hideLegend();
         builder = applyCommonOptions(builder, options);
 
