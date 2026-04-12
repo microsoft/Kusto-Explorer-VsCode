@@ -1892,9 +1892,10 @@ export class PlotlyChartProvider implements IChartProvider {
         if (options.showLegend === false) builder = builder.hideLegend();
         builder = applyCommonOptions(builder, options);
 
+        const sort = isTimeChartType(options.type);
         let traceIndex = 0;
         for (const valueColumn of yColumns) {
-            const result = this.get2DChartData(data, xColumn, valueColumn);
+            const result = this.get2DChartData(data, xColumn, valueColumn, sort);
             if (result) {
                 builder = addTrace(builder, result.x, result.y, valueColumn.column.name, undefined, traceIndex);
                 traceIndex++;
@@ -1949,14 +1950,29 @@ export class PlotlyChartProvider implements IChartProvider {
         return result;
     }
 
-    private get2DChartData(data: ResultTable, xColumn: ColumnRef, yColumn: ColumnRef): { x: unknown[]; y: number[] } | undefined {
+    private get2DChartData(data: ResultTable, xColumn: ColumnRef, yColumn: ColumnRef, sort = false): { x: unknown[]; y: number[] } | undefined {
         if (!isNumericType(yColumn.column.type)) return undefined;
 
         const xValues = getColumnValues(data, xColumn);
         const yValues = getColumnValues(data, yColumn);
 
         const trimmed = trimNullRows(xValues, yValues);
-        return { x: trimmed.x, y: convertToNumeric(trimmed.y) };
+        const x = trimmed.x;
+        const y = convertToNumeric(trimmed.y);
+
+        if (sort && x.length > 1) {
+            const indices = x.map((_, i) => i);
+            indices.sort((a, b) => {
+                const va = x[a], vb = x[b];
+                if (va == null && vb == null) return 0;
+                if (va == null) return -1;
+                if (vb == null) return 1;
+                return va < vb ? -1 : va > vb ? 1 : 0;
+            });
+            return { x: indices.map(i => x[i]!), y: indices.map(i => y[i]!) };
+        }
+
+        return { x, y };
     }
 }
 
