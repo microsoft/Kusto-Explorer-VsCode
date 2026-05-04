@@ -1,63 +1,74 @@
 # Kusto Explorer (VS Code Extension)
 
-- Edit, run and chart Kusto queries (KQL)
-- Explore databases and query results
-- Consult copilot to help create, run and diagnose your queries
+Edit, run, and chart Kusto queries (KQL) right from VS Code. Explore databases and results, and use Copilot to help author and diagnose your queries. Works on Windows, macOS, and Linux.
 
 ## Get Started
-- Select the Kusto Explorer icon in VS Code activity panel
-- Select a scratch pad document, or open/create a `.kql` file
-- Connect the query document to a Kusto cluster and database (if not already connected)
-	- Add a cluster connection in the *Connections* sidebar (if it does not yet exist)
-	- Select a database (below cluster item) to set the active cluster and database for the document
-- Write a Kusto query or consult copilot for help writing one
-- Press F5 to execute the query and view results in the results panel
-- Use the chart button in the results panel to create a chart for your result data
-- Edit the chart options to customize the chart type, axes, legend and more
-- Add another query to the document or edit the prior one, and run it too
-- Revisit prior results in the *History* sidebar
 
-## Connections (sidebar)
-- Keep a list of Kusto clusters you use to run queries
-- Select a cluster and database to be the defaults for your active query document
-- Explore the entities (tables, functions, etc) contained in each database
+1. Select the **Kusto Explorer** icon in the VS Code Activity Bar
+2. Use an existing scratch pad (already open) or create a `.kql` file
+3. Connect the query document to a Kusto cluster and database (while the document has focus):
+   - Add a cluster connection in the **Connections** sidebar (if it doesn't exist yet)
+   - Select a database to set the active cluster and database for the focused document
+4. Write a Kusto query (or ask Copilot for help)
+5. Press **F5** to execute the query and view results in the Results panel
+6. Use the chart button to visualize your results — customize chart type, axes, legend, and more
+7. Revisit prior queries and results in the **History** sidebar
 
-## Scratch Pads (sidebar)
-- Scratch pad documents for jotting down queries without needing to create and name a file
+## Features
 
-## History (sidebar)
- - Previously executed queries and their results that you can revisit
+### Query Editor
 
-## Query Editor (query set documents)
 - Edit queries like a source code document
 - Multiple independent queries in a single document, separated by a blank line
-- Intellisense (auto completions, hover tips)
+- IntelliSense (auto-completions, hover tips)
 - Formatting (pretty printing)
-- Goto definition and find all references for tables, functions, columns and more
+- Go-to-definition and find-all-references for tables, functions, columns, and more
 - Code actions and quick fixes for common issues and refactorings
 - Copy colorized query text to the clipboard for pasting into other documents
 
-## Results Panel (bottom panel)
-- Copy contents of cells or entire table to clipboard
+### Connections (sidebar)
+
+- Maintain a list of Kusto clusters you connect to
+- Select a cluster and database to set the defaults for your active query document
+- Explore database entities — tables, functions, materialized views, and more
+
+### Scratch Pads (sidebar)
+
+- Scratch pad documents for jotting down queries without creating and naming a file
+
+### History (sidebar)
+
+- Browse previously executed queries and their results
+- Re-open past results without re-running the query
+
+### Results Panel (bottom panel)
+
+- Copy cell contents or entire tables to the clipboard
 - Drag and drop a table into your document as a KQL `datatable` expression
-- Add a chart to the results or edit the one you have to customize the chart type, axes, legend and more
-- Save the data as a `.kqr` file (Kusto Query Results) to share with others
+- Add or edit a chart to visualize your results
+- Save data as a `.kqr` file (Kusto Query Results) to share with others
 
-## Chart Panel (document tab)
-- Edit the chart options to customize the chart type, axes, legend and more
-- Copy the chart as an image to clipboard for either light-mode or dark-mode pasting
-- Save chart and data as a `.kqr` file (Kusto Query Result)
+### Charts (document tab)
 
-## Results Viewer (document tab)
-- View saved `.kqr` files (chart, data and query in one view panel)
-- Add a chart if you don't have one yet
-- Edit the chart options to customize the chart type, axes, legend and more
-- Copy the chart as an image to clipboard for either light-mode or dark-mode pasting
-- Copy the data to clipboard just like results panel
+- Create and customize charts — choose chart type, axes, legend, and more
+- Copy the chart as an image (light-mode or dark-mode) to the clipboard
+- Save chart and data together as a `.kqr` file
+
+### Results Viewer (document tab)
+
+- Open saved `.kqr` files — chart, data, and query in a single view
+- Add or edit charts, copy data, and export images just like the Results panel
+
+### Copilot Integration
+
+- Ask Copilot to help write, run, and diagnose your Kusto queries
 
 ## Requirements
-- VS Code 1.9.0 or higher
 
-## Repository
-- To file issues, explore the sources or contribute: 
- [[GitHub Repository]](https://github.com/microsoft/Kusto-Explorer-VsCode) 
+- VS Code 1.90.0 or higher
+
+## Links
+
+- [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=ms-kusto.kusto-explorer-vscode) — install the extension
+- [GitHub Repository](https://github.com/microsoft/Kusto-Explorer-VsCode) — source code, issues, and contributions
+- [KQL Reference](https://learn.microsoft.com/en-us/kusto/query/) — Kusto Query Language documentation

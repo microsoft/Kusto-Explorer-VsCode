@@ -81,6 +81,23 @@ Only after that process has resulted in an "open for contribution" status, shoul
 
 If a pull request arrives without prior discussion for a change that needs design or roadmap approval, it may be closed and redirected to Discussions.
 
+## Repository Structure
+
+| Path | Description |
+|------|-------------|
+| `KustoExplorerVscode.slnx` | Visual Studio solution for the entire extension |
+| `src/Client` | TypeScript VS Code extension (UI, LSP client, extension features) |
+| `src/Server` | C# LSP server (Kusto parser integration, code services) |
+| `src/ServerTests` | C# tests for the server |
+
+### Client
+
+The Client is written in TypeScript and contains the VS Code extension code, including the UI components, LSP client and other extension features that are not dependent on the Kusto parser library.
+
+### Server
+
+The Server is written in C# to interact with the .NET version of the Kusto parser library for better typing performance. It primarily contains LSP handlers and redirects requests to the parser library's code services.
+
 ## Development Setup
 
 ### Prerequisites
@@ -110,19 +127,38 @@ npm run compile
 2. Press `F5` to launch the Extension Development Host
 3. Open a `.kql` file to activate the extension
 
-### Packaging the Extension
+## Debugging
+
+### Debugging the Client
+
+1. Open the `src/Client` folder in VS Code
+2. Build the client using the `compile` task in the **NPM SCRIPTS** explorer panel
+3. Build the server using `build-debug-server` in the same panel
+4. Press **F5** to launch the Extension Development Host with debugging enabled
+
+### Debugging the Server
+
+1. Launch the extension in debug mode (above) — the server starts automatically
+2. Attach to the server process:
+   - **Visual Studio** — open `KustoExplorerVscode.slnx` and attach to the `dotnet.exe` process for the extension
+   - **VS Code** — from the repo root, run `Debug: Attach to a .NET 5+ or .NET Core process` (`Ctrl+Shift+P`) and select the `Server` process
+
+## Packaging
 
 ```bash
+# Requires vsce: npm install -g @vscode/vsce
 cd src/Client
 npm run package
 ```
 
 This will create a `.vsix` file that can be installed in VS Code.
 
-## Project Structure
+### Manual Install / Uninstall
 
-- `src/Server/` - Vs Code extension Server (C#)
-- `src/Client/` - VS Code extension Client (TypeScript)
+```bash
+code --install-extension <vsix-file> [--force]
+code --uninstall-extension ms-kusto.kusto-explorer-vscode
+```
 
 ## Reporting Issues
 

@@ -1,65 +1,51 @@
-﻿# Kusto Explorer for VS Code
+# Kusto Explorer for VS Code
 
-- Edit, run and chart Kusto queries (KQL)
-- Explore databases and query results
-- Consult copilot to help create, run and diagnose your queries
-- Works just like the Kusto Explorer desktop app and Azure Data Explorer
-- Runs on Windows, Mac and Linux
+[![VS Marketplace](https://img.shields.io/badge/VS%20Marketplace-Kusto%20Explorer-blue?logo=visual-studio-code)](https://marketplace.visualstudio.com/items?itemName=ms-kusto.kusto-explorer-vscode)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## Downloading and Using the Extension
+Edit, run, and chart Kusto queries (KQL) right from VS Code. Explore databases and results, and use Copilot to help author and diagnose your queries. Works on Windows, macOS, and Linux.
 
-- Install from within VS Code: [Kusto Explorer]
-- Or download VSIX from [GitHub Releases](https://github.com/microsoft/Kusto-Explorer-VsCode/releases)
-- [How to Use the Extension](src/Client/README.md)
+## Features
 
-----
+- **Query editor** — IntelliSense, formatting, go-to-definition, find references, code actions and quick fixes
+- **Results panel** — browse tabular results, copy cells, drag-and-drop as `datatable` expressions
+- **Charts** — create and customize charts from query results; copy as image or save as `.kqr` files
+- **Database explorer** — browse clusters, databases, tables, functions and more
+- **Copilot integration** — ask Copilot to help create, run and diagnose your queries
+- **Scratch pads** — jot down queries without creating files
+- **Query history** — revisit previously executed queries and results
 
-## Using this Repository
+## Install
 
-- KustoExplorerVscode.slnx - Visual Studio solution file for the entire extension
-- src/Client - TypeScript vscode extension
-- src/Server - C# LSP Server
-- src/ServerTests - C# Tests for the server codebase
+**[Install from the VS Code Marketplace →](https://marketplace.visualstudio.com/items?itemName=ms-kusto.kusto-explorer-vscode)**
 
-### Client
-The Client is written in TypeScript and contains the VS Code extension code, including the UI components, LSP client and other extension features.
-that are not dependent on the Kusto parser library.
+Or search for **"Kusto Explorer"** in the VS Code Extensions view (`Ctrl+Shift+X`).
 
-### Server
-The Server is written in C# to interact with the dotnet version of the Kusto parser library for better typing performance.
-It primarily contains just LSP handlers and redirects requests to the parser library's code services.
-Some other custom features are also implemented here, but eventually most of these will move out to be handled by the client with the goal of leaving only code service related features in the server codebase.
+Alternatively, download the `.vsix` from [GitHub Releases](https://github.com/microsoft/Kusto-Explorer-VsCode/releases) and install manually:
 
-### Debugging the Client
-1. Open `src\Client` folder in VS Code
-2. Build the client side using `compile` command in explorer panel `NPM SCRIPTS`
-3. Build the server side using `build-debug-server` in explorer panel `NPM SCRIPTS`
-4. Press F5 to launch the extension in a new VS Code window with debugging enabled
+```sh
+code --install-extension <vsix-file>
+```
 
-### Debugging the Server
-1. Run the extension in debug mode as described above, which will also launch the server in debug mode
-2. Attach to the server process using one of the following:
-   - **Visual Studio**: Open `KustoExplorerVscode.slnx` and attach to the dotnet.exe process associated with the extension
-   - **VS Code**: Open the repository root folder, then run command `Debug: Attach to a .NET 5+ or .NET Core process` (Ctrl+Shift+P) and select the `Server` process
+## Getting Started
 
-### Creating the VSIX installer
+For a full walkthrough of the extension's features, see the [User Guide](src/Client/README.md).
 
-1. Must have vsce installed (npm install -g @vscode/vsce)
-2. run `npm run package` on command line within `src/Client` folder to build the .vsix file
-
-### Installing the VSIX manually
-
-Run `code --install-extension <vsix file> [--force]` on command line.
-
-### Uninstalling the extension manually
-
-Run `code --uninstall-extension Microsoft.kusto-explorer-vscode` on command line.
+1. Select the **Kusto Explorer** icon in the VS Code Activity Bar
+2. Use an existing scratch pad (already open) or create a `.kql` file
+3. Connect the query document to a Kusto cluster and database (while the document has focus):
+   - Add a cluster connection in the **Connections** sidebar (if it doesn't exist yet)
+   - Select a database to set the active cluster and database for the focused document
+4. Write a Kusto query (or ask Copilot for help)
+5. Press **F5** to execute the query and view results in the Results panel
+6. Use the chart button to visualize your results — customize chart type, axes, legend, and more
+7. Revisit prior queries and results in the **History** sidebar
 
 ----
 
 ## Contributing
 
-This project welcomes contributions and suggestions. Please see [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+This project welcomes contributions and suggestions. For development setup, debugging, and build instructions, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 This project has adopted the [Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/).
 For more information see the [Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/) or
