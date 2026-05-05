@@ -173,12 +173,13 @@ public class ConnectionManager : IConnectionManager
             EditString query,
             ImmutableDictionary<string, string>? options = null,
             ImmutableDictionary<string, string>? parameters = null,
+            string? clientRequestId = null,
             CancellationToken cancellationToken = default
             )
         {
             try
             {
-                var properties = CreateClientRequestProperties(options ?? ImmutableDictionary<string, string>.Empty, parameters ?? ImmutableDictionary<string, string>.Empty);
+                var properties = CreateClientRequestProperties(options ?? ImmutableDictionary<string, string>.Empty, parameters ?? ImmutableDictionary<string, string>.Empty, clientRequestId);
                 var resultReader = (Kusto.Language.KustoCode.GetKind(query) == CodeKinds.Command)
                     ? await this.AdminProvider.ExecuteControlCommandAsync(this.Database, query, properties).ConfigureAwait(false)
                     : await this.QueryProvider.ExecuteQueryAsync(this.Database, query, properties, cancellationToken).ConfigureAwait(false);
@@ -220,7 +221,7 @@ public class ConnectionManager : IConnectionManager
         {
             try
             {
-                var results = await ExecuteAsync(query, options, parameters, cancellationToken).ConfigureAwait(false);
+                var results = await ExecuteAsync(query, options, parameters, cancellationToken: cancellationToken).ConfigureAwait(false);
                 if (results.Tables != null
                     && results.Tables.Count > 0)
                 {
@@ -244,9 +245,14 @@ public class ConnectionManager : IConnectionManager
 
         private ClientRequestProperties CreateClientRequestProperties(
             ImmutableDictionary<string, string> options,
-            ImmutableDictionary<string, string> parameters)
+            ImmutableDictionary<string, string> parameters,
+            string? clientRequestId)
         {
             var crp = new ClientRequestProperties();
+            if (!string.IsNullOrWhiteSpace(clientRequestId))
+            {
+                crp.ClientRequestId = clientRequestId;
+            }
 
             foreach (var kvp in options)
             {

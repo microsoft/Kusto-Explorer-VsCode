@@ -49,6 +49,7 @@ public interface IConnection
         EditString query,
         ImmutableDictionary<string, string>? options = null,
         ImmutableDictionary<string, string>? parameters = null,
+        string? clientRequestId = null,
         CancellationToken cancellationToken = default
         );
 

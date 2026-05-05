@@ -43,6 +43,12 @@ export interface HistoryEntry {
     database?: string;
     /** Number of result rows. */
     rowCount?: number;
+    /** ISO 8601 timestamp of when query execution started. */
+    executionStartedAt?: string;
+    /** Query execution duration measured by the client, in milliseconds. */
+    executionDurationMs?: number;
+    /** Client request id used for the Kusto query. */
+    clientRequestId?: string;
     /** FNV-1a hash of the server-minified query text, for CodeLens and result lookup. */
     queryHash?: number;
 }
@@ -251,6 +257,9 @@ export class HistoryManager {
             ...(resultData.cluster !== undefined && { cluster: resultData.cluster }),
             ...(resultData.database !== undefined && { database: resultData.database }),
             rowCount,
+            ...(resultData.executionStartedAt !== undefined && { executionStartedAt: resultData.executionStartedAt }),
+            ...(resultData.executionDurationMs !== undefined && { executionDurationMs: resultData.executionDurationMs }),
+            ...(resultData.clientRequestId !== undefined && { clientRequestId: resultData.clientRequestId }),
             ...(queryHash !== undefined && { queryHash }),
         };
 

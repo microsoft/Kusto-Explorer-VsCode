@@ -125,13 +125,15 @@ public class QueryManager : IQueryManager
         string? databaseName,
         ImmutableDictionary<string, string> queryOptions,
         ImmutableDictionary<string, string> queryParameters,
+        string? clientRequestId,
         CancellationToken cancellationToken)
     {
         var context = new ExecutionContext
         {
             Query = query,
             Options = queryOptions,
-            Parameters = queryParameters
+            Parameters = queryParameters,
+            ClientRequestId = clientRequestId
         };
 
         // handle any directives
@@ -225,6 +227,11 @@ public class QueryManager : IQueryManager
         public required ImmutableDictionary<string, string> Parameters { get; init; }
 
         /// <summary>
+        /// The client request id to use when executing the query.
+        /// </summary>
+        public string? ClientRequestId { get; init; }
+
+        /// <summary>
         ///  the name of the stored query result to store the result of this execution into.
         /// </summary>
         public string? StoredQueryResultName { get; init; }
@@ -257,7 +264,12 @@ public class QueryManager : IQueryManager
             query = query.ReplaceAt(0, query.Length, $"stored_query_result({KustoFacts.GetStringLiteral(context.StoredQueryResultName)})");
         }
 
-        var executeResult = await connection.ExecuteAsync(query, context.Options, context.Parameters, cancellationToken).ConfigureAwait(false);
+        var executeResult = await connection.ExecuteAsync(
+            query,
+            context.Options,
+            context.Parameters,
+            clientRequestId: context.ClientRequestId,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
         return new RunResult
         {
             Query = query,

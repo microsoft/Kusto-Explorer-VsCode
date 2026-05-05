@@ -2048,7 +2048,8 @@ public class Server : LspServer, ILogger, ISettingSource, IStorage
                 @params.Database,
                 queryOptions,
                 queryParameters,
-                cancellationToken)
+                clientRequestId: @params.ClientRequestId,
+                cancellationToken: cancellationToken)
                 .ConfigureAwait(false);
 
             if (runResult.Error != null)
@@ -2108,6 +2109,9 @@ public class Server : LspServer, ILogger, ISettingSource, IStorage
 
         [DataMember(Name = "maxRows")]
         public long? MaxRows { get; init; }
+
+        [DataMember(Name = "clientRequestId")]
+        public string? ClientRequestId { get; init; }
     }
 
     [DataContract]

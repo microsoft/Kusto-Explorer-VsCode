@@ -37,6 +37,7 @@ public interface IQueryManager
         string? databaseName,
         ImmutableDictionary<string, string> queryOptions,
         ImmutableDictionary<string, string> queryParameters,
+        string? clientRequestId,
         CancellationToken cancellationToken
         );
 }
