@@ -199,6 +199,13 @@ public class QueryManager : IQueryManager
         return new Diagnostic("KLS100", message).WithLocation(start, end - start);
     }
 
+    private static string? AddClientRequestIdSuffix(string? clientRequestId, string suffix)
+    {
+        return string.IsNullOrWhiteSpace(clientRequestId)
+            ? clientRequestId
+            : $"{clientRequestId};{suffix}";
+    }
+
     private record ExecutionContext
     {
         /// <summary>
@@ -251,6 +258,8 @@ public class QueryManager : IQueryManager
             };
         }
 
+        var executeClientRequestId = context.ClientRequestId;
+
         // handle stored query results
         if (context.StoredQueryResultName != null)
         {
@@ -262,13 +271,14 @@ public class QueryManager : IQueryManager
 
             // change query to retrieve the stored result
             query = query.ReplaceAt(0, query.Length, $"stored_query_result({KustoFacts.GetStringLiteral(context.StoredQueryResultName)})");
+            executeClientRequestId = AddClientRequestIdSuffix(context.ClientRequestId, "fetchStoredQueryResult");
         }
 
         var executeResult = await connection.ExecuteAsync(
             query,
             context.Options,
             context.Parameters,
-            clientRequestId: context.ClientRequestId,
+            clientRequestId: executeClientRequestId,
             cancellationToken: cancellationToken).ConfigureAwait(false);
         return new RunResult
         {
