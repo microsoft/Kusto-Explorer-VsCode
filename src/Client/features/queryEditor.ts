@@ -76,6 +76,21 @@ function getLastRunTitle(entry: HistoryEntry): string | undefined {
     return parts.join(', ');
 }
 
+function getQueryRangeKey(uri: string, range: Range): string {
+    return `${uri}:${range.start.line}:${range.start.character}:${range.end.line}:${range.end.character}`;
+}
+
+interface QueryRunIndicator {
+    key: string;
+    generation: number;
+}
+
+interface RunningQueryRangeState {
+    count: number;
+    startedAt: number;
+    generation: number;
+}
+
 // =============================================================================
 // Query Editor
 // =============================================================================
@@ -101,6 +116,8 @@ export class QueryEditor {
     private isQueryRunning = false;
     private queryRunningStartedAt = 0;
     private queryRunningGeneration = 0;
+    private queryRangeRunningGeneration = 0;
+    private readonly runningQueryRanges = new Map<string, RunningQueryRangeState>();
 
     constructor(
         context: vscode.ExtensionContext, 
@@ -177,7 +194,7 @@ export class QueryEditor {
             return;
         }
 
-        await this.beginQueryRun();
+        let queryRunIndicator: QueryRunIndicator | undefined;
         try {
             const uri = editor.document.uri.toString();
             const selection = queryRange ?? {
@@ -193,6 +210,8 @@ export class QueryEditor {
             if (!resolvedRange) {
                 return;
             }
+
+            queryRunIndicator = await this.beginQueryRun(uri, resolvedRange);
 
             // Extract the query text from the document
             const queryText = editor.document.getText(new vscode.Range(
@@ -260,24 +279,48 @@ export class QueryEditor {
         catch (error) 
         {
             vscode.window.showErrorMessage(`Failed to execute query: ${error}`);
-        }
+        } 
         finally
         {
-            await this.endQueryRun();
+            if (queryRunIndicator) {
+                await this.endQueryRun(queryRunIndicator);
+            }
         }
     }
 
-    private async beginQueryRun(): Promise<void> {
+    private async beginQueryRun(uri: string, range: Range): Promise<QueryRunIndicator> {
+        const startedAt = Date.now();
+        const key = getQueryRangeKey(uri, range);
+        let rangeState = this.runningQueryRanges.get(key);
+        if (!rangeState || rangeState.count === 0) {
+            rangeState = {
+                count: 0,
+                startedAt,
+                generation: ++this.queryRangeRunningGeneration
+            };
+            this.runningQueryRanges.set(key, rangeState);
+            this.codeLensProvider.setQueryRangeRunning(key, true);
+        }
+
+        rangeState.count++;
+
         if (this.runningQueryCount === 0) {
-            this.queryRunningStartedAt = Date.now();
+            this.queryRunningStartedAt = startedAt;
             this.queryRunningGeneration++;
         }
 
         this.runningQueryCount++;
         await this.setQueryRunning(this.runningQueryCount > 0);
+
+        return {
+            key,
+            generation: rangeState.generation
+        };
     }
 
-    private async endQueryRun(): Promise<void> {
+    private async endQueryRun(indicator: QueryRunIndicator): Promise<void> {
+        this.endQueryRangeRun(indicator);
+
         this.runningQueryCount = Math.max(0, this.runningQueryCount - 1);
         if (this.runningQueryCount > 0) {
             await this.setQueryRunning(true);
@@ -299,13 +342,41 @@ export class QueryEditor {
         }, delayMs);
     }
 
+    private endQueryRangeRun(indicator: QueryRunIndicator): void {
+        const rangeState = this.runningQueryRanges.get(indicator.key);
+        if (!rangeState || rangeState.generation !== indicator.generation) {
+            return;
+        }
+
+        rangeState.count = Math.max(0, rangeState.count - 1);
+        if (rangeState.count > 0) {
+            return;
+        }
+
+        const elapsedMs = Date.now() - rangeState.startedAt;
+        const delayMs = Math.max(0, MIN_QUERY_RUNNING_INDICATOR_MS - elapsedMs);
+        const clearRunningRange = () => {
+            const currentState = this.runningQueryRanges.get(indicator.key);
+            if (currentState?.count === 0 && currentState.generation === indicator.generation) {
+                this.runningQueryRanges.delete(indicator.key);
+                this.codeLensProvider.setQueryRangeRunning(indicator.key, false);
+            }
+        };
+
+        if (delayMs === 0) {
+            clearRunningRange();
+            return;
+        }
+
+        setTimeout(clearRunningRange, delayMs);
+    }
+
     private async setQueryRunning(isRunning: boolean): Promise<void> {
         if (this.isQueryRunning === isRunning) {
             return;
         }
 
         this.isQueryRunning = isRunning;
-        this.codeLensProvider.setQueryRunning(isRunning);
         if (isRunning) {
             this.queryRunningStatusBarItem.show();
         } else {
@@ -545,7 +616,7 @@ export class QueryEditor {
 class KustoCodeLensProvider implements vscode.CodeLensProvider {
     private _onDidChangeCodeLenses = new vscode.EventEmitter<void>();
     readonly onDidChangeCodeLenses = this._onDidChangeCodeLenses.event;
-    private isQueryRunning = false;
+    private readonly runningQueryRangeKeys = new Set<string>();
 
     constructor(private readonly server: IServer, private readonly history: HistoryManager) {
     }
@@ -554,12 +625,17 @@ class KustoCodeLensProvider implements vscode.CodeLensProvider {
         this._onDidChangeCodeLenses.fire();
     }
 
-    setQueryRunning(isRunning: boolean): void {
-        if (this.isQueryRunning === isRunning) {
+    setQueryRangeRunning(key: string, isRunning: boolean): void {
+        if (this.runningQueryRangeKeys.has(key) === isRunning) {
             return;
         }
 
-        this.isQueryRunning = isRunning;
+        if (isRunning) {
+            this.runningQueryRangeKeys.add(key);
+        } else {
+            this.runningQueryRangeKeys.delete(key);
+        }
+
         this.refresh();
     }
 
@@ -595,10 +671,11 @@ class KustoCodeLensProvider implements vscode.CodeLensProvider {
 
             // Hide Run, Format, and Results lenses in entity definition documents
             if (!isEntityDefinition) {
+                const isQueryRangeRunning = this.runningQueryRangeKeys.has(getQueryRangeKey(document.uri.toString(), range));
                 lenses.push(new vscode.CodeLens(vsRange, {
-                    title: this.isQueryRunning ? '$(sync~spin) Running' : '▶ Run',
-                    command: this.isQueryRunning ? 'msKustoExplorer.runQuery.running' : 'msKustoExplorer.runQuery',
-                    tooltip: this.isQueryRunning ? 'A Kusto query is running' : 'Run this query',
+                    title: isQueryRangeRunning ? '$(sync~spin) Running' : '▶ Run',
+                    command: isQueryRangeRunning ? 'msKustoExplorer.runQuery.running' : 'msKustoExplorer.runQuery',
+                    tooltip: isQueryRangeRunning ? 'This Kusto query is running' : 'Run this query',
                     arguments: [range.start.line, range.start.character, range.end.line, range.end.character]
                 }));
             }
