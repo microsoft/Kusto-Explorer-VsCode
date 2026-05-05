@@ -66,19 +66,11 @@ function formatDuration(durationMs: number): string {
     return `${minutes}m ${remainingSeconds}s`;
 }
 
-function formatClientRequestIdForTitle(clientRequestId: string): string {
-    const idPart = clientRequestId.split(';').pop() ?? clientRequestId;
-    return idPart.length > 8 ? idPart.slice(0, 8) : idPart;
-}
-
 function getLastRunTitle(entry: HistoryEntry): string | undefined {
     const timestamp = entry.executionStartedAt ?? entry.timestamp;
     const parts = [`Last run: ${formatRunTimestamp(timestamp)}`];
     if (entry.executionDurationMs !== undefined) {
         parts.push(`took: ${formatDuration(entry.executionDurationMs)}`);
-    }
-    if (entry.clientRequestId) {
-        parts.push(`cid: ${formatClientRequestIdForTitle(entry.clientRequestId)}`);
     }
 
     return parts.join(', ');
