@@ -48,6 +48,22 @@ describe('HistoryManager', () => {
         return new HistoryManager(createMockContext(tmpDir), server ?? new NullServer());
     }
 
+    function seedHistoryEntries(count: number): HistoryEntry[] {
+        const entries: HistoryEntry[] = Array.from({ length: count }, (_, i) => ({
+            fileName: `old-query-${i}.kqr`,
+            timestamp: new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString(),
+            queryPreview: `old query ${i}`,
+            rowCount: 1,
+        }));
+
+        for (const entry of entries) {
+            fs.writeFileSync(path.join(historyDir, entry.fileName), '', 'utf-8');
+        }
+
+        fs.writeFileSync(path.join(historyDir, 'history-index.json'), JSON.stringify(entries, null, 2), 'utf-8');
+        return entries;
+    }
+
     describe('constructor', () => {
         it('creates the history directory', () => {
             createManager();
@@ -138,19 +154,20 @@ describe('HistoryManager', () => {
 
         it('enforces max history entries and deletes old files', async () => {
             const mgr = createManager();
+            const seededEntries = seedHistoryEntries(200);
+            const oldestEntry = seededEntries[seededEntries.length - 1]!;
 
-            // Add 202 entries to exceed the 200 limit
-            for (let i = 0; i < 202; i++) {
-                await mgr.addHistoryEntry(makeResultData(`query${i}`, 1));
-            }
+            await mgr.addHistoryEntry(makeResultData('new query', 1));
 
             const entries = mgr.getEntries();
             expect(entries).toHaveLength(200);
 
-            // Most recent should be last added
-            expect(entries[0]!.queryPreview).toBe('query201');
+            // Most recent should be the newly added entry
+            expect(entries[0]!.queryPreview).toBe('new query');
+            expect(entries.some(e => e.fileName === oldestEntry.fileName)).toBe(false);
 
-            // Oldest entries' files should be deleted
+            // Oldest entry's file should be deleted
+            expect(fs.existsSync(path.join(historyDir, oldestEntry.fileName))).toBe(false);
             const kqrFiles = fs.readdirSync(historyDir).filter(f => f.endsWith('.kqr'));
             expect(kqrFiles).toHaveLength(200);
         });
