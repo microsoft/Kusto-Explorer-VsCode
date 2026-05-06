@@ -11,7 +11,7 @@ import { CancellationToken, Disposable, ExtensionContext } from 'vscode';
  */
 export interface IServer {
     // LSP Requests
-    runQuery(query: string, cluster?: string, database?: string, isReadOnly?: boolean, maxRows?: number): Promise<RunQueryResult | null>;
+    runQuery(query: string, cluster?: string, database?: string, isReadOnly?: boolean, maxRows?: number, clientRequestId?: string): Promise<RunQueryResult | null>;
     getQueryResultType(query: string, cluster: string, database?: string): Promise<GetQueryResultTypeResult | null>;
     getFunctionResultType(cluster: string, database: string, functionName: string): Promise<GetFunctionResultTypeResult | null>;
     getQueryRanges(uri: string): Promise<QueryRangesResult | null>;
@@ -75,11 +75,12 @@ export class Server implements IServer {
         cluster?: string,
         database?: string,
         isReadOnly?: boolean,
-        maxRows?: number
+        maxRows?: number,
+        clientRequestId?: string
     ): Promise<RunQueryResult | null> {
         return this.client.sendRequest<RunQueryResult | null>(
             'kusto/runQuery',
-            { query, cluster, database, isReadOnly, maxRows }
+            { query, cluster, database, isReadOnly, maxRows, clientRequestId }
         );
     }
 
@@ -540,6 +541,9 @@ export interface ResultData {
     query?: string;
     cluster?: string;
     database?: string;
+    executionStartedAt?: string;
+    executionDurationMs?: number;
+    clientRequestId?: string;
     tables: ResultTable[];
     charts?: ResultChart[];
 }

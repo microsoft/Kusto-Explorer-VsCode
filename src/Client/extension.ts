@@ -213,7 +213,10 @@ export async function activate(context: ExtensionContext)
     );
     const queryEditor = new QueryEditor(context, server, clipboard, historyManager, connectionManager, resultsViewer, historyPanel);
     context.subscriptions.push(
+        vscode.commands.registerCommand('msKustoExplorer.noop', () => {}),
         vscode.commands.registerCommand('msKustoExplorer.runQuery', (startLine?: number, startChar?: number, endLine?: number, endChar?: number) => queryEditor.runQuery(startLine, startChar, endLine, endChar)),
+        vscode.commands.registerCommand('msKustoExplorer.runQuery.running', () => {}),
+        vscode.commands.registerCommand('msKustoExplorer.copyClientRequestId', (clientRequestId?: string) => queryEditor.copyClientRequestId(clientRequestId)),
         vscode.commands.registerCommand('msKustoExplorer.copyQuery', (startLine?: number, startChar?: number, endLine?: number, endChar?: number) => queryEditor.copyQuery(startLine, startChar, endLine, endChar)),
         vscode.commands.registerCommand('msKustoExplorer.copyQueryTransparent', (startLine?: number, startChar?: number, endLine?: number, endChar?: number) => queryEditor.copyQuery(startLine, startChar, endLine, endChar, true)),
         vscode.commands.registerCommand('msKustoExplorer.formatQuery', (startLine?: number, startChar?: number, endLine?: number, endChar?: number) => queryEditor.formatQuery(startLine, startChar, endLine, endChar)),

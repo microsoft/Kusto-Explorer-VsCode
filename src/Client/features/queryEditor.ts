@@ -6,16 +6,20 @@
  */
 
 import * as vscode from 'vscode';
+import * as crypto from 'crypto';
 import type { IServer, SelectionRange, Range } from './server';
 import type { ConnectionManager } from './connectionManager';
 import { ResultsViewer } from './resultsViewer';
 import { HistoryManager } from './historyManager';
+import type { HistoryEntry } from './historyManager';
 import type { HistoryPanel } from './historyPanel';
 import type { IClipboard } from './clipboard';
 import type { ClipboardItem } from './clipboard';
 import { ENTITY_DEFINITION_SCHEME } from './entityDefinitionProvider';
 
 const PASTE_KIND = vscode.DocumentDropOrPasteEditKind.Text.append('kusto');
+const QUERY_RUNNING_CONTEXT_KEY = 'msKustoExplorer.queryRunning';
+const MIN_QUERY_RUNNING_INDICATOR_MS = 500;
 
 /**
  * Builds a SelectionRange from optional CodeLens arguments.
@@ -26,6 +30,66 @@ function rangeFromArgs(startLine?: number, startChar?: number, endLine?: number,
         return { start: { line: startLine, character: startChar }, end: { line: endLine, character: endChar } };
     }
     return undefined;
+}
+
+function createClientRequestId(): string {
+    return `KustoExplorerVsCode;${crypto.randomUUID()}`;
+}
+
+function formatRunTimestamp(timestamp: string): string {
+    const date = new Date(timestamp);
+    if (Number.isNaN(date.valueOf())) {
+        return timestamp;
+    }
+
+    return date.toLocaleString(undefined, {
+        month: 'short',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+        second: '2-digit'
+    });
+}
+
+function formatDuration(durationMs: number): string {
+    if (durationMs < 1000) {
+        return `${Math.max(0, Math.round(durationMs))}ms`;
+    }
+
+    const seconds = durationMs / 1000;
+    if (seconds < 60) {
+        return `${seconds >= 10 ? Math.round(seconds).toString() : seconds.toFixed(1)}s`;
+    }
+
+    const roundedSeconds = Math.round(seconds);
+    const minutes = Math.floor(roundedSeconds / 60);
+    const remainingSeconds = roundedSeconds % 60;
+    return `${minutes}m ${remainingSeconds}s`;
+}
+
+function getLastRunTitle(entry: HistoryEntry): string | undefined {
+    const timestamp = entry.executionStartedAt ?? entry.timestamp;
+    const parts = [`Last run: ${formatRunTimestamp(timestamp)}`];
+    if (entry.executionDurationMs !== undefined) {
+        parts.push(`took: ${formatDuration(entry.executionDurationMs)}`);
+    }
+
+    return parts.join(', ');
+}
+
+function getQueryRangeKey(uri: string, range: Range): string {
+    return `${uri}:${range.start.line}:${range.start.character}:${range.end.line}:${range.end.character}`;
+}
+
+interface QueryRunIndicator {
+    key: string;
+    generation: number;
+}
+
+interface RunningQueryRangeState {
+    count: number;
+    startedAt: number;
+    generation: number;
 }
 
 // =============================================================================
@@ -48,6 +112,13 @@ export class QueryEditor {
     private readonly resultsViewer: ResultsViewer;
     private readonly historyPanel: HistoryPanel;
     private readonly errorRangeDecoration: vscode.TextEditorDecorationType;
+    private readonly queryRunningStatusBarItem: vscode.StatusBarItem;
+    private runningQueryCount = 0;
+    private isQueryRunning = false;
+    private queryRunningStartedAt = 0;
+    private queryRunningGeneration = 0;
+    private queryRangeRunningGeneration = 0;
+    private readonly runningQueryRanges = new Map<string, RunningQueryRangeState>();
 
     constructor(
         context: vscode.ExtensionContext, 
@@ -71,6 +142,15 @@ export class QueryEditor {
                 margin: '0 4px 0 0'
             }
         });
+
+        this.queryRunningStatusBarItem = vscode.window.createStatusBarItem(
+            vscode.StatusBarAlignment.Left,
+            1
+        );
+        this.queryRunningStatusBarItem.text = '$(sync~spin) Running Kusto query';
+        this.queryRunningStatusBarItem.tooltip = 'A Kusto query is running';
+        context.subscriptions.push(this.queryRunningStatusBarItem);
+        void vscode.commands.executeCommand('setContext', QUERY_RUNNING_CONTEXT_KEY, false);
 
         // Register CodeLens provider for queries
         this.codeLensProvider = new KustoCodeLensProvider(this.server, this.history);
@@ -115,6 +195,7 @@ export class QueryEditor {
             return;
         }
 
+        let queryRunIndicator: QueryRunIndicator | undefined;
         try {
             const uri = editor.document.uri.toString();
             const selection = queryRange ?? {
@@ -131,6 +212,8 @@ export class QueryEditor {
                 return;
             }
 
+            queryRunIndicator = await this.beginQueryRun(uri, resolvedRange);
+
             // Extract the query text from the document
             const queryText = editor.document.getText(new vscode.Range(
                 resolvedRange.start.line, resolvedRange.start.character,
@@ -141,7 +224,17 @@ export class QueryEditor {
             const connection = await this.connections.getDocumentConnection(uri);
 
             // Run the query via server.runQuery (text-based, returns ResultData)
-            const runResult = await this.server.runQuery(queryText, connection?.cluster, connection?.database, true);
+            const executionStartedAt = new Date().toISOString();
+            const startedAtMs = Date.now();
+            const clientRequestId = createClientRequestId();
+            const runResult = await vscode.window.withProgress(
+                {
+                    location: vscode.ProgressLocation.Window,
+                    title: 'Running Kusto query...'
+                },
+                () => this.server.runQuery(queryText, connection?.cluster, connection?.database, true, undefined, clientRequestId)
+            );
+            const executionDurationMs = Date.now() - startedAtMs;
 
             // If the result includes a connection string for an unknown cluster, add it as a server
             if (runResult?.connection || runResult?.cluster) {
@@ -169,6 +262,10 @@ export class QueryEditor {
             }
             else if (runResult?.data)
             {
+                runResult.data.executionStartedAt = executionStartedAt;
+                runResult.data.executionDurationMs = executionDurationMs;
+                runResult.data.clientRequestId = clientRequestId;
+
                 // Add to history and use the history file as backing for the singleton view
                 const historyUri = await this.history.addHistoryEntry(runResult.data);
                 this.resultsViewer.setSingletonViewBackingUri(historyUri);
@@ -183,7 +280,120 @@ export class QueryEditor {
         catch (error) 
         {
             vscode.window.showErrorMessage(`Failed to execute query: ${error}`);
+        } 
+        finally
+        {
+            if (queryRunIndicator) {
+                await this.endQueryRun(queryRunIndicator);
+            }
         }
+    }
+
+    private async beginQueryRun(uri: string, range: Range): Promise<QueryRunIndicator> {
+        const startedAt = Date.now();
+        const key = getQueryRangeKey(uri, range);
+        let rangeState = this.runningQueryRanges.get(key);
+        if (!rangeState || rangeState.count === 0) {
+            rangeState = {
+                count: 0,
+                startedAt,
+                generation: ++this.queryRangeRunningGeneration
+            };
+            this.runningQueryRanges.set(key, rangeState);
+            this.codeLensProvider.setQueryRangeRunning(key, true);
+        }
+
+        rangeState.count++;
+
+        if (this.runningQueryCount === 0) {
+            this.queryRunningStartedAt = startedAt;
+            this.queryRunningGeneration++;
+        }
+
+        this.runningQueryCount++;
+        await this.setQueryRunning(this.runningQueryCount > 0);
+
+        return {
+            key,
+            generation: rangeState.generation
+        };
+    }
+
+    private async endQueryRun(indicator: QueryRunIndicator): Promise<void> {
+        this.endQueryRangeRun(indicator);
+
+        this.runningQueryCount = Math.max(0, this.runningQueryCount - 1);
+        if (this.runningQueryCount > 0) {
+            await this.setQueryRunning(true);
+            return;
+        }
+
+        const generation = this.queryRunningGeneration;
+        const elapsedMs = Date.now() - this.queryRunningStartedAt;
+        const delayMs = Math.max(0, MIN_QUERY_RUNNING_INDICATOR_MS - elapsedMs);
+        if (delayMs === 0) {
+            await this.setQueryRunning(false);
+            return;
+        }
+
+        setTimeout(() => {
+            if (this.runningQueryCount === 0 && this.queryRunningGeneration === generation) {
+                void this.setQueryRunning(false);
+            }
+        }, delayMs);
+    }
+
+    private endQueryRangeRun(indicator: QueryRunIndicator): void {
+        const rangeState = this.runningQueryRanges.get(indicator.key);
+        if (!rangeState || rangeState.generation !== indicator.generation) {
+            return;
+        }
+
+        rangeState.count = Math.max(0, rangeState.count - 1);
+        if (rangeState.count > 0) {
+            return;
+        }
+
+        const elapsedMs = Date.now() - rangeState.startedAt;
+        const delayMs = Math.max(0, MIN_QUERY_RUNNING_INDICATOR_MS - elapsedMs);
+        const clearRunningRange = () => {
+            const currentState = this.runningQueryRanges.get(indicator.key);
+            if (currentState?.count === 0 && currentState.generation === indicator.generation) {
+                this.runningQueryRanges.delete(indicator.key);
+                this.codeLensProvider.setQueryRangeRunning(indicator.key, false);
+            }
+        };
+
+        if (delayMs === 0) {
+            clearRunningRange();
+            return;
+        }
+
+        setTimeout(clearRunningRange, delayMs);
+    }
+
+    private async setQueryRunning(isRunning: boolean): Promise<void> {
+        if (this.isQueryRunning === isRunning) {
+            return;
+        }
+
+        this.isQueryRunning = isRunning;
+        if (isRunning) {
+            this.queryRunningStatusBarItem.show();
+        } else {
+            this.queryRunningStatusBarItem.hide();
+        }
+
+        await vscode.commands.executeCommand('setContext', QUERY_RUNNING_CONTEXT_KEY, isRunning);
+    }
+
+    async copyClientRequestId(clientRequestId?: string): Promise<void> {
+        if (!clientRequestId) {
+            vscode.window.showWarningMessage('No client request id available to copy.');
+            return;
+        }
+
+        await this.clipboard.copyText(clientRequestId);
     }
 
     /**
@@ -407,12 +617,27 @@ export class QueryEditor {
 class KustoCodeLensProvider implements vscode.CodeLensProvider {
     private _onDidChangeCodeLenses = new vscode.EventEmitter<void>();
     readonly onDidChangeCodeLenses = this._onDidChangeCodeLenses.event;
+    private readonly runningQueryRangeKeys = new Set<string>();
 
     constructor(private readonly server: IServer, private readonly history: HistoryManager) {
     }
 
     refresh(): void {
         this._onDidChangeCodeLenses.fire();
+    }
+
+    setQueryRangeRunning(key: string, isRunning: boolean): void {
+        if (this.runningQueryRangeKeys.has(key) === isRunning) {
+            return;
+        }
+
+        if (isRunning) {
+            this.runningQueryRangeKeys.add(key);
+        } else {
+            this.runningQueryRangeKeys.delete(key);
+        }
+
+        this.refresh();
     }
 
     async provideCodeLenses(document: vscode.TextDocument): Promise<vscode.CodeLens[]> {
@@ -447,10 +672,11 @@ class KustoCodeLensProvider implements vscode.CodeLensProvider {
 
             // Hide Run, Format, and Results lenses in entity definition documents
             if (!isEntityDefinition) {
+                const isQueryRangeRunning = this.runningQueryRangeKeys.has(getQueryRangeKey(document.uri.toString(), range));
                 lenses.push(new vscode.CodeLens(vsRange, {
-                    title: '▶ Run',
-                    command: 'msKustoExplorer.runQuery',
-                    tooltip: 'Run this query',
+                    title: isQueryRangeRunning ? '$(sync~spin) Running' : '▶ Run',
+                    command: isQueryRangeRunning ? 'msKustoExplorer.runQuery.running' : 'msKustoExplorer.runQuery',
+                    tooltip: isQueryRangeRunning ? 'This Kusto query is running' : 'Run this query',
                     arguments: [range.start.line, range.start.character, range.end.line, range.end.character]
                 }));
             }
@@ -470,14 +696,33 @@ class KustoCodeLensProvider implements vscode.CodeLensProvider {
                     arguments: [range.start.line, range.start.character, range.end.line, range.end.character]
                 }));
 
+                const lastRun = await this.history.getMatchingEntry(queryText);
+
                 // Only show Results lens if there is a history entry for this query
-                if (await this.history.hasEntryForQuery(queryText)) {
+                if (lastRun) {
                     lenses.push(new vscode.CodeLens(vsRange, {
                         title: '📊 Results',
                         command: 'msKustoExplorer.showResults',
                         tooltip: 'Show results from history for this query',
                         arguments: [range.start.line, range.start.character]
                     }));
+
+                    lenses.push(new vscode.CodeLens(vsRange, {
+                        title: getLastRunTitle(lastRun) ?? 'Last run',
+                        command: 'msKustoExplorer.noop',
+                        tooltip: lastRun.clientRequestId
+                            ? `Client request id: ${lastRun.clientRequestId}`
+                            : 'Last query execution details'
+                    }));
+
+                    if (lastRun.clientRequestId) {
+                        lenses.push(new vscode.CodeLens(vsRange, {
+                            title: '$(copy) Copy CID',
+                            command: 'msKustoExplorer.copyClientRequestId',
+                            tooltip: 'Copy the last run client request id',
+                            arguments: [lastRun.clientRequestId]
+                        }));
+                    }
                 }
             }
         }

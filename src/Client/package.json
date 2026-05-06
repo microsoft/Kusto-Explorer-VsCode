@@ -113,6 +113,11 @@
         "icon": "$(play)"
       },
       {
+        "command": "msKustoExplorer.runQuery.running",
+        "title": "Running Query",
+        "icon": "$(sync~spin)"
+      },
+      {
         "command": "msKustoExplorer.addServer",
         "title": "Add Connection",
         "icon": "$(add)"
@@ -307,6 +312,12 @@
       }
     ],
     "menus": {
+      "commandPalette": [
+        {
+          "command": "msKustoExplorer.runQuery.running",
+          "when": "false"
+        }
+      ],
       "view/title": [
         {
           "command": "msKustoExplorer.addServer",
@@ -504,7 +515,12 @@
       "editor/title": [
         {
           "command": "msKustoExplorer.runQuery",
-          "when": "editorLangId == kusto && !msKustoExplorer.isEntityDefinition",
+          "when": "editorLangId == kusto && !msKustoExplorer.isEntityDefinition && !msKustoExplorer.queryRunning",
+          "group": "navigation@1"
+        },
+        {
+          "command": "msKustoExplorer.runQuery.running",
+          "when": "editorLangId == kusto && !msKustoExplorer.isEntityDefinition && msKustoExplorer.queryRunning",
           "group": "navigation@1"
         },
         {
