@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
+using System.Reflection;
+using Kusto.Data;
 using Kusto.Vscode;
 
 namespace Tests.Features;
@@ -268,6 +270,173 @@ public class ConnectionManagerTests
 
         Assert.AreEqual("cluster2.kusto.windows.net", newConnection.Cluster);
         Assert.AreEqual("db3", newConnection.Database);
+    }
+
+    #endregion
+
+    #region IAuthenticationProvider Tests
+
+    private sealed class CountingAuthProvider : IAuthenticationProvider
+    {
+        public int CallCount;
+        public string? LastClusterUri;
+        public string? Token = "test-access-token";
+
+        public Task<string?> GetAccessTokenAsync(string clusterUri, CancellationToken cancellationToken)
+        {
+            CallCount++;
+            LastClusterUri = clusterUri;
+            return Task.FromResult(Token);
+        }
+    }
+
+    /// <summary>
+    /// Reads the named private field from the internal <c>KustoConnection</c>
+    /// wrapper. Used to verify how the connection has wired up authentication
+    /// without actually executing a query against a real cluster.
+    /// </summary>
+    private static KustoConnectionStringBuilder? GetBuilderField(IConnection connection, string fieldName)
+    {
+        var field = connection.GetType().GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.IsNotNull(field, $"Expected KustoConnection to have a private {fieldName} field.");
+        return field!.GetValue(connection) as KustoConnectionStringBuilder;
+    }
+
+    private static KustoConnectionStringBuilder? GetFallbackBuilder(IConnection connection)
+    {
+        var prop = connection.GetType().GetProperty("FallbackBuilder", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.IsNotNull(prop, "Expected KustoConnection to expose an internal FallbackBuilder property.");
+        return prop!.GetValue(connection) as KustoConnectionStringBuilder;
+    }
+
+    private static void MarkFallbackRequired(ConnectionManager manager, string clusterHostName)
+    {
+        var method = typeof(ConnectionManager).GetMethod("MarkFallbackRequired", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.IsNotNull(method, "Expected ConnectionManager to expose an internal MarkFallbackRequired method.");
+        method!.Invoke(manager, new object[] { clusterHostName });
+    }
+
+    [TestMethod]
+    public void PrimaryBuilder_NeverHasTokenProviderCallback()
+    {
+        // The primary builder always uses Kusto.Data's native authentication
+        // path (WAM/MSAL/SSO) - the host-bridged auth provider is only used
+        // as a fallback after native auth fails. So even when an
+        // IAuthenticationProvider is registered, the primary builder must
+        // not have a TokenProviderCallback installed.
+        var auth = new CountingAuthProvider();
+        var manager = new ConnectionManager(auth);
+
+        var connection = manager.GetOrAddConnection("https://mycluster.kusto.windows.net");
+
+        var primary = GetBuilderField(connection, "_primaryBuilder");
+        Assert.IsNotNull(primary);
+        Assert.IsNull(primary!.TokenProviderCallback,
+            "Primary builder must use native authentication, not host-bridged.");
+        Assert.AreEqual(0, auth.CallCount,
+            "Provider must not be invoked while the cluster is on the native auth path.");
+    }
+
+    [TestMethod]
+    public void FallbackBuilder_AvailableWhenAuthProviderIsSupplied()
+    {
+        var auth = new CountingAuthProvider();
+        var manager = new ConnectionManager(auth);
+
+        var connection = manager.GetOrAddConnection("https://mycluster.kusto.windows.net");
+
+        var fallback = GetFallbackBuilder(connection);
+        Assert.IsNotNull(fallback, "Fallback builder should be available when an IAuthenticationProvider is supplied.");
+        Assert.IsNotNull(fallback!.TokenProviderCallback,
+            "Fallback builder must route authentication through the host-supplied provider.");
+    }
+
+    [TestMethod]
+    public async Task FallbackBuilder_CallbackInvokesProvider()
+    {
+        var auth = new CountingAuthProvider();
+        var manager = new ConnectionManager(auth);
+
+        var connection = manager.GetOrAddConnection("https://mycluster.kusto.windows.net");
+        var fallback = GetFallbackBuilder(connection);
+        Assert.IsNotNull(fallback);
+
+        // Simulate Kusto.Data asking the fallback builder for a token.
+        var token = await fallback!.TokenProviderCallback!();
+
+        Assert.AreEqual(1, auth.CallCount, "Provider should be called exactly once per token request.");
+        Assert.AreEqual("https://mycluster.kusto.windows.net", auth.LastClusterUri);
+        Assert.AreEqual("test-access-token", token);
+    }
+
+    [TestMethod]
+    public async Task FallbackBuilder_NullToken_CallbackThrows()
+    {
+        var auth = new CountingAuthProvider { Token = null };
+        var manager = new ConnectionManager(auth);
+
+        var connection = manager.GetOrAddConnection("https://mycluster.kusto.windows.net");
+        var fallback = GetFallbackBuilder(connection);
+        Assert.IsNotNull(fallback);
+
+        await Assert.ThrowsExactlyAsync<InvalidOperationException>(
+            async () => await fallback!.TokenProviderCallback!());
+        Assert.AreEqual(1, auth.CallCount);
+    }
+
+    [TestMethod]
+    public void FallbackBuilder_NotAvailableWithoutAuthProvider()
+    {
+        var manager = new ConnectionManager();
+
+        var connection = manager.GetOrAddConnection("https://mycluster.kusto.windows.net");
+
+        var fallback = GetFallbackBuilder(connection);
+        Assert.IsNull(fallback,
+            "Without an IAuthenticationProvider there is no fallback builder.");
+    }
+
+    [TestMethod]
+    public void FallbackBuilder_NotAvailableWhenConnectionStringHasExplicitAuth()
+    {
+        var auth = new CountingAuthProvider();
+        var manager = new ConnectionManager(auth);
+
+        var connection = manager.GetOrAddConnection(
+            "Data Source=https://mycluster.kusto.windows.net;AppClientId=client;AppKey=secret;Authority Id=tenant");
+
+        var fallback = GetFallbackBuilder(connection);
+        Assert.IsNull(fallback,
+            "Explicit credentials in the connection string suppress the fallback path.");
+        Assert.AreEqual(0, auth.CallCount);
+    }
+
+    [TestMethod]
+    public void ActiveBuilder_SwitchesToFallback_WhenClusterIsMarked()
+    {
+        var auth = new CountingAuthProvider();
+        var manager = new ConnectionManager(auth);
+
+        var connection = manager.GetOrAddConnection("https://mycluster.kusto.windows.net");
+
+        // Before marking: the active builder is the primary (native auth).
+        var beforeBuilder = GetBuilderField(connection, "_primaryBuilder");
+        Assert.IsNotNull(beforeBuilder);
+        var activeBefore = connection.GetType()
+            .GetProperty("Builder", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(connection) as KustoConnectionStringBuilder;
+        Assert.AreSame(beforeBuilder, activeBefore,
+            "Before fallback is required, the active builder is the primary builder.");
+
+        // Simulate the auth-failure retry path marking the cluster.
+        MarkFallbackRequired(manager, "mycluster.kusto.windows.net");
+
+        var fallback = GetFallbackBuilder(connection);
+        var activeAfter = connection.GetType()
+            .GetProperty("Builder", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(connection) as KustoConnectionStringBuilder;
+        Assert.AreSame(fallback, activeAfter,
+            "After the cluster is marked, the active builder is the fallback builder.");
     }
 
     #endregion

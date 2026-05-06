@@ -16,7 +16,7 @@ using Lsp.Common;
 
 namespace Kusto.Vscode;
 
-public class Server : LspServer, ILogger, ISettingSource, IStorage
+public class Server : LspServer, ILogger, ISettingSource, IStorage, IAuthenticationProvider
 {
     private readonly ILogger _logger;
     private readonly ISettingSource _settingSource;
@@ -71,7 +71,14 @@ public class Server : LspServer, ILogger, ISettingSource, IStorage
         _settingSource = this;
         _storage = this;
         _optionsManager = new OptionsManager(_settingSource);
-        _connectionManager = new ConnectionManager();
+        // When running as a VS Code extension server ("vscode" arg passed by the
+        // client), route AAD authentication through the host so that VS Code's
+        // built-in Microsoft account UI can be used instead of Kusto.Data's
+        // in-process MSAL/WAM flow. This avoids "non-interactive environment"
+        // failures on remote-SSH/WSL/Codespaces and gives users a single place
+        // (the Accounts gear) to manage their sign-in.
+        var tokenProvider = _args.Contains("vscode") ? (IAuthenticationProvider)this : null;
+        _connectionManager = new ConnectionManager(tokenProvider);
         var schemaSource = new ServerSchemaSource(_connectionManager, _logger);
         _schemaManager = new SchemaManager(schemaSource, _storage, _logger);
         _symbolManager = new SymbolManager(_schemaManager, _optionsManager, _logger);
@@ -2622,6 +2629,47 @@ public class Server : LspServer, ILogger, ISettingSource, IStorage
 
         [DataMember(Name = "data")]
         public T? Data { get; set; }
+    }
+
+    #endregion
+
+    #region ITokenProvider
+
+    /// <summary>
+    /// Asks the client (e.g. VS Code) to acquire an AAD access token for the
+    /// given cluster. The client uses its own authentication UI / cache so the
+    /// server process never has to host any sign-in interaction.
+    /// </summary>
+    /// <remarks>
+    /// A safety timeout caps how long we wait for the client. The user may
+    /// legitimately take a while to interact with a sign-in prompt, but if
+    /// the client process is hung or has dropped the request entirely we
+    /// don't want to keep a server-side query stuck forever. Five minutes
+    /// is comfortably longer than any normal sign-in flow.
+    /// </remarks>
+    async Task<string?> IAuthenticationProvider.GetAccessTokenAsync(string clusterUri, CancellationToken cancellationToken)
+    {
+        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
+        var result = await SendRequestAsync<GetAuthenticationTokenResult?>(
+            "kusto/getAuthenticationToken",
+            new GetAuthenticationTokenParams { ClusterUri = clusterUri },
+            linkedCts.Token).ConfigureAwait(false);
+        return result?.AccessToken;
+    }
+
+    [DataContract]
+    public class GetAuthenticationTokenParams
+    {
+        [DataMember(Name = "clusterUri")]
+        public required string ClusterUri { get; set; }
+    }
+
+    [DataContract]
+    public class GetAuthenticationTokenResult
+    {
+        [DataMember(Name = "accessToken")]
+        public string? AccessToken { get; set; }
     }
 
     #endregion
