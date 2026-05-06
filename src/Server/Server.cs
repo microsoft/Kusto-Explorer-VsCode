@@ -2633,7 +2633,7 @@ public class Server : LspServer, ILogger, ISettingSource, IStorage, IAuthenticat
 
     #endregion
 
-    #region ITokenProvider
+    #region IAuthenticationProvider
 
     /// <summary>
     /// Asks the client (e.g. VS Code) to acquire an AAD access token for the
