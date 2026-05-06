@@ -132,14 +132,17 @@ public class StringMappedSetting<T> : Setting<T>
     {
         _map = valueMapping;
 
-        // Build reverse map; if multiple string keys map to the same value (aliases),
-        // the first key encountered becomes the canonical name for serialization.
+        // Build reverse map; when multiple string keys map to the same value (aliases),
+        // the ordinally-smallest key is chosen as the canonical name. This keeps
+        // serialization deterministic regardless of dictionary enumeration order
+        // (which can vary across runs due to randomized string hashing).
         var reverseBuilder = ImmutableDictionary.CreateBuilder<T, string>();
         foreach (var kv in valueMapping)
         {
-            if (!reverseBuilder.ContainsKey(kv.Value))
+            if (!reverseBuilder.TryGetValue(kv.Value, out var existing)
+                || string.CompareOrdinal(kv.Key, existing) < 0)
             {
-                reverseBuilder.Add(kv.Value, kv.Key);
+                reverseBuilder[kv.Value] = kv.Key;
             }
         }
         _reverseMap = reverseBuilder.ToImmutable();

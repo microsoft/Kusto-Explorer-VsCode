@@ -89,6 +89,18 @@ public class OptionsManagerTests
     }
 
     [TestMethod]
+    public void PlacementStyle_CanonicalSerializationIsDeterministic()
+    {
+        // When multiple keys map to the same value (e.g. "asIs" and "none" both
+        // → PlacementStyle.None), the ordinally-smallest key is chosen for
+        // serialization. This must be stable regardless of dictionary enumeration order.
+        var settings = ImmutableDictionary<string, object?>.Empty;
+        var updated = FormatSettings.PipeOperatorPlacementStyle.WithValue(settings, PlacementStyle.None);
+        Assert.IsTrue(updated.TryGetValue(FormatSettings.PipeOperatorPlacementStyle.Name, out var serialized));
+        Assert.AreEqual("asIs", serialized);
+    }
+
+    [TestMethod]
     public void SettingsChanged_AcceptsLegacyNonePlacementValue()
     {
         var settingSource = new TestSettingSource();
