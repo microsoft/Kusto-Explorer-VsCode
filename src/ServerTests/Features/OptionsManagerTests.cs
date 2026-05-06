@@ -81,6 +81,53 @@ public class OptionsManagerTests
     }
 
     [TestMethod]
+    public void PlacementStyle_LegacyNoneAliasResolvesToNone()
+    {
+        // Legacy "none" string value in user settings should still map to PlacementStyle.None
+        Assert.AreEqual(PlacementStyle.None, FormatSettings.PlacementStyles["none"]);
+        Assert.AreEqual(PlacementStyle.None, FormatSettings.PlacementStyles["asIs"]);
+    }
+
+    [TestMethod]
+    public void SettingsChanged_AcceptsLegacyNonePlacementValue()
+    {
+        var settingSource = new TestSettingSource();
+        // Simulate an older user setting using the literal string "none"
+        settingSource.SetSetting<object?>(
+            new Setting<object?>(FormatSettings.PipeOperatorPlacementStyle.Name, null),
+            "none");
+
+        var optionsManager = new OptionsManager(settingSource);
+
+        var eventFired = new ManualResetEventSlim(false);
+        optionsManager.OptionsChanged += (sender, args) => eventFired.Set();
+
+        settingSource.RaiseSettingsChanged();
+
+        Assert.IsTrue(eventFired.Wait(TimeSpan.FromSeconds(5)));
+        Assert.AreEqual(PlacementStyle.None, optionsManager.FormattingOptions.PipeOperatorStyle);
+    }
+
+    [TestMethod]
+    public void SettingsChanged_AcceptsAsIsPlacementValue()
+    {
+        var settingSource = new TestSettingSource();
+        settingSource.SetSetting<object?>(
+            new Setting<object?>(FormatSettings.PipeOperatorPlacementStyle.Name, null),
+            "asIs");
+
+        var optionsManager = new OptionsManager(settingSource);
+
+        var eventFired = new ManualResetEventSlim(false);
+        optionsManager.OptionsChanged += (sender, args) => eventFired.Set();
+
+        settingSource.RaiseSettingsChanged();
+
+        Assert.IsTrue(eventFired.Wait(TimeSpan.FromSeconds(5)));
+        Assert.AreEqual(PlacementStyle.None, optionsManager.FormattingOptions.PipeOperatorStyle);
+    }
+
+    [TestMethod]
     public void SettingsChanged_UpdatesFormattingOptions_BrackettingStyle()
     {
         var settingSource = new TestSettingSource();
@@ -257,6 +304,90 @@ public class OptionsManagerTests
         Assert.AreEqual(PlacementStyle.NewLine, optionsManager.FormattingOptions.ExpressionStyle);
         Assert.AreEqual(PlacementStyle.NewLine, optionsManager.FormattingOptions.StatementStyle);
         Assert.AreEqual(PlacementStyle.Smart, optionsManager.FormattingOptions.SemicolonStyle);
+    }
+
+    [TestMethod]
+    public void SettingsChanged_UpdatesAllSpacingStyles()
+    {
+        var settingSource = new TestSettingSource();
+        settingSource.SetSetting(FormatSettings.GeneralSpacing, SpacingStyle.AsIs);
+        settingSource.SetSetting(FormatSettings.PrefixOperatorSpacing, SpacingStyle.One);
+        settingSource.SetSetting(FormatSettings.ParenthesizedExpressionSpacing, SpacingStyle.One);
+        settingSource.SetSetting(FormatSettings.ArgumentListSpacing, SpacingStyle.One);
+        settingSource.SetSetting(FormatSettings.EmptyArgumentListSpacing, SpacingStyle.AsIs);
+        settingSource.SetSetting(FormatSettings.ParameterListSpacing, SpacingStyle.One);
+        settingSource.SetSetting(FormatSettings.EmptyParameterListSpacing, SpacingStyle.AsIs);
+        settingSource.SetSetting(FormatSettings.JsonArraySpacing, SpacingStyle.One);
+        settingSource.SetSetting(FormatSettings.EmptyJsonArraySpacing, SpacingStyle.AsIs);
+        settingSource.SetSetting(FormatSettings.JsonObjectSpacing, SpacingStyle.One);
+        settingSource.SetSetting(FormatSettings.EmptyJsonObjectSpacing, SpacingStyle.AsIs);
+        settingSource.SetSetting(FormatSettings.DataTableValueSpacing, SpacingStyle.One);
+        settingSource.SetSetting(FormatSettings.EmptyDataTableValueSpacing, SpacingStyle.AsIs);
+        settingSource.SetSetting(FormatSettings.FunctionBodySpacing, SpacingStyle.Minimal);
+        settingSource.SetSetting(FormatSettings.EmptyFunctionBodySpacing, SpacingStyle.Minimal);
+        settingSource.SetSetting(FormatSettings.BeforeFunctionBodySpacing, SpacingStyle.Minimal);
+        settingSource.SetSetting(FormatSettings.BeforeParameterListSpacing, SpacingStyle.One);
+        settingSource.SetSetting(FormatSettings.BeforeArgumentListSpacing, SpacingStyle.One);
+        settingSource.SetSetting(FormatSettings.BeforeDataTableValueSpacing, SpacingStyle.Minimal);
+
+        var optionsManager = new OptionsManager(settingSource);
+
+        var eventFired = new ManualResetEventSlim(false);
+        optionsManager.OptionsChanged += (sender, args) => eventFired.Set();
+
+        settingSource.RaiseSettingsChanged();
+
+        Assert.IsTrue(eventFired.Wait(TimeSpan.FromSeconds(5)));
+        var f = optionsManager.FormattingOptions;
+        Assert.AreEqual(SpacingStyle.AsIs, f.GeneralSpacing);
+        Assert.AreEqual(SpacingStyle.One, f.PrefixOperatorSpacing);
+        Assert.AreEqual(SpacingStyle.One, f.ParenthesizedExpressionSpacing);
+        Assert.AreEqual(SpacingStyle.One, f.ArgumentListSpacing);
+        Assert.AreEqual(SpacingStyle.AsIs, f.EmptyArgumentListSpacing);
+        Assert.AreEqual(SpacingStyle.One, f.ParameterListSpacing);
+        Assert.AreEqual(SpacingStyle.AsIs, f.EmptyParameterListSpacing);
+        Assert.AreEqual(SpacingStyle.One, f.JsonArraySpacing);
+        Assert.AreEqual(SpacingStyle.AsIs, f.EmptyJsonArraySpacing);
+        Assert.AreEqual(SpacingStyle.One, f.JsonObjectSpacing);
+        Assert.AreEqual(SpacingStyle.AsIs, f.EmptyJsonObjectSpacing);
+        Assert.AreEqual(SpacingStyle.One, f.DataTableValueSpacing);
+        Assert.AreEqual(SpacingStyle.AsIs, f.EmptyDataTableValueSpacing);
+        Assert.AreEqual(SpacingStyle.Minimal, f.FunctionBodySpacing);
+        Assert.AreEqual(SpacingStyle.Minimal, f.EmptyFunctionBodySpacing);
+        Assert.AreEqual(SpacingStyle.Minimal, f.BeforeFunctionBodySpacing);
+        Assert.AreEqual(SpacingStyle.One, f.BeforeParameterListSpacing);
+        Assert.AreEqual(SpacingStyle.One, f.BeforeArgumentListSpacing);
+        Assert.AreEqual(SpacingStyle.Minimal, f.BeforeDataTableValueSpacing);
+    }
+
+    [TestMethod]
+    public void SettingsChanged_UpdatesAllDualSpacingStyles()
+    {
+        var settingSource = new TestSettingSource();
+        settingSource.SetSetting(FormatSettings.InfixOperatorSpacing, DualSpacingStyle.Neither);
+        settingSource.SetSetting(FormatSettings.PipeOperatorSpacing, DualSpacingStyle.After);
+        settingSource.SetSetting(FormatSettings.CommaSpacing, DualSpacingStyle.Both);
+        settingSource.SetSetting(FormatSettings.ColonSpacing, DualSpacingStyle.Both);
+        settingSource.SetSetting(FormatSettings.AssignmentSpacing, DualSpacingStyle.Neither);
+        settingSource.SetSetting(FormatSettings.RangeOperatorSpacing, DualSpacingStyle.Neither);
+        settingSource.SetSetting(FormatSettings.SemicolonSpacing, DualSpacingStyle.Both);
+
+        var optionsManager = new OptionsManager(settingSource);
+
+        var eventFired = new ManualResetEventSlim(false);
+        optionsManager.OptionsChanged += (sender, args) => eventFired.Set();
+
+        settingSource.RaiseSettingsChanged();
+
+        Assert.IsTrue(eventFired.Wait(TimeSpan.FromSeconds(5)));
+        var f = optionsManager.FormattingOptions;
+        Assert.AreEqual(DualSpacingStyle.Neither, f.InfixOperatorSpacing);
+        Assert.AreEqual(DualSpacingStyle.After, f.PipeOperatorSpacing);
+        Assert.AreEqual(DualSpacingStyle.Both, f.CommaSpacing);
+        Assert.AreEqual(DualSpacingStyle.Both, f.ColonSpacing);
+        Assert.AreEqual(DualSpacingStyle.Neither, f.AssignmentSpacing);
+        Assert.AreEqual(DualSpacingStyle.Neither, f.RangeOperatorSpacing);
+        Assert.AreEqual(DualSpacingStyle.Both, f.SemicolonSpacing);
     }
 
     #endregion

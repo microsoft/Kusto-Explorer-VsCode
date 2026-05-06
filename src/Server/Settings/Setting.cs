@@ -131,7 +131,18 @@ public class StringMappedSetting<T> : Setting<T>
         : base(name, defaultValue)
     {
         _map = valueMapping;
-        _reverseMap = valueMapping.ToImmutableDictionary(kv => kv.Value, kv => kv.Key);
+
+        // Build reverse map; if multiple string keys map to the same value (aliases),
+        // the first key encountered becomes the canonical name for serialization.
+        var reverseBuilder = ImmutableDictionary.CreateBuilder<T, string>();
+        foreach (var kv in valueMapping)
+        {
+            if (!reverseBuilder.ContainsKey(kv.Value))
+            {
+                reverseBuilder.Add(kv.Value, kv.Key);
+            }
+        }
+        _reverseMap = reverseBuilder.ToImmutable();
     }
 
     public override bool TryGetValue(ImmutableDictionary<string, object?> settings, out T value)

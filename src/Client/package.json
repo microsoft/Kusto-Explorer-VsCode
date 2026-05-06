@@ -1081,7 +1081,129 @@
           "msKustoExplorer.format.insertMissingTokens": {
             "type": "boolean",
             "default": false,
-            "description": "Automatically add missing tokens (e.g., semicolons) when formatting"
+            "description": "Automatically add missing tokens (e.g., semicolons)"
+          },
+          "msKustoExplorer.format.generalSpacing": {
+            "type": "string",
+            "enum": ["asIs", "minimal", "one"],
+            "default": "one",
+            "description": "Whitespace between adjacent tokens when no other spacing rule applies"
+          },
+          "msKustoExplorer.format.prefixOperatorSpacing": {
+            "type": "string",
+            "enum": ["asIs", "minimal", "one"],
+            "default": "minimal",
+            "description": "Whitespace between a prefix unary operator and its operand: -a, - a"
+          },
+          "msKustoExplorer.format.infixOperatorSpacing": {
+            "type": "string",
+            "enum": ["asIs", "neither", "before", "after", "both"],
+            "default": "both",
+            "description": "Whitespace before and after a binary operator and its operands: a+b, a +b, a+ b, or a + b"
+          },
+          "msKustoExplorer.format.assignmentSpacing": {
+            "type": "string",
+            "enum": ["asIs", "neither", "before", "after", "both"],
+            "default": "both",
+            "description": "Whitespace before and after assignment operators (=):  a=b, a= b, a =b, a = b"
+          },
+          "msKustoExplorer.format.rangeOperatorSpacing": {
+            "type": "string",
+            "enum": ["asIs", "neither", "before", "after", "both"],
+            "default": "both",
+            "description": "Whitespace before and/or after the range operator (..): a..b, a ..b, a.. b, or a .. b"
+          },
+          "msKustoExplorer.format.commaSpacing": {
+            "type": "string",
+            "enum": ["asIs", "neither", "before", "after", "both"],
+            "default": "after",
+            "description": "Whitespace before and/or after commas: a,b | a, b | a ,b | a , b"
+          },
+          "msKustoExplorer.format.colonSpacing": {
+            "type": "string",
+            "enum": ["asIs", "neither", "before", "after", "both"],
+            "default": "after",
+            "description": "Whitespace before and/or after colons: a:b, a: b, a :b, a : b"
+          },
+          "msKustoExplorer.format.pipeOperatorPlacementStyle": {
+            "type": "string",
+            "enum": [
+              "asIs",
+              "none",
+              "newLine",
+              "smart"
+            ],
+            "enumDescriptions": [
+              "Leave placement as-is",
+              "Legacy alias for 'asIs'",
+              "Place on a new line",
+              "Place on a new line when appropriate"
+            ],
+            "default": "smart",
+            "description": "Whether each query pipe operator (|) starts on a new line"
+          },
+          "msKustoExplorer.format.pipeOperatorSpacing": {
+            "type": "string",
+            "enum": ["asIs", "neither", "before", "after", "both"],
+            "default": "both",
+            "description": "Whitespace before and/or after the pipe operator (|): a|b, a |b, a| b, or a | b"
+          },
+          "msKustoExplorer.format.semicolonPlacementStyle": {
+            "type": "string",
+            "enum": [
+              "asIs",
+              "none",
+              "newLine",
+              "smart"
+            ],
+            "enumDescriptions": [
+              "Leave placement as-is",
+              "Legacy alias for 'asIs'",
+              "Place on a new line",
+              "Place on a new line when appropriate"
+            ],
+            "default": "asIs",
+            "description": "Whether each semicolon starts on a new line"
+          },
+          "msKustoExplorer.format.semicolonSpacing": {
+            "type": "string",
+            "enum": ["asIs", "neither", "before", "after", "both"],
+            "default": "after",
+            "description": "Whitespace before and/or after semicolons: a;b, a; b, a ;b, a ; b"
+          },
+          "msKustoExplorer.format.statementListPlacementStyle": {
+            "type": "string",
+            "enum": [
+              "asIs",
+              "none",
+              "newLine",
+              "smart"
+            ],
+            "enumDescriptions": [
+              "Leave placement as-is",
+              "Legacy alias for 'asIs'",
+              "Place on a new line",
+              "Place on a new line when appropriate"
+            ],
+            "default": "smart",
+            "description": "Whether each statement in a statement list starts on a new line"
+          },
+          "msKustoExplorer.format.expressionListPlacementStyle": {
+            "type": "string",
+            "enum": [
+              "asIs",
+              "none",
+              "newLine",
+              "smart"
+            ],
+            "enumDescriptions": [
+              "Leave placement as-is",
+              "Legacy alias for 'asIs'",
+              "Place on a new line",
+              "Place on a new line when appropriate"
+            ],
+            "default": "smart",
+            "description": "Whether each expression in an expression list starts on a new line"
           },
           "msKustoExplorer.format.bracketStyle": {
             "type": "string",
@@ -1091,7 +1213,7 @@
               "diagonal"
             ],
             "default": "vertical",
-            "description": "How brackets are styled when formatting"
+            "markdownDescription": "How opening and closing brackets are placed across lines.\n- `none`: keep on same line as content\n- `vertical`: both brackets on their own lines\n- `diagonal`: opening on same line as content, closing on its own line"
           },
           "msKustoExplorer.format.schemaBracketStyle": {
             "type": "string",
@@ -1101,7 +1223,7 @@
               "diagonal"
             ],
             "default": "vertical",
-            "description": "How schema brackets are styled when formatting"
+            "description": "How schema brackets are placed across lines"
           },
           "msKustoExplorer.format.dataTableBracketStyle": {
             "type": "string",
@@ -1111,7 +1233,25 @@
               "diagonal"
             ],
             "default": "vertical",
-            "description": "How data table brackets are styled when formatting"
+            "description": "How data table brackets are placed across lines"
+          },
+          "msKustoExplorer.format.beforeDataTableValueSpacing": {
+            "type": "string",
+            "enum": ["asIs", "minimal", "one"],
+            "default": "one",
+            "description": "Whitespace before a data table value's opening bracket"
+          },
+          "msKustoExplorer.format.dataTableValueSpacing": {
+            "type": "string",
+            "enum": ["asIs", "minimal", "one"],
+            "default": "minimal",
+            "description": "Whitespace inside a non-empty data table value's brackets"
+          },
+          "msKustoExplorer.format.emptyDataTableValueSpacing": {
+            "type": "string",
+            "enum": ["asIs", "minimal", "one"],
+            "default": "minimal",
+            "description": "Whitespace between brackets of an empty data table value"
           },
           "msKustoExplorer.format.functionBodyBracketStyle": {
             "type": "string",
@@ -1121,7 +1261,25 @@
               "diagonal"
             ],
             "default": "vertical",
-            "description": "How function body braces are styled when formatting"
+            "description": "How function body braces are placed across lines"
+          },
+          "msKustoExplorer.format.beforeFunctionBodySpacing": {
+            "type": "string",
+            "enum": ["asIs", "minimal", "one"],
+            "default": "one",
+            "description": "Whitespace before a function body's opening brace"
+          },
+          "msKustoExplorer.format.functionBodySpacing": {
+            "type": "string",
+            "enum": ["asIs", "minimal", "one"],
+            "default": "one",
+            "description": "Whitespace inside a non-empty function body's braces"
+          },
+          "msKustoExplorer.format.emptyFunctionBodySpacing": {
+            "type": "string",
+            "enum": ["asIs", "minimal", "one"],
+            "default": "one",
+            "description": "Whitespace between braces of an empty function body"
           },
           "msKustoExplorer.format.functionParameterBracketStyle": {
             "type": "string",
@@ -1131,7 +1289,25 @@
               "diagonal"
             ],
             "default": "none",
-            "description": "How parameter list parentheses are styled when formatting"
+            "description": "How parameter list parentheses are placed across lines"
+          },
+          "msKustoExplorer.format.beforeParameterListSpacing": {
+            "type": "string",
+            "enum": ["asIs", "minimal", "one"],
+            "default": "minimal",
+            "description": "Whitespace before a parameter list's opening parenthesis"
+          },
+          "msKustoExplorer.format.parameterListSpacing": {
+            "type": "string",
+            "enum": ["asIs", "minimal", "one"],
+            "default": "minimal",
+            "description": "Whitespace inside a non-empty parameter list's parentheses"
+          },
+          "msKustoExplorer.format.emptyParameterListSpacing": {
+            "type": "string",
+            "enum": ["asIs", "minimal", "one"],
+            "default": "minimal",
+            "description": "Whitespace between parentheses of an empty parameter list"
           },
           "msKustoExplorer.format.functionArgumentBracketStyle": {
             "type": "string",
@@ -1141,47 +1317,55 @@
               "diagonal"
             ],
             "default": "none",
-            "description": "How argument list parentheses are styled when formatting"
+            "description": "How argument list parentheses are placed across lines"
           },
-          "msKustoExplorer.format.pipeOperatorPlacementStyle": {
+          "msKustoExplorer.format.beforeArgumentListSpacing": {
             "type": "string",
-            "enum": [
-              "none",
-              "newLine",
-              "smart"
-            ],
-            "default": "smart",
-            "description": "How query pipe operators (|) are placed when formatting"
+            "enum": ["asIs", "minimal", "one"],
+            "default": "minimal",
+            "description": "Whitespace before an argument list's opening parenthesis"
           },
-          "msKustoExplorer.format.expressionListPlacementStyle": {
+          "msKustoExplorer.format.argumentListSpacing": {
             "type": "string",
-            "enum": [
-              "none",
-              "newLine",
-              "smart"
-            ],
-            "default": "smart",
-            "description": "How expressions in a list are placed when formatting"
+            "enum": ["asIs", "minimal", "one"],
+            "default": "minimal",
+            "description": "Whitespace inside a non-empty argument list's parentheses"
           },
-          "msKustoExplorer.format.statementListPlacementStyle": {
+          "msKustoExplorer.format.emptyArgumentListSpacing": {
             "type": "string",
-            "enum": [
-              "none",
-              "newLine",
-              "smart"
-            ],
-            "default": "smart",
-            "description": "How statements in a list are placed when formatting"
+            "enum": ["asIs", "minimal", "one"],
+            "default": "minimal",
+            "description": "Whitespace between parentheses of an empty argument list"
           },
-          "msKustoExplorer.format.semicolonPlacementStyle": {
+          "msKustoExplorer.format.parenthesizedExpressionSpacing": {
             "type": "string",
-            "enum": [
-              "none",
-              "newLine",
-              "smart"
-            ],
-            "default": "none",
-            "description": "How semicolons are placed when formatting"
+            "enum": ["asIs", "minimal", "one"],
+            "default": "minimal",
+            "description": "Whitespace inside a parenthesized expression's parentheses"
+          },
+          "msKustoExplorer.format.jsonArraySpacing": {
+            "type": "string",
+            "enum": ["asIs", "minimal", "one"],
+            "default": "minimal",
+            "description": "Whitespace inside a non-empty dynamic array's brackets: dynamic([1]) or dynamic([ 1 ])"
+          },
+          "msKustoExplorer.format.emptyJsonArraySpacing": {
+            "type": "string",
+            "enum": ["asIs", "minimal", "one"],
+            "default": "minimal",
+            "description": "Whitespace between brackets of an empty dynamic array: dynamic([]) or dynamic([ ])"
+          },
+          "msKustoExplorer.format.jsonObjectSpacing": {
+            "type": "string",
+            "enum": ["asIs", "minimal", "one"],
+            "default": "minimal",
+            "description": "Whitespace inside a non-empty dynamic object's braces: dynamic({\"key\": \"value\"}) or dynamic({ \"key\": \"value\" })"
+          },
+          "msKustoExplorer.format.emptyJsonObjectSpacing": {
+            "type": "string",
+            "enum": ["asIs", "minimal", "one"],
+            "default": "minimal",
+            "description": "Whitespace between braces of an empty dynamic object: dynamic({}) or dynamic({ })"
           }
         }
       },
