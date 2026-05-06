@@ -210,7 +210,12 @@ export class ConnectionsPanel {
     };
     context.subscriptions.push(
         this.treeView.onDidChangeVisibility((e) => {
-            if (e.visible) { void tryPromptImport(); }
+            if (e.visible) {
+                void tryPromptImport();
+                // Re-sync tree selection with the active document now that the view
+                // is visible again (selection updates were skipped while hidden).
+                void this.updateTreeSelectionForActiveDocument();
+            }
         })
     );
     // Also check if the panel is already visible at activation time
@@ -461,6 +466,14 @@ export class ConnectionsPanel {
     }
 
     private async programmaticSelectTreeItem(item: KustoTreeItem, options?: { select?: boolean; focus?: boolean; expand?: boolean }): Promise<void> {
+        // Skip reveal when the tree view is not visible. TreeView.reveal() forces the
+        // containing view to become visible, which would steal focus away from whatever
+        // activity bar panel (e.g. Source Control) the user is currently using.
+        // Selection will be re-applied via the onDidChangeVisibility handler when the
+        // user navigates back to the Kusto Explorer panel.
+        if (!this.treeView.visible) {
+            return;
+        }
         this.programmaticSelectionCount++;
         try {
             await this.treeView.reveal(item, options);

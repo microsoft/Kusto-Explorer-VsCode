@@ -3,6 +3,11 @@
 
 import { LanguageClient, InitializeResult } from 'vscode-languageclient/node';
 import { CancellationToken, Disposable, ExtensionContext } from 'vscode';
+import {
+    acquireMicrosoftAuthenticationToken,
+    GetAuthenticationTokenParams,
+    GetAuthenticationTokenResult,
+} from './authentication';
 
 /**
  * Interface for the Kusto Language Server, used by all components.
@@ -62,6 +67,15 @@ export class Server implements IServer {
         });
         this.client.onRequest('kusto/setData', async (params: SetDataParams) => {
             await context.globalState.update(params.key, params.data);
+        });
+        // Bridge server AAD token requests to VS Code's built-in Microsoft
+        // authentication provider. This lets sign-in UI live in the host
+        // (the VS Code window) rather than in the language server process,
+        // which avoids "non-interactive environment" failures on remote-SSH /
+        // WSL / Codespaces and lets the user manage sign-in through the
+        // standard Accounts gear.
+        this.client.onRequest('kusto/getAuthenticationToken', async (params: GetAuthenticationTokenParams) => {
+            return await acquireMicrosoftAuthenticationToken(params.clusterUri);
         });
     }
 
