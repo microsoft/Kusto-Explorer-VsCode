@@ -291,23 +291,21 @@ public class ConnectionManagerTests
     }
 
     /// <summary>
-    /// Reads the named private field from the internal <c>KustoConnection</c>
+    /// Reads the named non-public property from the internal <c>KustoConnection</c>
     /// wrapper. Used to verify how the connection has wired up authentication
-    /// without actually executing a query against a real cluster.
+    /// without actually executing a query against a real cluster. Reading the
+    /// property (rather than a private field) keeps these tests decoupled from
+    /// internal field naming.
     /// </summary>
-    private static KustoConnectionStringBuilder? GetBuilderField(IConnection connection, string fieldName)
+    private static KustoConnectionStringBuilder? GetBuilderProperty(IConnection connection, string propertyName)
     {
-        var field = connection.GetType().GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic);
-        Assert.IsNotNull(field, $"Expected KustoConnection to have a private {fieldName} field.");
-        return field!.GetValue(connection) as KustoConnectionStringBuilder;
+        var prop = connection.GetType().GetProperty(propertyName, BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.IsNotNull(prop, $"Expected KustoConnection to expose an internal {propertyName} property.");
+        return prop!.GetValue(connection) as KustoConnectionStringBuilder;
     }
 
     private static KustoConnectionStringBuilder? GetFallbackBuilder(IConnection connection)
-    {
-        var prop = connection.GetType().GetProperty("FallbackBuilder", BindingFlags.Instance | BindingFlags.NonPublic);
-        Assert.IsNotNull(prop, "Expected KustoConnection to expose an internal FallbackBuilder property.");
-        return prop!.GetValue(connection) as KustoConnectionStringBuilder;
-    }
+        => GetBuilderProperty(connection, "FallbackBuilder");
 
     private static void MarkFallbackRequired(ConnectionManager manager, string clusterHostName)
     {
@@ -329,7 +327,7 @@ public class ConnectionManagerTests
 
         var connection = manager.GetOrAddConnection("https://mycluster.kusto.windows.net");
 
-        var primary = GetBuilderField(connection, "_primaryBuilder");
+        var primary = GetBuilderProperty(connection, "PrimaryBuilder");
         Assert.IsNotNull(primary);
         Assert.IsNull(primary!.TokenProviderCallback,
             "Primary builder must use native authentication, not host-bridged.");
@@ -420,11 +418,9 @@ public class ConnectionManagerTests
         var connection = manager.GetOrAddConnection("https://mycluster.kusto.windows.net");
 
         // Before marking: the active builder is the primary (native auth).
-        var beforeBuilder = GetBuilderField(connection, "_primaryBuilder");
+        var beforeBuilder = GetBuilderProperty(connection, "PrimaryBuilder");
         Assert.IsNotNull(beforeBuilder);
-        var activeBefore = connection.GetType()
-            .GetProperty("Builder", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .GetValue(connection) as KustoConnectionStringBuilder;
+        var activeBefore = GetBuilderProperty(connection, "Builder");
         Assert.AreSame(beforeBuilder, activeBefore,
             "Before fallback is required, the active builder is the primary builder.");
 
@@ -432,9 +428,7 @@ public class ConnectionManagerTests
         MarkFallbackRequired(manager, "mycluster.kusto.windows.net");
 
         var fallback = GetFallbackBuilder(connection);
-        var activeAfter = connection.GetType()
-            .GetProperty("Builder", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .GetValue(connection) as KustoConnectionStringBuilder;
+        var activeAfter = GetBuilderProperty(connection, "Builder");
         Assert.AreSame(fallback, activeAfter,
             "After the cluster is marked, the active builder is the fallback builder.");
     }

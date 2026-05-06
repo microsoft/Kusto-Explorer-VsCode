@@ -114,8 +114,18 @@ export function getKustoScope(clusterUri: string): string | null {
         return `https://kusto.kusto.${match[1]}/.default`;
     }
     // Unknown host shape: fall back to a per-cluster scope (port stripped).
+    // Restrict the fallback to https — public Kusto and any sane on-prem /
+    // sovereign / private-link deployment is HTTPS, and refusing to derive
+    // a scope from an http:// URI prevents a malicious or misconfigured
+    // connection string from coaxing AAD into issuing a token bound to a
+    // plaintext resource. AAD itself only issues tokens for resources
+    // registered in the user's tenant, but blocking http here is a cheap
+    // additional guard with no legitimate-user impact.
     try {
         const u = new URL(clusterUri);
+        if (u.protocol !== 'https:') {
+            return null;
+        }
         return `${u.protocol}//${u.hostname}/.default`;
     } catch {
         return null;

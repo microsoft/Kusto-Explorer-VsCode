@@ -382,33 +382,44 @@ public class ConnectionManager : IConnectionManager
             // Publish the caller's CancellationToken into the ambient async
             // context so the WithAadTokenProviderAuthentication callback (if
             // Kusto.Data triggers fallback auth during this call) can observe
-            // and respect query cancellation.
+            // and respect query cancellation. Save and restore the previous
+            // value so a later token request (e.g. a background metadata
+            // refresh) doesn't observe a stale/cancelled token from this
+            // query's context.
+            var previousAuthToken = _ambientAuthToken.Value;
             _ambientAuthToken.Value = cancellationToken;
-            var properties = CreateClientRequestProperties(
-                options ?? ImmutableDictionary<string, string>.Empty,
-                parameters ?? ImmutableDictionary<string, string>.Empty,
-                clientRequestId);
-            var resultReader = (Kusto.Language.KustoCode.GetKind(query) == CodeKinds.Command)
-                ? await this.AdminProvider.ExecuteControlCommandAsync(this.Database, query, properties).ConfigureAwait(false)
-                : await this.QueryProvider.ExecuteQueryAsync(this.Database, query, properties, cancellationToken).ConfigureAwait(false);
-            using (resultReader)
+            try
             {
-                var dataSet = KustoDataReaderParser.ParseV1(resultReader, null);
-                var mainResult = dataSet?.GetMainResultsOrNull();
-                var tables = dataSet != null
-                    ? dataSet.Tables.Where(t => t.TableKind == WellKnownDataSet.PrimaryResult).Select(t => (DataTable)t.TableData).ToImmutableList()
-                    : null;
-                var chartOptions = mainResult?.VisualizationOptions != null && mainResult.VisualizationOptions.Visualization != Data.Utils.VisualizationKind.None
-                    ? ChartOptions.FromChartVisualizationOptions(mainResult.VisualizationOptions)
-                    : null;
-                var charts = chartOptions != null
-                    ? ImmutableList.Create(new ResultChart { Options = chartOptions })
-                    : null;
-                return new ExecuteResult
+                var properties = CreateClientRequestProperties(
+                    options ?? ImmutableDictionary<string, string>.Empty,
+                    parameters ?? ImmutableDictionary<string, string>.Empty,
+                    clientRequestId);
+                var resultReader = (Kusto.Language.KustoCode.GetKind(query) == CodeKinds.Command)
+                    ? await this.AdminProvider.ExecuteControlCommandAsync(this.Database, query, properties).ConfigureAwait(false)
+                    : await this.QueryProvider.ExecuteQueryAsync(this.Database, query, properties, cancellationToken).ConfigureAwait(false);
+                using (resultReader)
                 {
-                    Tables = tables,
-                    Charts = charts
-                };
+                    var dataSet = KustoDataReaderParser.ParseV1(resultReader, null);
+                    var mainResult = dataSet?.GetMainResultsOrNull();
+                    var tables = dataSet != null
+                        ? dataSet.Tables.Where(t => t.TableKind == WellKnownDataSet.PrimaryResult).Select(t => (DataTable)t.TableData).ToImmutableList()
+                        : null;
+                    var chartOptions = mainResult?.VisualizationOptions != null && mainResult.VisualizationOptions.Visualization != Data.Utils.VisualizationKind.None
+                        ? ChartOptions.FromChartVisualizationOptions(mainResult.VisualizationOptions)
+                        : null;
+                    var charts = chartOptions != null
+                        ? ImmutableList.Create(new ResultChart { Options = chartOptions })
+                        : null;
+                    return new ExecuteResult
+                    {
+                        Tables = tables,
+                        Charts = charts
+                    };
+                }
+            }
+            finally
+            {
+                _ambientAuthToken.Value = previousAuthToken;
             }
         }
 

@@ -84,9 +84,12 @@ describe('getKustoScope', () => {
                 .toBe('https://mycluster.example.com/.default');
         });
 
-        it('preserves the URI scheme in the per-cluster fallback', () => {
-            expect(getKustoScope('http://mycluster.example.com'))
-                .toBe('http://mycluster.example.com/.default');
+        it('returns null for an http:// (non-TLS) custom host', () => {
+            // Refusing to derive a scope from a plaintext URI prevents a
+            // malicious or misconfigured connection string from coaxing AAD
+            // into issuing a token bound to an http resource. Public Kusto
+            // and supported on-prem / sovereign deployments are all HTTPS.
+            expect(getKustoScope('http://mycluster.example.com')).toBeNull();
         });
 
         it('lowercases the hostname in the per-cluster fallback', () => {
