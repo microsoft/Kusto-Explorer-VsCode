@@ -36,6 +36,13 @@ export class HistoryPanel {
         // Auto-reveal newly added entries in the tree view
         manager.onDidAddEntry((meta) => {
             this.treeProvider.refresh();
+            // Skip reveal when the tree view is not visible. TreeView.reveal() forces
+            // its containing view to become visible, which would yank the Kusto sidebar
+            // open while the user is doing something else (running a query saves a
+            // history entry as a side effect, not as a request to see history).
+            if (!this.treeView.visible) {
+                return;
+            }
             const item = new HistoryItem(meta);
             this.treeView.reveal(item, { select: true, focus: false }).then(undefined, (err) => console.warn('Failed to reveal history item:', err));
         });
@@ -46,6 +53,13 @@ export class HistoryPanel {
 
     /** Reveals and selects a history entry in the tree view. */
     revealEntry(entry: HistoryEntry): void {
+        // Skip reveal when the tree view is not visible. This entry point is
+        // invoked as a side effect of "Show Results" (queryEditor.ts), not as
+        // an explicit "navigate to history" request, so we must not force the
+        // Kusto sidebar open.
+        if (!this.treeView.visible) {
+            return;
+        }
         const item = new HistoryItem(entry);
         this.treeView.reveal(item, { select: true, focus: false }).then(undefined, (err) => console.warn('Failed to reveal history item:', err));
     }
