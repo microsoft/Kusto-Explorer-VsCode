@@ -16,7 +16,7 @@ import type { IServer, ResultTable } from './server';
 import type { IWebView } from './webview';
 import type { IClipboard } from './clipboard';
 import { formatCfHtml } from './clipboard';
-import { resultTableToHtml } from './html';
+import { resultTableToHtml, escapeHtml } from './html';
 import { resultTableToMarkdown } from './markdown';
 
 // ─── Interfaces ─────────────────────────────────────────────────────────────
@@ -45,10 +45,17 @@ export interface IDataTableProvider {
 
 // ─── Implementation ─────────────────────────────────────────────────────────
 
+// Cell values and column names must be HTML-escaped before being handed to
+// Simple-DataTables, which renders both via innerHTML. Without escaping, a
+// value like `Name <user@example.com>` causes the grid to fail with
+// "InvalidCharacterError: Failed to execute 'createElement' ..." because
+// the angle-bracketed substring is parsed as a tag name. We reuse the shared
+// `escapeHtml` from html.ts so this stays in sync with HTML rendering used
+// elsewhere (clipboard "copy as HTML", markdown export, etc.).
 function formatCellValue(value: unknown): string {
     if (value === null || value === undefined) return '';
-    if (typeof value === 'object') return JSON.stringify(value);
-    return String(value);
+    const text = (typeof value === 'object') ? JSON.stringify(value) : String(value);
+    return escapeHtml(text);
 }
 
 /** Generate a short random token for message scoping. */
@@ -82,7 +89,11 @@ class DataTableView implements IDataTableView {
         });
 
         const data = {
-            columns: table.columns,
+            // Column names are HTML-escaped for the same reason as cell values:
+            // Simple-DataTables renders headings via innerHTML, so a column name
+            // containing `<...>` would either inject markup or throw the same
+            // `InvalidCharacterError` we saw with cell values.
+            columns: table.columns.map(c => ({ ...c, name: escapeHtml(c.name) })),
             rows: table.rows.map(row => row.map(cell => formatCellValue(cell)))
         };
         const json = JSON.stringify(data).replace(/<\//g, '<\\/');
