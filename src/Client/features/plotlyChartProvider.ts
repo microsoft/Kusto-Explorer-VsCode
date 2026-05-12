@@ -78,6 +78,10 @@ const PlotlyAxisSides = {
 
 const PlotlyColorways = ChartColorways;
 
+// Set Font family so a font is picked that has good Unicode support.
+const PlotlyFontFamily =
+    "'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif";
+
 const SankeyDefaultNodeColors: readonly string[] = [
     '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
     '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf',
@@ -486,7 +490,7 @@ class PlotlyChartBuilder {
             ...this._layout,
             paper_bgcolor: '#1e1e1e',
             plot_bgcolor: '#1e1e1e',
-            font: { color: '#f2f5fa' },
+            font: { color: '#f2f5fa', family: PlotlyFontFamily },
             colorway: [...PlotlyColorways.Default],
             xaxis: { ...(this._layout.xaxis ?? {}), ...darkAxis },
             yaxis: { ...(this._layout.yaxis ?? {}), ...darkAxis },
@@ -511,7 +515,7 @@ class PlotlyChartBuilder {
             ...this._layout,
             paper_bgcolor: '#ffffff',
             plot_bgcolor: '#ffffff',
-            font: { color: '#2a3f5f' },
+            font: { color: '#2a3f5f', family: PlotlyFontFamily },
             xaxis: { ...(this._layout.xaxis ?? {}), ...lightAxis },
             yaxis: { ...(this._layout.yaxis ?? {}), ...lightAxis },
         };
@@ -3229,7 +3233,9 @@ function applyDarkModeToLayout(layout: Record<string, unknown>): Record<string, 
     layout.plot_bgcolor = '#1e1e1e';
 
     if (!layout.font || typeof layout.font !== 'object') { layout.font = {}; }
-    (layout.font as Record<string, unknown>).color = '#f2f5fa';
+    const font = layout.font as Record<string, unknown>;
+    font.color = '#f2f5fa';
+    if (!font.family) { font.family = PlotlyFontFamily; }
 
     applyDarkModeToAxis(layout, 'xaxis');
     applyDarkModeToAxis(layout, 'yaxis');
@@ -3273,7 +3279,9 @@ function applyLightModeToLayout(layout: Record<string, unknown>): Record<string,
     layout.plot_bgcolor = '#ffffff';
 
     if (!layout.font || typeof layout.font !== 'object') { layout.font = {}; }
-    (layout.font as Record<string, unknown>).color = '#2a3f5f';
+    const font = layout.font as Record<string, unknown>;
+    font.color = '#2a3f5f';
+    if (!font.family) { font.family = PlotlyFontFamily; }
 
     applyLightModeToAxis(layout, 'xaxis');
     applyLightModeToAxis(layout, 'yaxis');
