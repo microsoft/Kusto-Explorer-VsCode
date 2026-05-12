@@ -195,7 +195,7 @@ describe('SimpleDataTableProvider', () => {
             expect(html).toContain('&lt;gwashington@contoso.com&gt;');
         });
 
-        it('HTML-escapes ampersands, quotes, and apostrophes in cell values', () => {
+        it('HTML-escapes ampersands and quotes in cell values', () => {
             const table = makeTable(
                 [{ name: 'Col', type: 'string' }],
                 [['Tom & Jerry'], ['She said "hi"'], ["It's fine"]],
@@ -205,11 +205,28 @@ describe('SimpleDataTableProvider', () => {
             const html: string = webview.setContent.mock.calls[0]![0];
 
             expect(html).toContain('Tom &amp; Jerry');
-            // Quote becomes &quot;, then JSON.stringify backslash-escapes the &.
-            // Easier to just check the entity made it through without the literal '"'
-            // appearing inside the cell text.
+            // Quote becomes &quot;.
             expect(html).toContain('&quot;');
-            expect(html).toContain('&#39;');
+            // Apostrophes are intentionally not escaped (matching the shared
+            // escapeHtml helper in html.ts) since they are safe in element
+            // content. The literal `'` should make it through.
+            expect(html).toContain("It's fine");
+        });
+
+        it('HTML-escapes angle brackets in column names so headings do not parse as tags', () => {
+            // Simple-DataTables renders headings via innerHTML too, so a column
+            // name containing `<...>` would otherwise either inject markup or
+            // throw the same InvalidCharacterError we saw with cell values.
+            const table = makeTable(
+                [{ name: 'Value <units>', type: 'real' }],
+                [[42]],
+            );
+            const webview = createMockWebView();
+            provider.createView(webview, table);
+            const html: string = webview.setContent.mock.calls[0]![0];
+
+            expect(html).not.toContain('Value <units>');
+            expect(html).toContain('Value &lt;units&gt;');
         });
 
         it('includes Simple-DataTables initialization in the script', () => {
