@@ -45,10 +45,30 @@ export interface IDataTableProvider {
 
 // ─── Implementation ─────────────────────────────────────────────────────────
 
+/**
+ * Escape HTML-special characters so the value is rendered as literal text by
+ * Simple-DataTables (which interprets cell strings as HTML). Without this,
+ * a value like `Name <user@example.com>` causes the grid to fail with
+ * "InvalidCharacterError: Failed to execute 'createElement' ..." because
+ * the angle-bracketed substring is parsed as a tag name.
+ */
+function escapeHtml(s: string): string {
+    return s.replace(/[&<>"']/g, ch => {
+        switch (ch) {
+            case '&': return '&amp;';
+            case '<': return '&lt;';
+            case '>': return '&gt;';
+            case '"': return '&quot;';
+            case "'": return '&#39;';
+            default: return ch;
+        }
+    });
+}
+
 function formatCellValue(value: unknown): string {
     if (value === null || value === undefined) return '';
-    if (typeof value === 'object') return JSON.stringify(value);
-    return String(value);
+    const text = (typeof value === 'object') ? JSON.stringify(value) : String(value);
+    return escapeHtml(text);
 }
 
 /** Generate a short random token for message scoping. */
