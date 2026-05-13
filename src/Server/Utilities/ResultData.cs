@@ -139,8 +139,9 @@ public class ResultTable
             })
             .ToImmutableList();
 
+        var columnTypes = columns.Select(c => c.Type).ToArray();
         var rows = table.Rows.OfType<DataRow>()
-            .Select(r => r.ItemArray.Select(ConvertCellValue).ToImmutableList())
+            .Select(r => r.ItemArray.Select((v, i) => ConvertCellValue(v, columnTypes[i])).ToImmutableList())
             .ToImmutableList();
 
         return new ResultTable
@@ -176,10 +177,27 @@ public class ResultTable
         return table;
     }
 
-    private static object? ConvertCellValue(object? value)
+    private static object? ConvertCellValue(object? value, string kustoType)
     {
         if (value == null || value == DBNull.Value)
             return null;
+
+        // The Kusto ADO.NET client surfaces bool columns as sbyte/byte (0 or 1).
+        // Convert to a real bool so JSON serialization emits `true`/`false`
+        // instead of numeric 0/1.
+        if (kustoType == "bool")
+        {
+            return value switch
+            {
+                bool b => b,
+                sbyte sb => sb != 0,
+                byte b => b != 0,
+                short s => s != 0,
+                int i => i != 0,
+                long l => l != 0,
+                _ => value
+            };
+        }
 
         // Convert to JSON-safe types
         return value switch
