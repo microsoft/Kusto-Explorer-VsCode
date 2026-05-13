@@ -269,8 +269,24 @@ class DataTableView implements IDataTableView {
     // ── Initialize Simple-DataTables grid ──
     var headings = tableData.columns.map(function(c) { return c.name; });
     var data = tableData.rows;
+    // Map Kusto column types to Simple-DataTables sort types so numeric and
+    // date columns sort correctly instead of as text.
+    var columnSettings = [];
+    tableData.columns.forEach(function(c, i) {
+        var kustoType = c.type;
+        var sortType =
+            (kustoType === 'int' || kustoType === 'long' ||
+             kustoType === 'real' || kustoType === 'decimal') ? 'number'
+            : (kustoType === 'datetime') ? 'date'
+            : (kustoType === 'bool') ? 'boolean'
+            : null;
+        if (sortType) {
+            columnSettings.push({ select: i, type: sortType });
+        }
+    });
     var grid = new simpleDatatables.DataTable(tableEl, {
         data: { headings: headings, data: data },
+        columns: columnSettings,
         perPage: 100,
         perPageSelect: [50, 100, 500, 1000],
         searchable: true,
