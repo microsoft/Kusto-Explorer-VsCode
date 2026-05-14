@@ -153,10 +153,12 @@ describe('SimpleDataTableProvider', () => {
             provider.createView(webview, table);
             const html: string = webview.setContent.mock.calls[0]![0];
 
-            // formatCellValue produces '{"a":1}', then HTML-escapes the quotes
-            // to '{&quot;a&quot;:1}', which is then JSON.stringified into the
-            // embedded data payload.
-            expect(html).toContain('{&quot;a&quot;:1}');
+            // formatCellValue produces '{"a":1}'. That string is then JSON
+            // serialized for the embedded payload, so the inner `"` become
+            // `\"`. We no longer HTML-escape cell values (Simple-DataTables
+            // renders cell text via textContent), so `&quot;` must NOT appear.
+            expect(html).toContain('{\\"a\\":1}');
+            expect(html).not.toContain('&quot;');
         });
 
         it('escapes closing script tags in JSON data', () => {
@@ -168,19 +170,26 @@ describe('SimpleDataTableProvider', () => {
             provider.createView(webview, table);
             const html: string = webview.setContent.mock.calls[0]![0];
 
-            // The cell value is HTML-escaped before JSON serialization, so the
-            // raw `</script>` text never appears in the embedded data. Only
-            // the real closing </script> tag should appear (at the very end).
+            // The cell value is no longer HTML-escaped, but the embedded JSON
+            // is still protected against early `</script>` termination by the
+            // `</` -> `<\/` replacement at serialization time. Only the real
+            // closing </script> tag should appear; the cell payload should use
+            // the `<\/script>` form.
             const matches = html.match(/<\/script>/g);
             expect(matches).toHaveLength(1);
-            // The escaped form of '<' (`&lt;`) is what ends up in the JSON.
-            expect(html).toContain('&lt;/script&gt;');
+            expect(html).toContain('<\\/script>');
         });
 
-        it('HTML-escapes angle brackets in cell values so the grid does not parse them as tags', () => {
+        it('preserves angle brackets in cell values (passed via cell objects)', () => {
             // Repro for the customer bug: `print Requestor = "George Washington <gwashington@contoso.com>"`
             // crashed Simple-DataTables with `InvalidCharacterError: Failed to execute 'createElement'`
             // because it interpreted the `<gwashington...>` substring as an HTML tag.
+            //
+            // The fix is to pass each cell as a Simple-DataTables cell
+            // object with all three of data/text/order set, which triggers
+            // the early-return path in readDataCell and bypasses HTML
+            // parsing entirely. Angle brackets therefore survive verbatim
+            // in the JSON payload.
             const table = makeTable(
                 [{ name: 'Requestor', type: 'string' }],
                 [['George Washington <gwashington@contoso.com>']],
@@ -189,13 +198,11 @@ describe('SimpleDataTableProvider', () => {
             provider.createView(webview, table);
             const html: string = webview.setContent.mock.calls[0]![0];
 
-            // The raw `<gwashington...>` substring must NOT survive into the grid's
-            // data payload, where Simple-DataTables would render it as HTML.
-            expect(html).not.toContain('<gwashington@contoso.com>');
-            expect(html).toContain('&lt;gwashington@contoso.com&gt;');
+            expect(html).toContain('George Washington <gwashington@contoso.com>');
+            expect(html).not.toContain('&lt;gwashington@contoso.com&gt;');
         });
 
-        it('HTML-escapes ampersands and quotes in cell values', () => {
+        it('preserves ampersands and quotes in cell values', () => {
             const table = makeTable(
                 [{ name: 'Col', type: 'string' }],
                 [['Tom & Jerry'], ['She said "hi"'], ["It's fine"]],
@@ -204,19 +211,21 @@ describe('SimpleDataTableProvider', () => {
             provider.createView(webview, table);
             const html: string = webview.setContent.mock.calls[0]![0];
 
-            expect(html).toContain('Tom &amp; Jerry');
-            // Quote becomes &quot;.
-            expect(html).toContain('&quot;');
-            // Apostrophes are intentionally not escaped (matching the shared
-            // escapeHtml helper in html.ts) since they are safe in element
-            // content. The literal `'` should make it through.
+            // Cell values are no longer HTML-escaped — they appear raw in
+            // the JSON payload (with JSON's own `\"` quote escaping).
+            expect(html).toContain('Tom & Jerry');
+            expect(html).not.toContain('&amp;');
+            expect(html).not.toContain('&quot;');
+            expect(html).toContain('She said \\"hi\\"');
             expect(html).toContain("It's fine");
         });
 
-        it('HTML-escapes angle brackets in column names so headings do not parse as tags', () => {
-            // Simple-DataTables renders headings via innerHTML too, so a column
-            // name containing `<...>` would otherwise either inject markup or
-            // throw the same InvalidCharacterError we saw with cell values.
+        it('preserves angle brackets in column names (passed via cell objects)', () => {
+            // Column names are passed as Simple-DataTables heading cell
+            // objects ({ data, text }), with column types supplied separately
+            // via the `columns` config. The library returns these heading
+            // objects as-is without re-parsing as HTML, so angle brackets
+            // survive raw in the JSON payload and do not need HTML-escaping.
             const table = makeTable(
                 [{ name: 'Value <units>', type: 'real' }],
                 [[42]],
@@ -225,8 +234,8 @@ describe('SimpleDataTableProvider', () => {
             provider.createView(webview, table);
             const html: string = webview.setContent.mock.calls[0]![0];
 
-            expect(html).not.toContain('Value <units>');
-            expect(html).toContain('Value &lt;units&gt;');
+            expect(html).toContain('Value <units>');
+            expect(html).not.toContain('Value &lt;units&gt;');
         });
 
         it('includes Simple-DataTables initialization in the script', () => {

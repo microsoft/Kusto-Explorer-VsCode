@@ -16,7 +16,7 @@ import type { IServer, ResultTable } from './server';
 import type { IWebView } from './webview';
 import type { IClipboard } from './clipboard';
 import { formatCfHtml } from './clipboard';
-import { resultTableToHtml, escapeHtml } from './html';
+import { resultTableToHtml } from './html';
 import { resultTableToMarkdown } from './markdown';
 
 // ─── Interfaces ─────────────────────────────────────────────────────────────
@@ -45,17 +45,18 @@ export interface IDataTableProvider {
 
 // ─── Implementation ─────────────────────────────────────────────────────────
 
-// Cell values and column names must be HTML-escaped before being handed to
-// Simple-DataTables, which renders both via innerHTML. Without escaping, a
-// value like `Name <user@example.com>` causes the grid to fail with
-// "InvalidCharacterError: Failed to execute 'createElement' ..." because
-// the angle-bracketed substring is parsed as a tag name. We reuse the shared
-// `escapeHtml` from html.ts so this stays in sync with HTML rendering used
-// elsewhere (clipboard "copy as HTML", markdown export, etc.).
+// Cell values are passed raw (unescaped) to the webview. In the init
+// script each value is wrapped in a Simple-DataTables cell object with
+// all three fields set (data, text, order). That triggers the early-return
+// path in Simple-DataTables' readDataCell, so it never parses cell strings
+// as HTML — avoiding the InvalidCharacterError that values like
+// "George <gw@x.com>" used to trigger — while still letting the library
+// own row rendering (paging, virtualization). The library renders cell
+// `text` as textContent, so characters like " and & display correctly
+// without any escaping.
 function formatCellValue(value: unknown): string {
     if (value === null || value === undefined) return '';
-    const text = (typeof value === 'object') ? JSON.stringify(value) : String(value);
-    return escapeHtml(text);
+    return (typeof value === 'object') ? JSON.stringify(value) : String(value);
 }
 
 /** Generate a short random token for message scoping. */
@@ -89,11 +90,13 @@ class DataTableView implements IDataTableView {
         });
 
         const data = {
-            // Column names are HTML-escaped for the same reason as cell values:
-            // Simple-DataTables renders headings via innerHTML, so a column name
-            // containing `<...>` would either inject markup or throw the same
-            // `InvalidCharacterError` we saw with cell values.
-            columns: table.columns.map(c => ({ ...c, name: escapeHtml(c.name) })),
+            // Pass column names and cell values raw (no HTML escaping).
+            // The init script wraps each cell as a { data, text, order } object
+            // and configures an explicit per-column `type` (never "html"), so
+            // Simple-DataTables takes its early-return path in readDataCell and
+            // never parses cell strings as HTML. Rendering goes through the
+            // textContent path, so '<', '>', '&', and '"' display verbatim.
+            columns: table.columns.map(c => ({ ...c })),
             rows: table.rows.map(row => row.map(cell => formatCellValue(cell)))
         };
         const json = JSON.stringify(data).replace(/<\//g, '<\\/');
@@ -267,10 +270,14 @@ class DataTableView implements IDataTableView {
     var tableData = ${tableDataJson};
 
     // ── Initialize Simple-DataTables grid ──
-    var headings = tableData.columns.map(function(c) { return c.name; });
-    var data = tableData.rows;
     // Map Kusto column types to Simple-DataTables sort types so numeric and
-    // date columns sort correctly instead of as text.
+    // date columns sort correctly instead of as text. Importantly, we set
+    // an explicit type for EVERY column (not just numeric/date/bool), because
+    // Simple-DataTables defaults the type to "html" — and for html-typed
+    // columns the renderer treats cell.data as an array of node objects to
+    // splice into the <td>. Our cell.data is a string, which breaks
+    // rendering. Using "string" type makes the renderer go through the
+    // text-content path and use cell.text instead.
     var columnSettings = [];
     tableData.columns.forEach(function(c, i) {
         var kustoType = c.type;
@@ -279,13 +286,49 @@ class DataTableView implements IDataTableView {
              kustoType === 'real' || kustoType === 'decimal') ? 'number'
             : (kustoType === 'datetime') ? 'date'
             : (kustoType === 'bool') ? 'boolean'
-            : null;
-        if (sortType) {
-            columnSettings.push({ select: i, type: sortType });
-        }
+            : 'string';
+        columnSettings.push({ select: i, type: sortType });
     });
+
+    // Compute a sort-friendly "order" value for a raw cell string based on
+    // the Simple-DataTables column type. We supply this ourselves so the
+    // library does not need to parse the cell as HTML to derive it.
+    function computeOrder(text, sortType) {
+        if (sortType === 'number') {
+            var n = parseFloat(text);
+            return isNaN(n) ? text : n;
+        }
+        if (sortType === 'date') {
+            var t = Date.parse(text);
+            return isNaN(t) ? text : t;
+        }
+        if (sortType === 'boolean') {
+            var s = String(text).toLowerCase().trim();
+            return (s === 'false' || s === '0' || s === '' || s === 'null' || s === 'undefined') ? 0 : 1;
+        }
+        return text;
+    }
+    var columnSortTypes = columnSettings.map(function(c) { return c.type; });
+
+    // Build heading cell objects (data + text) and row cells (data + text +
+    // order). Plain objects whose keys are all in [data, text, order,
+    // attributes] are returned as-is by Simple-DataTables' readDataCell —
+    // it never parses cell strings as HTML in that path — avoiding the
+    // InvalidCharacterError that <...> values used to trigger. Rendering
+    // goes through the library's normal paged row rendering, so we keep
+    // the benefits of not materializing every <tr>/<td> ourselves.
+    var headings = tableData.columns.map(function(c) {
+        return { data: c.name, text: c.name };
+    });
+    var rows = tableData.rows.map(function(row) {
+        return row.map(function(text, i) {
+            var sortType = columnSortTypes[i];
+            return { data: text, text: text, order: computeOrder(text, sortType) };
+        });
+    });
+
     var grid = new simpleDatatables.DataTable(tableEl, {
-        data: { headings: headings, data: data },
+        data: { headings: headings, data: rows },
         columns: columnSettings,
         perPage: 100,
         perPageSelect: [50, 100, 500, 1000],
