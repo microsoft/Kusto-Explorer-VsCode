@@ -222,9 +222,10 @@ describe('SimpleDataTableProvider', () => {
 
         it('preserves angle brackets in column names (passed via cell objects)', () => {
             // Column names are passed as Simple-DataTables heading cell
-            // objects (data + text + type), which the library uses without
-            // re-parsing as HTML, so angle brackets survive raw in the JSON
-            // payload and do not need HTML-escaping.
+            // objects ({ data, text }), with column types supplied separately
+            // via the `columns` config. The library returns these heading
+            // objects as-is without re-parsing as HTML, so angle brackets
+            // survive raw in the JSON payload and do not need HTML-escaping.
             const table = makeTable(
                 [{ name: 'Value <units>', type: 'real' }],
                 [[42]],

@@ -91,8 +91,11 @@ class DataTableView implements IDataTableView {
 
         const data = {
             // Pass column names and cell values raw (no HTML escaping).
-            // The init script pre-populates the table DOM using textContent,
-            // so Simple-DataTables only ever reads back values via innerText.
+            // The init script wraps each cell as a { data, text, order } object
+            // and configures an explicit per-column `type` (never "html"), so
+            // Simple-DataTables takes its early-return path in readDataCell and
+            // never parses cell strings as HTML. Rendering goes through the
+            // textContent path, so '<', '>', '&', and '"' display verbatim.
             columns: table.columns.map(c => ({ ...c })),
             rows: table.rows.map(row => row.map(cell => formatCellValue(cell)))
         };
@@ -327,7 +330,6 @@ class DataTableView implements IDataTableView {
     var grid = new simpleDatatables.DataTable(tableEl, {
         data: { headings: headings, data: rows },
         columns: columnSettings,
-        type: 'string',
         perPage: 100,
         perPageSelect: [50, 100, 500, 1000],
         searchable: true,
