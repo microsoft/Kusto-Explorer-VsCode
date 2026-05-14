@@ -69,7 +69,8 @@
           "KQL",
           "Kusto",
           "kusto"
-        ]
+        ],
+        "configuration": "./language-configuration.json"
       }
     ],
     "grammars": [
