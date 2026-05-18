@@ -1244,10 +1244,13 @@ class DataTableView implements IDataTableView {
         var origin = lastDragOriginTarget;
         // Drag from the column-header row is reserved for sort / column
         // selection — cancel any HTML5 drag started there. The corner cell
-        // is the exception: dragging it carries the whole table.
+        // is the exception (drag carries the whole table), and a fully
+        // selected column also lets the user drag the selection by its
+        // header.
         var th = origin && origin.closest ? origin.closest('thead th') : null;
         var fromCorner = th && th.cellIndex === 0;
-        if (th && !fromCorner) {
+        var fromSelectedHeader = th && !fromCorner && th.classList.contains('col-selected');
+        if (th && !fromCorner && !fromSelectedHeader) {
             e.preventDefault();
             return;
         }
