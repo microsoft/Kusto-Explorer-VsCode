@@ -212,13 +212,24 @@ class DataTableView implements IDataTableView {
             background: var(--vscode-focusBorder, #007acc);
             color: #fff;
         }
-        table { border-collapse: collapse; width: fit-content !important; max-width: 100%; }
+        table { border-collapse: collapse; width: fit-content !important; }
         th, td {
             padding: 4px 8px;
             text-align: left;
             border: 1px solid var(--vscode-editorGroup-border, var(--vscode-panel-border, #666));
             white-space: nowrap;
+            /* border-box so an explicit width includes padding+border, matching
+               offsetWidth. Without this, switching from auto to fixed layout
+               with width = offsetWidth would make every cell wider by the
+               padding+border amount and cause a visible jump. */
+            box-sizing: border-box;
             max-width: 500px;
+        }
+        /* Clip and ellipsize only data cells. Header cells need to keep their
+           sort-indicator pseudo-elements visible, which sit just after the
+           column-name text — applying overflow:hidden + ellipsis here would
+           clip the indicators in narrow columns. */
+        td {
             overflow: hidden;
             text-overflow: ellipsis;
         }
@@ -229,6 +240,16 @@ class DataTableView implements IDataTableView {
             z-index: 1;
             font-weight: 600;
             cursor: pointer;
+            min-width: 40px;
+        }
+        /* Column resize: hover near right edge of a header to drag-resize.
+           The cursor is set dynamically by JS when the pointer is within the
+           rightmost few pixels of a th. The CSS resize property does not work
+           on display: table-cell elements, so we use a delegated mouse
+           handler instead. */
+        th.col-resizing, body.col-resizing, body.col-resizing * {
+            cursor: col-resize !important;
+            user-select: none !important;
         }
         /* Sort indicator styling */
         .datatable-sorter { color: var(--vscode-foreground); }
@@ -352,6 +373,101 @@ class DataTableView implements IDataTableView {
         }
     }
 
+    // ── Column resize via right-edge drag ──
+    // The CSS resize property does not work on display:table-cell, so we use a
+    // delegated mousedown handler: if the click lands within EDGE_PX of a
+    // th's right edge, we capture the drag and set th.style.width on
+    // mousemove. Event delegation means we keep working after Simple-DataTables
+    // re-renders (sort/page/search) without re-binding per th.
+    //
+    // We pin column widths and switch to table-layout: fixed lazily, on the
+    // first user resize attempt. Up to that point the table uses
+    // table-layout: auto, so columns get their natural content-based widths
+    // (which is what the user expects on first paint). Doing this lazily
+    // also avoids measuring while the tab is hidden, which would return
+    // zero widths.
+    //
+    // Important: under table-layout: fixed the browser ignores
+    // width: fit-content and falls back to filling the container, so we must
+    // also pin the table's total width to the sum of column widths.
+    var tableLayoutPinned = false;
+    function ensurePinned() {
+        if (tableLayoutPinned) return;
+        var ths = tableEl.querySelectorAll('thead th');
+        var total = 0;
+        for (var i = 0; i < ths.length; i++) {
+            var t = ths[i];
+            var w = t.offsetWidth;
+            if (!t.style.width) {
+                t.style.width = w + 'px';
+            }
+            total += w;
+        }
+        tableEl.style.width = total + 'px';
+        tableEl.style.tableLayout = 'fixed';
+        tableLayoutPinned = true;
+    }
+    var EDGE_PX = 6;
+    var resizing = null;          // { th, startX, startWidth }
+    var suppressNextClick = false;
+
+    function nearRightEdge(th, clientX) {
+        var rect = th.getBoundingClientRect();
+        return clientX >= rect.right - EDGE_PX && clientX <= rect.right + 2;
+    }
+
+    container.addEventListener('mousedown', function(e) {
+        if (e.button !== 0) return;
+        var th = e.target.closest ? e.target.closest('thead th') : null;
+        if (!th) return;
+        if (!nearRightEdge(th, e.clientX)) return;
+        ensurePinned();
+        resizing = { th: th, startX: e.clientX, startWidth: th.offsetWidth };
+        suppressNextClick = true;
+        document.body.classList.add('col-resizing');
+        e.preventDefault();
+        e.stopPropagation();
+    }, true);
+
+    function onDocMouseMove(e) {
+        if (!resizing) return;
+        var w = Math.max(40, resizing.startWidth + (e.clientX - resizing.startX));
+        var prev = parseFloat(resizing.th.style.width) || resizing.th.offsetWidth;
+        var delta = w - prev;
+        // Under table-layout: fixed, setting the width on the th sets the
+        // column width directly (both directions). Also update the table's
+        // total width by the same delta so growing one column expands the
+        // table (and triggers the container's horizontal scrollbar) rather
+        // than stealing space from neighbors.
+        resizing.th.style.width = w + 'px';
+        var tableW = parseFloat(tableEl.style.width) || tableEl.offsetWidth;
+        tableEl.style.width = (tableW + delta) + 'px';
+    }
+    function onDocMouseUp() {
+        if (!resizing) return;
+        resizing = null;
+        document.body.classList.remove('col-resizing');
+    }
+    document.addEventListener('mousemove', onDocMouseMove);
+    document.addEventListener('mouseup', onDocMouseUp);
+
+    // Cursor hint when hovering near a column edge.
+    container.addEventListener('mousemove', function(e) {
+        if (resizing) return;
+        var th = e.target.closest ? e.target.closest('thead th') : null;
+        if (!th) return;
+        th.style.cursor = nearRightEdge(th, e.clientX) ? 'col-resize' : '';
+    });
+
+    // Suppress the click that would otherwise trigger sort after a resize drag
+    // (or even a same-spot mousedown/mouseup on the edge).
+    container.addEventListener('click', function(e) {
+        if (!suppressNextClick) return;
+        suppressNextClick = false;
+        e.preventDefault();
+        e.stopPropagation();
+    }, true);
+
     // Make tables draggable
     container.querySelectorAll('table').forEach(function(tbl) {
         tbl.setAttribute('draggable', 'true');
@@ -423,6 +539,9 @@ class DataTableView implements IDataTableView {
     // ── Cleanup for re-render ──
     container._dtCleanup = function() {
         window.removeEventListener('message', onMessage);
+        document.removeEventListener('mousemove', onDocMouseMove);
+        document.removeEventListener('mouseup', onDocMouseUp);
+        document.body.classList.remove('col-resizing');
         if (grid) grid.destroy();
     };
     } // end init
