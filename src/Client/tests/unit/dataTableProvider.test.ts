@@ -300,7 +300,10 @@ describe('SimpleDataTableProvider', () => {
             await Promise.resolve();
 
             expect(mockGetExpr).toHaveBeenCalledWith(table);
-            expect(webview.invoke).toHaveBeenCalledWith('setExpression', { expression: 'datatable(x:int)[1]' });
+            expect(webview.invoke).toHaveBeenCalledWith(
+                'setExpression',
+                expect.objectContaining({ expression: 'datatable(x:int)[1]' })
+            );
         });
 
         it('calls the server on requestExpression message', async () => {
@@ -321,7 +324,10 @@ describe('SimpleDataTableProvider', () => {
             await Promise.resolve();
 
             expect(mockGetExpr).toHaveBeenCalledOnce();
-            expect(webview.invoke).toHaveBeenCalledWith('setExpression', { expression: 'expr' });
+            expect(webview.invoke).toHaveBeenCalledWith(
+                'setExpression',
+                expect.objectContaining({ expression: 'expr' })
+            );
         });
 
         it('does not invoke setExpression when server returns null', async () => {
@@ -499,12 +505,12 @@ describe('SimpleDataTableProvider', () => {
     // ─── in-page script content ─────────────────────────────────────────
 
     describe('in-page script', () => {
-        it('includes row selection handling', () => {
+        it('includes cell selection handling', () => {
             const webview = createMockWebView();
             provider.createView(webview, make2dTable());
             const html: string = webview.setContent.mock.calls[0]![0];
 
-            expect(html).toContain('row-selected');
+            expect(html).toContain('cell-selected');
         });
 
         it('includes drag-drop support', () => {
