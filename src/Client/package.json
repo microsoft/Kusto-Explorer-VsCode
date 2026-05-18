@@ -185,7 +185,7 @@
       },
       {
         "command": "msKustoExplorer.copyData",
-        "title": "Copy Table",
+        "title": "Copy",
         "icon": "$(copy)"
       },
       {

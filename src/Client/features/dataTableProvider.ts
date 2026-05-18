@@ -95,6 +95,9 @@ class DataTableView implements IDataTableView {
             if (msg.command === 'requestExpression') {
                 this.resolveExpression();
             }
+            if (msg.command === 'copyTable') {
+                void this.copyTableAsText();
+            }
             if (msg.command === 'setSelection') {
                 const sel = msg.selection as { rows: number[]; cols: number[] } | null | undefined;
                 this.currentSelection = sel ?? null;
@@ -122,15 +125,23 @@ class DataTableView implements IDataTableView {
     }
 
     async copyTableAsExpression(): Promise<void> {
-        const expression = await this.server.getTableAsExpression(this.table);
+        // Use the current cell selection when present so Ctrl+C mirrors
+        // drag-and-drop. When no selection exists, fall back to the full
+        // table.
+        const subset = this.buildSubsetTable();
+        const expression = await this.server.getTableAsExpression(subset);
         if (expression) {
             await this.clipboard.copyText(expression);
         }
     }
 
     async copyTableAsText(): Promise<void> {
-        const html = resultTableToHtml(this.table);
-        const markdown = resultTableToMarkdown(this.table);
+        // Use the current cell selection when present so Ctrl+C mirrors
+        // drag-and-drop. When no selection exists, fall back to the full
+        // table.
+        const subset = this.buildSubsetTable();
+        const html = resultTableToHtml(subset);
+        const markdown = resultTableToMarkdown(subset);
         if (html) {
             await this.clipboard.copyItems([
                 { format: 'HTML Format', data: formatCfHtml(html), encoding: 'utf8' },
@@ -535,6 +546,24 @@ class DataTableView implements IDataTableView {
         applySelection();
         postSelectionChange();
     });
+
+    // Make the container focusable (tabindex=-1) so mousedown can hand it
+    // keyboard focus. Without this, our mousedown handlers' preventDefault
+    // calls suppress the browser's default focus transfer to the iframe
+    // document — and document-level keydown listeners (notably Ctrl+C)
+    // never fire.
+    if (!container.hasAttribute('tabindex')) {
+        container.setAttribute('tabindex', '-1');
+    }
+    container.style.outline = 'none';
+
+    // Capture-phase mousedown ensures the container gets keyboard focus
+    // even when downstream handlers preventDefault (which would otherwise
+    // block the browser's default focus transfer). Required so Ctrl+C
+    // reaches our document-level keydown handler.
+    container.addEventListener('mousedown', function() {
+        try { container.focus({ preventScroll: true }); } catch (_) { container.focus(); }
+    }, true);
 
     // Move the per-page selector from top bar to bottom bar
     var wrapper = tableEl.closest('.datatable-wrapper');
@@ -1319,9 +1348,35 @@ class DataTableView implements IDataTableView {
 
     window.addEventListener('message', onMessage);
 
+    // Ctrl/Cmd+C inside the webview: ask the extension host to copy the
+    // current selection (or the whole table when there is no selection).
+    // VS Code keybindings do not reliably fire inside webview iframes, so
+    // we forward the keystroke via postMessage.
+    function onKeyDown(e) {
+        if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey &&
+            (e.key === 'c' || e.key === 'C')) {
+            // Multiple table tabs share the same iframe document, so each
+            // has its own keydown handler. Only the active tab should
+            // forward Ctrl+C — otherwise inactive tabs would clobber the
+            // clipboard with their (unselected) full tables.
+            if (!container.classList.contains('active')) return;
+            // Let the browser's native copy proceed if the user has an
+            // actual text selection in an input/textarea (e.g. the search
+            // box) so they can still copy text from those.
+            var ae = document.activeElement;
+            if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) return;
+            if (window._vscodeApi) {
+                window._vscodeApi.postMessage({ command: 'copyTable', _token: token });
+            }
+            e.preventDefault();
+        }
+    }
+    document.addEventListener('keydown', onKeyDown);
+
     // ── Cleanup for re-render ──
     container._dtCleanup = function() {
         window.removeEventListener('message', onMessage);
+        document.removeEventListener('keydown', onKeyDown);
         document.removeEventListener('mousemove', onDocMouseMove);
         document.removeEventListener('mouseup', onDocMouseUp);
         document.removeEventListener('mousemove', onCellDragMove);
