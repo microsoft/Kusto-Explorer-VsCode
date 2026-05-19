@@ -1890,6 +1890,16 @@ class PlotlyChartView implements IChartView {
         this.webview.invoke('copyChart');
     }
 
+    /**
+     * Forget the cached structured payload. The composite chart view calls
+     * this when delegating to a non-plotly renderer (e.g. TimePivot) so that
+     * a subsequent `chartViewReady` from the rebuilt page does not replay a
+     * stale plotly chart over the new renderer's HTML output.
+     */
+    clearReplayState(): void {
+        this.lastPayload = undefined;
+    }
+
     renderChart(data: ResultTable, options: ChartOptions, darkMode: boolean): void {
         const result = this.render(data, options, darkMode);
         if (!result) {
@@ -1916,6 +1926,14 @@ class PlotlyChartView implements IChartView {
             configJson: result.configJson,
         };
         this.lastPayload = payload;
+        // Clear the adapter's cached contentHtml. BuildMultiTabbedHtml
+        // embeds `contentHtml` directly into the rebuilt page's `#chart`
+        // container, and a prior render (e.g. TimePivot, or an unsupported-
+        // type message) may have left that string holding the previous
+        // chart's HTML. Without this clear, switching between history items
+        // would briefly show the previous chart inside the new history
+        // item's page until `chartViewReady` replayed `setChartContent`.
+        this.webview.setContent('');
         this.webview.invoke('setChartContent', { ...payload });
     }
 

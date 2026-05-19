@@ -433,6 +433,104 @@ describe('SimpleDataTableProvider', () => {
         });
     });
 
+    // ─── column view state ──────────────────────────────────────────────
+
+    describe('column view state', () => {
+        it('returns undefined view state initially when none provided', () => {
+            const webview = createMockWebView();
+            const view = provider.createView(webview, make2dTable());
+
+            expect(view.getViewState()).toBeUndefined();
+        });
+
+        it('returns the initial view state when one is provided', () => {
+            const webview = createMockWebView();
+            const initial = { name: 'TestTable', columns: [{ index: 0, width: 120 }, { index: 1, width: 80 }] };
+            const view = provider.createView(webview, make2dTable(), initial);
+
+            expect(view.getViewState()).toEqual(initial);
+        });
+
+        it('embeds the initial view JSON into the init script', () => {
+            const webview = createMockWebView();
+            provider.createView(webview, make2dTable(), { name: 'TestTable', columns: [{ index: 1, width: 99 }] });
+            const html: string = webview.setContent.mock.calls[0]![0];
+
+            expect(html).toContain('var tableView');
+            expect(html).toContain('"index":1');
+            expect(html).toContain('"width":99');
+        });
+
+        it('embeds null tableView when no initial state is provided', () => {
+            const webview = createMockWebView();
+            provider.createView(webview, make2dTable());
+            const html: string = webview.setContent.mock.calls[0]![0];
+
+            expect(html).toContain('var tableView = null;');
+        });
+
+        it('updates view state on setColumnView message', () => {
+            const webview = createMockWebView();
+            const view = provider.createView(webview, make2dTable());
+            const html: string = webview.setContent.mock.calls[0]![0];
+            const token = html.match(/var token = '(dt-[a-z0-9]+)'/)![1]!;
+
+            webview.simulateMessage({
+                command: 'setColumnView',
+                _token: token,
+                columns: [{ index: 0, width: 150 }, { index: 1, width: 200 }],
+            });
+
+            expect(view.getViewState()).toEqual({
+                name: 'TestTable',
+                columns: [{ index: 0, width: 150 }, { index: 1, width: 200 }],
+            });
+        });
+
+        it('notifies onDidChangeViewState listeners', () => {
+            const webview = createMockWebView();
+            const view = provider.createView(webview, make2dTable());
+            const html: string = webview.setContent.mock.calls[0]![0];
+            const token = html.match(/var token = '(dt-[a-z0-9]+)'/)![1]!;
+            const listener = vi.fn();
+            view.onDidChangeViewState(listener);
+
+            webview.simulateMessage({
+                command: 'setColumnView',
+                _token: token,
+                columns: [{ index: 0, width: 50 }],
+            });
+
+            expect(listener).toHaveBeenCalledOnce();
+            expect(listener.mock.calls[0]![0]).toEqual({ name: 'TestTable', columns: [{ index: 0, width: 50 }] });
+        });
+
+        it('rejects out-of-range or invalid column indices', () => {
+            const webview = createMockWebView();
+            const view = provider.createView(webview, make2dTable());
+            const html: string = webview.setContent.mock.calls[0]![0];
+            const token = html.match(/var token = '(dt-[a-z0-9]+)'/)![1]!;
+
+            // make2dTable has 2 columns: valid indices are 0 and 1.
+            webview.simulateMessage({
+                command: 'setColumnView',
+                _token: token,
+                columns: [
+                    { index: 0, width: 100 },
+                    { index: 5, width: 200 },     // out of range
+                    { index: -1, width: 50 },     // negative
+                    { index: 'oops', width: 80 }, // wrong type
+                    { index: 1, width: 'bad' },   // invalid width — keep index, drop width
+                ],
+            });
+
+            expect(view.getViewState()).toEqual({
+                name: 'TestTable',
+                columns: [{ index: 0, width: 100 }, { index: 1 }],
+            });
+        });
+    });
+
     // ─── message handling ───────────────────────────────────────────────
 
     describe('message handling', () => {
