@@ -528,9 +528,12 @@ class DataTableView implements IDataTableView {
     var cachedFullExpression = '';
     var cachedFullHtml = '';
     var tableData = ${tableDataJson};
-    // Saved presentation state to apply on first render. Shape:
-    //   { columns: [{ index, width? }, ...] } | null
-    // index is the position in tableData.columns; width is in pixels.
+    // Saved presentation state to apply on first render. Matches the
+    // host-side ResultTableView payload:
+    //   { name: string, columns: [{ index, width? }, ...] } | null
+    // The webview only reads "columns" (index is the position in
+    // tableData.columns; width is in pixels). "name" is preserved by the
+    // host for correlating views back to their table on round-trip.
     var tableView = ${viewJson};
 
     // ── Initialize Simple-DataTables grid ──
@@ -654,9 +657,14 @@ class DataTableView implements IDataTableView {
 
     // After every internal re-render the library rebuilds tbody (and may
     // touch thead). Re-apply our column order so reorder survives sort,
-    // page, and search.
+    // page, and search. Re-stamp first in case the library rebuilt the
+    // header cells — without data-col on each th, applyColOrder() and
+    // postColumnView() would see incomplete identity information.
     function reapplyColOrder() {
-        try { applyColOrder(); } catch (_) { /* table not initialized yet */ }
+        try {
+            stampOriginalColIndex();
+            applyColOrder();
+        } catch (_) { /* table not initialized yet */ }
     }
     grid.on('datatable.update', reapplyColOrder);
     grid.on('datatable.page', reapplyColOrder);
@@ -704,22 +712,34 @@ class DataTableView implements IDataTableView {
      * one column in auto layout the browser redistributes remaining space
      * and unstyled columns (notably the gutter) report a squished
      * offsetWidth — which would then get frozen by ensurePinned.
+     *
+     * The container may stay zero-sized indefinitely if its host tab
+     * is never activated, so this function is bounded: it makes a
+     * fixed number of rAF/setTimeout attempts and, if still not laid
+     * out, hands off to a ResizeObserver / IntersectionObserver that
+     * fires once the element actually becomes measurable. That
+     * guarantees the retry loop terminates without spinning CPU.
      */
+    var widthApplyAttempts = 0;
+    var widthApplyMaxAttempts = 60;     // ~1s at 60fps before handing off
+    var widthApplyObserversArmed = false;
     function applySavedWidthsWhenLaidOut() {
         if (tableLayoutPinned) return;
         var ths = tableEl.querySelectorAll('thead th');
-        if (ths.length === 0) {
-            try { requestAnimationFrame(applySavedWidthsWhenLaidOut); }
-            catch (_) { setTimeout(applySavedWidthsWhenLaidOut, 100); }
-            return;
+        var ready = ths.length > 0;
+        if (ready) {
+            for (var k = 0; k < ths.length; k++) {
+                if (ths[k].offsetWidth <= 0) { ready = false; break; }
+            }
         }
-        // Ready when every th has positive offsetWidth.
-        for (var k = 0; k < ths.length; k++) {
-            if (ths[k].offsetWidth <= 0) {
+        if (!ready) {
+            if (widthApplyAttempts++ < widthApplyMaxAttempts) {
                 try { requestAnimationFrame(applySavedWidthsWhenLaidOut); }
                 catch (_) { setTimeout(applySavedWidthsWhenLaidOut, 100); }
-                return;
+            } else {
+                armWidthApplyObservers();
             }
+            return;
         }
         // 1) Pin every column to its current natural width.
         for (var i = 0; i < ths.length; i++) {
@@ -749,6 +769,56 @@ class DataTableView implements IDataTableView {
         tableEl.style.setProperty('width', total + 'px', 'important');
         tableEl.style.tableLayout = 'fixed';
         tableLayoutPinned = true;
+    }
+
+    // If the rAF retry budget is exhausted (host tab still hidden or
+    // container still zero-sized), wait for an actual layout signal
+    // rather than polling. Both observers are one-shot — the first one
+    // to fire disconnects all of them and resumes the apply attempt.
+    function armWidthApplyObservers() {
+        if (widthApplyObserversArmed || tableLayoutPinned) return;
+        widthApplyObserversArmed = true;
+        var resizeObs = null;
+        var intersectObs = null;
+        function cleanup() {
+            try { if (resizeObs) resizeObs.disconnect(); } catch (_) {}
+            try { if (intersectObs) intersectObs.disconnect(); } catch (_) {}
+            resizeObs = null;
+            intersectObs = null;
+        }
+        function resume() {
+            cleanup();
+            // Reset the bounded retry budget so the resumed attempt can
+            // ride out any remaining rAF stabilization passes.
+            widthApplyAttempts = 0;
+            widthApplyObserversArmed = false;
+            try { requestAnimationFrame(applySavedWidthsWhenLaidOut); }
+            catch (_) { setTimeout(applySavedWidthsWhenLaidOut, 0); }
+        }
+        try {
+            if (typeof ResizeObserver === 'function') {
+                resizeObs = new ResizeObserver(function(entries) {
+                    for (var ri = 0; ri < entries.length; ri++) {
+                        var r = entries[ri].contentRect;
+                        if (r && r.width > 0 && r.height > 0) { resume(); return; }
+                    }
+                });
+                resizeObs.observe(tableEl);
+            }
+        } catch (_) { /* observer not supported */ }
+        try {
+            if (typeof IntersectionObserver === 'function') {
+                intersectObs = new IntersectionObserver(function(entries) {
+                    for (var ii = 0; ii < entries.length; ii++) {
+                        if (entries[ii].isIntersecting) { resume(); return; }
+                    }
+                });
+                intersectObs.observe(tableEl);
+            }
+        } catch (_) { /* observer not supported */ }
+        // If neither observer is available, give up silently; the user
+        // can trigger a redraw by interacting with the table and saved
+        // widths will be applied at that point via reapplyColOrder.
     }
     applyInitialView();
 

@@ -315,16 +315,18 @@ function findTableView(resultData: server.ResultData, tableName: string): server
  * and saves it. .kqr documents are not user-authored — there is no UI
  * affordance for "dirty" on the bottom results panel or singleton view —
  * so any in-grid edit (chart options, column resize/reorder) must persist
- * automatically. Callers must set the `ignoringSelfEdit` flag around this
- * call so the resulting `onDidChangeTextDocument` event does not trigger
- * a full re-render of the panel that originated the edit.
+ * automatically. Callers must wrap this in `runSelfEdit` (or otherwise
+ * guard with the self-edit ref-count) so the resulting
+ * `onDidChangeTextDocument` event does not trigger a full re-render of
+ * the panel that originated the edit.
  */
 async function persistResultDataToDocument(document: vscode.TextDocument, resultData: server.ResultData): Promise<void> {
     const content = JSON.stringify(resultData, null, 2);
-    if (document.getText() === content) return;
+    const current = document.getText();
+    if (current === content) return;
     const fullRange = new vscode.Range(
         document.positionAt(0),
-        document.positionAt(document.getText().length)
+        document.positionAt(current.length)
     );
     const edit = new vscode.WorkspaceEdit();
     edit.replace(document.uri, fullRange, content);
@@ -1497,13 +1499,65 @@ function singletonTitleForMode(mode: ResultViewMode): string {
  */
 class DocumentViewProvider implements vscode.CustomTextEditorProvider {
     /**
-     * Per-panel flag set while we apply our own WorkspaceEdit to the
-     * backing document. The `onDidChangeTextDocument` listener consults
-     * this map to skip re-rendering on self-triggered edits (chart options,
-     * column resize/reorder) which would otherwise dispose+recreate all
-     * data table views and lose in-flight UI state.
+     * Per-panel ref-count of in-flight self-applied edits to the backing
+     * document. The `onDidChangeTextDocument` listener consults this map
+     * to skip re-rendering on self-triggered edits (chart options, column
+     * resize/reorder) which would otherwise dispose+recreate all data
+     * table views and lose in-flight UI state.
+     *
+     * A count (rather than a boolean) is required because multiple
+     * persists can overlap — e.g., a quick succession of resize/reorder
+     * actions, or a chart-options change whose deferred `document.save()`
+     * lands while a later persist is still pending. With a boolean, the
+     * first completion would clear the flag while a later edit was still
+     * in flight, allowing the text-change listener to fire mid-write.
      */
-    private readonly ignoringSelfEdit = new Map<vscode.WebviewPanel, boolean>();
+    private readonly selfEditDepth = new Map<vscode.WebviewPanel, number>();
+
+    /**
+     * Per-panel serialization tail for self-applied edits. Each
+     * `runSelfEdit` call chains onto this promise, guaranteeing that
+     * `applyEdit`/`save` calls for a panel never overlap on the document.
+     */
+    private readonly selfEditQueue = new Map<vscode.WebviewPanel, Promise<void>>();
+
+    /**
+     * Returns true while at least one self-applied edit is in flight
+     * for the given panel — callers in the `onDidChangeTextDocument`
+     * listener use this to suppress re-render on our own edits.
+     */
+    private isSelfEditInFlight(panel: vscode.WebviewPanel): boolean {
+        return (this.selfEditDepth.get(panel) ?? 0) > 0;
+    }
+
+    /**
+     * Run `work` as a self-applied edit on `panel`'s backing document.
+     * Increments the ref-count for the duration of `work` and serializes
+     * `work` after any previously-queued self-edit for the same panel
+     * so overlapping edits can't interleave on the document.
+     */
+    private runSelfEdit(panel: vscode.WebviewPanel, work: () => Promise<void>): Promise<void> {
+        const prev = this.selfEditQueue.get(panel) ?? Promise.resolve();
+        // Pre-increment the depth synchronously so the change listener
+        // immediately sees a self-edit in flight, even before this task
+        // reaches the head of the queue and starts mutating the document.
+        this.selfEditDepth.set(panel, (this.selfEditDepth.get(panel) ?? 0) + 1);
+        const next = prev.then(work, work).finally(() => {
+            const remaining = (this.selfEditDepth.get(panel) ?? 1) - 1;
+            if (remaining <= 0) {
+                this.selfEditDepth.delete(panel);
+            } else {
+                this.selfEditDepth.set(panel, remaining);
+            }
+            // Only clear the queue tail when this task was the last one
+            // queued, so subsequent chains don't get stranded.
+            if (this.selfEditQueue.get(panel) === next) {
+                this.selfEditQueue.delete(panel);
+            }
+        });
+        this.selfEditQueue.set(panel, next);
+        return next;
+    }
 
     constructor(private readonly viewer: IViewerPanelState, private readonly server: IServer, private readonly chartProvider: IChartProvider, private readonly chartEditorProvider: IChartEditorProvider, private readonly dataTableProvider: IDataTableProvider) {
     }
@@ -1565,14 +1619,15 @@ class DocumentViewProvider implements vscode.CustomTextEditorProvider {
             );
             const edit = new vscode.WorkspaceEdit();
             edit.replace(document.uri, fullRange, content);
-            this.ignoringSelfEdit.set(webviewPanel, true);
-            await vscode.workspace.applyEdit(edit);
-            this.ignoringSelfEdit.set(webviewPanel, false);
+            await this.runSelfEdit(webviewPanel, async () => {
+                await vscode.workspace.applyEdit(edit);
+            });
             if (chartOptionsTimer) { clearTimeout(chartOptionsTimer); }
             chartOptionsTimer = setTimeout(async () => {
                 await this.updateChartOnly(state, webviewPanel);
-                this.ignoringSelfEdit.set(webviewPanel, true);
-                try { await document.save(); } finally { this.ignoringSelfEdit.set(webviewPanel, false); }
+                await this.runSelfEdit(webviewPanel, async () => {
+                    await document.save();
+                });
             }, 600);
         };
 
@@ -1617,7 +1672,7 @@ class DocumentViewProvider implements vscode.CustomTextEditorProvider {
         // Re-render when the document content changes (e.g. external edit)
         const changeSubscription = vscode.workspace.onDidChangeTextDocument(async e => {
             if (e.document.uri.toString() === document.uri.toString()) {
-                if (this.ignoringSelfEdit.get(webviewPanel)) {
+                if (this.isSelfEditInFlight(webviewPanel)) {
                     return;
                 }
                 await this.updateWebview(document, webviewPanel);
@@ -1643,7 +1698,8 @@ class DocumentViewProvider implements vscode.CustomTextEditorProvider {
             this.viewer.dataTableWebViews.delete(webviewPanel);
             this.viewer.viewerStates.delete(webviewPanel);
             this.viewer.webviewDocuments.delete(webviewPanel);
-            this.ignoringSelfEdit.delete(webviewPanel);
+            this.selfEditDepth.delete(webviewPanel);
+            this.selfEditQueue.delete(webviewPanel);
             vscode.commands.executeCommand('setContext', 'msKustoExplorer.resultViewerHasChart', false);
             vscode.commands.executeCommand('setContext', 'msKustoExplorer.resultViewerChartActive', false);
             vscode.commands.executeCommand('setContext', 'msKustoExplorer.resultViewerShowingData', false);
@@ -1727,10 +1783,8 @@ class DocumentViewProvider implements vscode.CustomTextEditorProvider {
                 // Persist to the backing document immediately. .kqr docs
                 // have no Ctrl+S affordance from the webview side, so we
                 // auto-save (same model the chart editor uses for options).
-                this.ignoringSelfEdit.set(webviewPanel, true);
-                void persistResultDataToDocument(document, resultData).finally(() => {
-                    this.ignoringSelfEdit.set(webviewPanel, false);
-                });
+                void this.runSelfEdit(webviewPanel, () =>
+                    persistResultDataToDocument(document, resultData));
             });
         }
         this.viewer.dataTableViews.set(webviewPanel, docTableViews);
