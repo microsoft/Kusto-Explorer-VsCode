@@ -7,7 +7,7 @@
  */
 
 import type { ChartOptions, ResultTable } from './server';
-import { ChartColorways, hexToRgba, isDateTimeType, isNumericType, getColumnRef, getColumnRefByIndex } from './chartProvider';
+import { ChartColorways, ChartMode, hexToRgba, isDateTimeType, isNumericType, getColumnRef, getColumnRefByIndex } from './chartProvider';
 import type { IChartView, IWebView, IChartProvider, ColumnRef } from './chartProvider';
 
 // ─── View ───────────────────────────────────────────────────────────────────
@@ -49,8 +49,32 @@ export class TimePivotChartProvider implements IChartProvider {
         return new TimePivotChartView(webview, (data, options, darkMode) => this.renderTimePivotHtml(data, options, darkMode));
     }
 
-    private renderTimePivotHtml(data: ResultTable, options: ChartOptions, _darkMode: boolean): string | undefined {
+    private renderTimePivotHtml(data: ResultTable, options: ChartOptions, darkMode: boolean): string | undefined {
         if (data.columns.length < 2 || data.rows.length === 0) return undefined;
+
+        // Allow the chart's mode option to override the editor theme
+        if (options.mode === ChartMode.Light) darkMode = false;
+        else if (options.mode === ChartMode.Dark) darkMode = true;
+
+        // Theme palette — explicit so the rendered chart honors the chosen mode
+        // regardless of the host (webview / exported HTML) theme.
+        const theme = darkMode
+            ? {
+                background: '#1e1e1e',
+                foreground: '#cccccc',
+                descForeground: '#9d9d9d',
+                border: '#3c3c3c',
+                gridLine: 'rgba(255,255,255,0.08)',
+                focusBorder: '#007fd4',
+            }
+            : {
+                background: '#ffffff',
+                foreground: '#333333',
+                descForeground: '#717171',
+                border: '#d4d4d4',
+                gridLine: 'rgba(0,0,0,0.08)',
+                focusBorder: '#0090f1',
+            };
 
         // Find datetime columns and candidate series columns
         const datetimeCols: ColumnRef[] = [];
@@ -304,13 +328,21 @@ export class TimePivotChartProvider implements IChartProvider {
 <style>
 .tp-wrapper {
     --tp-label-width: 180px;
+    --tp-bg: ${theme.background};
+    --tp-fg: ${theme.foreground};
+    --tp-desc-fg: ${theme.descForeground};
+    --tp-border: ${theme.border};
+    --tp-grid: ${theme.gridLine};
+    --tp-focus: ${theme.focusBorder};
     position: relative;
     height: 100%;
+    background: var(--tp-bg);
+    color: var(--tp-fg);
 }
 .tp-container {
     font-family: var(--vscode-font-family, sans-serif);
     font-size: var(--vscode-font-size, 13px);
-    color: var(--vscode-foreground);
+    color: var(--tp-fg);
     overflow-x: hidden;
     overflow-y: auto;
     height: 100%;
@@ -326,8 +358,8 @@ export class TimePivotChartProvider implements IChartProvider {
     position: sticky;
     top: 0;
     z-index: 2;
-    background: var(--vscode-editor-background);
-    border-bottom: 1px solid var(--vscode-editorWidget-border, #444);
+    background: var(--tp-bg);
+    border-bottom: 1px solid var(--tp-border);
 }
 .tp-axis-label-spacer {
     flex: 0 0 var(--tp-label-width);
@@ -336,7 +368,7 @@ export class TimePivotChartProvider implements IChartProvider {
     position: sticky;
     left: 0;
     z-index: 3;
-    background: var(--vscode-editor-background);
+    background: var(--tp-bg);
 }
 .tp-axis-ticks {
     flex: 1;
@@ -351,12 +383,12 @@ export class TimePivotChartProvider implements IChartProvider {
 .tp-tick-line {
     width: 1px;
     height: 18px;
-    background: var(--vscode-editorWidget-border, #555);
+    background: var(--tp-border);
 }
 .tp-tick-label {
     font-size: 10px;
     white-space: nowrap;
-    color: var(--vscode-descriptionForeground, #999);
+    color: var(--tp-desc-fg);
     transform: translateX(-50%);
     padding-top: 2px;
 }
@@ -370,7 +402,7 @@ export class TimePivotChartProvider implements IChartProvider {
     display: flex;
     align-items: center;
     min-height: 26px;
-    border-bottom: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.2));
+    border-bottom: 1px solid var(--tp-grid);
 }
 .tp-group {
     min-height: 28px;
@@ -387,7 +419,7 @@ export class TimePivotChartProvider implements IChartProvider {
     position: sticky;
     left: 0;
     z-index: 1;
-    background: var(--vscode-editor-background);
+    background: var(--tp-bg);
 }
 .tp-resize-handle {
     position: absolute;
@@ -401,13 +433,13 @@ export class TimePivotChartProvider implements IChartProvider {
 }
 .tp-resize-handle:hover,
 .tp-resize-handle.active {
-    background: var(--vscode-focusBorder, #007fd4);
+    background: var(--tp-focus);
 }
 .tp-group-label {
     font-weight: 600;
 }
 .tp-count {
-    color: var(--vscode-descriptionForeground, #888);
+    color: var(--tp-desc-fg);
     font-weight: normal;
     font-size: 11px;
 }
@@ -476,7 +508,7 @@ export class TimePivotChartProvider implements IChartProvider {
     top: 0;
     bottom: 0;
     width: 1px;
-    background: var(--vscode-editorWidget-border, rgba(128,128,128,0.15));
+    background: var(--tp-grid);
     pointer-events: none;
 }
 </style>
