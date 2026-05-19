@@ -1169,50 +1169,46 @@ export class ResultsViewer {
     }
 
     /**
-     * Copies the table cell under the cursor in the active results view.
-     */
-    copyCell(): void {
-        const state = this.getActiveViewerState();
-        if (state && this.activeResultWebview) {
-            const tableIndex = this.getActiveTableIndex(state);
-            const views = this.getTableViewsForWebview(this.activeResultWebview);
-            views?.[tableIndex]?.copyCell();
-            return;
-        }
-        // Fall back to bottom view
-        this.panelTableViews[this.panelActiveTabIndex]?.copyCell();
-    }
-
-    /**
-     * Copies the active table data as HTML + markdown from the active results view.
+     * Default \"Copy\" / Ctrl+C: TSV plain text + CF_HTML rich text.
      */
     async copyData(): Promise<void> {
-        const state = this.getActiveViewerState();
-        if (state && this.activeResultWebview) {
-            const tableIndex = this.getActiveTableIndex(state);
-            const views = this.getTableViewsForWebview(this.activeResultWebview);
-            await views?.[tableIndex]?.copyTableAsText();
-            return;
-        }
-
-        // Fall back to bottom view
-        await this.panelTableViews[this.panelActiveTabIndex]?.copyTableAsText();
+        const view = this.getActiveDataTableView();
+        await view?.copyTableAsText();
     }
 
     /**
-     * Copies the active table as a KQL datatable expression from the active results view.
+     * Copies the active table (or selection) as a KQL `datatable()` expression.
      */
-    async copyTableAsExpression(): Promise<void> {
+    async copyTableAsDatatable(): Promise<void> {
+        const view = this.getActiveDataTableView();
+        await view?.copyTableAsDatatable();
+    }
+
+    /**
+     * Copies the active table (or selection) as markdown source.
+     */
+    async copyDataAsMarkdown(): Promise<void> {
+        const view = this.getActiveDataTableView();
+        await view?.copyTableAsMarkdown();
+    }
+
+    /**
+     * Copies the active table (or selection) as HTML source + CF_HTML.
+     */
+    async copyDataAsHtml(): Promise<void> {
+        const view = this.getActiveDataTableView();
+        await view?.copyTableAsHtml();
+    }
+
+    /** Resolves the data table view currently driving the user's view. */
+    private getActiveDataTableView(): IDataTableView | undefined {
         const state = this.getActiveViewerState();
         if (state && this.activeResultWebview) {
             const tableIndex = this.getActiveTableIndex(state);
             const views = this.getTableViewsForWebview(this.activeResultWebview);
-            await views?.[tableIndex]?.copyTableAsExpression();
-            return;
+            return views?.[tableIndex];
         }
-
-        // Fall back to bottom view
-        await this.panelTableViews[this.panelActiveTabIndex]?.copyTableAsExpression();
+        return this.panelTableViews[this.panelActiveTabIndex];
     }
 
     /**

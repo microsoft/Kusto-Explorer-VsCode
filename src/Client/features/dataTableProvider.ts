@@ -18,6 +18,7 @@ import type { IClipboard } from './clipboard';
 import { formatCfHtml } from './clipboard';
 import { resultTableToHtml } from './html';
 import { resultTableToMarkdown } from './markdown';
+import { resultTableToTsv, formatCellValue } from './tsv';
 
 // ─── Interfaces ─────────────────────────────────────────────────────────────
 
@@ -26,12 +27,14 @@ import { resultTableToMarkdown } from './markdown';
  * Created by `IDataTableProvider.createView()`.
  */
 export interface IDataTableView {
-    /** Request the webview to copy the cell under the cursor. */
-    copyCell(): void;
-    /** Copy the entire table as a KQL datatable expression to the clipboard. */
-    copyTableAsExpression(): Promise<void>;
-    /** Copy the table as rich HTML + markdown text to the clipboard. */
+    /** Copy the entire table (or current selection) as a KQL `datatable()` expression. */
+    copyTableAsDatatable(): Promise<void>;
+    /** Default Ctrl+C path: TSV plain text + CF_HTML rich text on the clipboard. */
     copyTableAsText(): Promise<void>;
+    /** Copy as markdown table source (plain text only). */
+    copyTableAsMarkdown(): Promise<void>;
+    /** Copy as HTML source text and CF_HTML rich text. */
+    copyTableAsHtml(): Promise<void>;
     /** Toggle search box visibility. */
     toggleSearch(): void;
     /** Release handlers and resources. */
@@ -54,10 +57,6 @@ export interface IDataTableProvider {
 // own row rendering (paging, virtualization). The library renders cell
 // `text` as textContent, so characters like " and & display correctly
 // without any escaping.
-function formatCellValue(value: unknown): string {
-    if (value === null || value === undefined) return '';
-    return (typeof value === 'object') ? JSON.stringify(value) : String(value);
-}
 
 /** Generate a short random token for message scoping. */
 function makeToken(): string {
@@ -120,14 +119,8 @@ class DataTableView implements IDataTableView {
         this.resolveExpression();
     }
 
-    copyCell(): void {
-        this.webview.invoke('copyCell');
-    }
-
-    async copyTableAsExpression(): Promise<void> {
-        // Use the current cell selection when present so Ctrl+C mirrors
-        // drag-and-drop. When no selection exists, fall back to the full
-        // table.
+    async copyTableAsDatatable(): Promise<void> {
+        // Selection-aware (mirrors drag-and-drop). Falls back to the full table.
         const subset = this.buildSubsetTable();
         const expression = await this.server.getTableAsExpression(subset);
         if (expression) {
@@ -135,20 +128,56 @@ class DataTableView implements IDataTableView {
         }
     }
 
+    /**
+     * Default "Copy" / Ctrl+C. A single-cell selection copies just the raw
+     * value as plain text (no header, no quoting, no CF_HTML). Anything
+     * larger puts TSV on the clipboard as plain text and the table's HTML
+     * on the clipboard as CF_HTML, so apps that understand rich-text paste
+     * (Excel, Word, Outlook) get a real table while plain-text editors get
+     * tab-separated values.
+     */
     async copyTableAsText(): Promise<void> {
-        // Use the current cell selection when present so Ctrl+C mirrors
-        // drag-and-drop. When no selection exists, fall back to the full
-        // table.
+        const subset = this.buildSubsetTable();
+        if (subset.columns.length === 1 && subset.rows.length === 1) {
+            await this.clipboard.copyText(formatCellValue(subset.rows[0]![0]));
+            return;
+        }
+        const tsv = resultTableToTsv(subset);
+        const html = resultTableToHtml(subset);
+        if (html || tsv) {
+            const items: { format: string; data: string; encoding: 'utf8' | 'text' }[] = [];
+            if (html) {
+                items.push({ format: 'HTML Format', data: formatCfHtml(html), encoding: 'utf8' });
+            }
+            if (tsv) {
+                items.push({ format: 'Text', data: tsv, encoding: 'text' });
+            }
+            await this.clipboard.copyItems(items);
+        }
+    }
+
+    /** "Copy as Markdown": markdown source as plain text only. */
+    async copyTableAsMarkdown(): Promise<void> {
+        const subset = this.buildSubsetTable();
+        const markdown = resultTableToMarkdown(subset);
+        if (markdown) {
+            await this.clipboard.copyText(markdown);
+        }
+    }
+
+    /**
+     * "Copy as HTML": HTML source as plain text AND CF_HTML, so the
+     * receiving app picks whichever it can handle. Word/Outlook render
+     * the table; markdown / source editors get the HTML markup verbatim.
+     */
+    async copyTableAsHtml(): Promise<void> {
         const subset = this.buildSubsetTable();
         const html = resultTableToHtml(subset);
-        const markdown = resultTableToMarkdown(subset);
         if (html) {
             await this.clipboard.copyItems([
                 { format: 'HTML Format', data: formatCfHtml(html), encoding: 'utf8' },
-                { format: 'Text', data: markdown || html, encoding: 'text' },
+                { format: 'Text', data: html, encoding: 'text' },
             ]);
-        } else if (markdown) {
-            await this.clipboard.copyText(markdown);
         }
     }
 
@@ -425,7 +454,6 @@ class DataTableView implements IDataTableView {
     // always carry the full table even while a sub-range is selected.
     var cachedFullExpression = '';
     var cachedFullHtml = '';
-    var lastContextTarget = null;
     var tableData = ${tableDataJson};
 
     // ── Initialize Simple-DataTables grid ──
@@ -750,11 +778,6 @@ class DataTableView implements IDataTableView {
     // Make tables draggable
     container.querySelectorAll('table').forEach(function(tbl) {
         tbl.setAttribute('draggable', 'true');
-    });
-
-    // ── Context menu tracking (for copyCell) ──
-    container.addEventListener('contextmenu', function(e) {
-        lastContextTarget = e.target;
     });
 
     // ── Cell selection ──
@@ -1316,14 +1339,6 @@ class DataTableView implements IDataTableView {
 
         // Only respond to commands when this container is the active tab
         if (!container.classList.contains('active')) return;
-
-        if (msg.command === 'copyCell') {
-            var cell = lastContextTarget ? lastContextTarget.closest('td, th') : null;
-            if (cell && window._vscodeApi) {
-                window._vscodeApi.postMessage({ command: 'copyText', text: cell.innerText, _token: token });
-            }
-            return;
-        }
 
         if (msg.command === 'toggleSearch') {
             searchVisible = !searchVisible;
