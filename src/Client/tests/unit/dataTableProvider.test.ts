@@ -90,7 +90,10 @@ describe('SimpleDataTableProvider', () => {
             const view = provider.createView(webview, make2dTable());
 
             expect(view).toBeDefined();
-            expect(typeof view.copyCell).toBe('function');
+            expect(typeof view.copyTableAsText).toBe('function');
+            expect(typeof view.copyTableAsMarkdown).toBe('function');
+            expect(typeof view.copyTableAsHtml).toBe('function');
+            expect(typeof view.copyTableAsDatatable).toBe('function');
             expect(typeof view.toggleSearch).toBe('function');
             expect(typeof view.dispose).toBe('function');
         });
@@ -267,17 +270,6 @@ describe('SimpleDataTableProvider', () => {
 
     // ─── invoke methods ─────────────────────────────────────────────────
 
-    describe('copyCell', () => {
-        it('invokes copyCell command on the webview', () => {
-            const webview = createMockWebView();
-            const view = provider.createView(webview, make2dTable());
-
-            view.copyCell();
-
-            expect(webview.invoke).toHaveBeenCalledWith('copyCell');
-        });
-    });
-
     describe('toggleSearch', () => {
         it('invokes toggleSearch command on the webview', () => {
             const webview = createMockWebView();
@@ -300,7 +292,10 @@ describe('SimpleDataTableProvider', () => {
             await Promise.resolve();
 
             expect(mockGetExpr).toHaveBeenCalledWith(table);
-            expect(webview.invoke).toHaveBeenCalledWith('setExpression', { expression: 'datatable(x:int)[1]' });
+            expect(webview.invoke).toHaveBeenCalledWith(
+                'setExpression',
+                expect.objectContaining({ expression: 'datatable(x:int)[1]' })
+            );
         });
 
         it('calls the server on requestExpression message', async () => {
@@ -321,7 +316,10 @@ describe('SimpleDataTableProvider', () => {
             await Promise.resolve();
 
             expect(mockGetExpr).toHaveBeenCalledOnce();
-            expect(webview.invoke).toHaveBeenCalledWith('setExpression', { expression: 'expr' });
+            expect(webview.invoke).toHaveBeenCalledWith(
+                'setExpression',
+                expect.objectContaining({ expression: 'expr' })
+            );
         });
 
         it('does not invoke setExpression when server returns null', async () => {
@@ -353,9 +351,9 @@ describe('SimpleDataTableProvider', () => {
         });
     });
 
-    // ─── copyTableAsExpression ────────────────────────────────────────
+    // ─── copyTableAsDatatable ─────────────────────────────────────────
 
-    describe('copyTableAsExpression', () => {
+    describe('copyTableAsDatatable', () => {
         it('copies expression to clipboard', async () => {
             const mockGetExpr = vi.fn(async () => 'datatable(x:int)[1]');
             const p = new DataTableProvider(createMockServer(mockGetExpr), clipboard);
@@ -363,7 +361,7 @@ describe('SimpleDataTableProvider', () => {
             const table = make2dTable();
             const view = p.createView(webview, table);
 
-            await view.copyTableAsExpression();
+            await view.copyTableAsDatatable();
 
             expect(mockGetExpr).toHaveBeenCalledWith(table);
             expect(clipboard.copyText).toHaveBeenCalledWith('datatable(x:int)[1]');
@@ -374,16 +372,16 @@ describe('SimpleDataTableProvider', () => {
             const webview = createMockWebView();
             const view = p.createView(webview, make2dTable());
 
-            await view.copyTableAsExpression();
+            await view.copyTableAsDatatable();
 
             expect(clipboard.copyText).not.toHaveBeenCalled();
         });
     });
 
-    // ─── copyTableAsText ────────────────────────────────────────────────
+    // ─── copyTableAsText (default Ctrl+C) ────────────────────────────────
 
     describe('copyTableAsText', () => {
-        it('copies HTML and markdown to clipboard', async () => {
+        it('copies CF_HTML and TSV to clipboard', async () => {
             const webview = createMockWebView();
             const view = provider.createView(webview, make2dTable());
 
@@ -394,8 +392,44 @@ describe('SimpleDataTableProvider', () => {
             expect(items).toHaveLength(2);
             expect(items[0].format).toBe('HTML Format');
             expect(items[1].format).toBe('Text');
-            // Text item should be markdown
-            expect(items[1].data).toContain('|');
+            // Text item should be TSV (tab-separated), not markdown pipes.
+            expect(items[1].data).toContain('\t');
+            expect(items[1].data).not.toContain('|');
+        });
+    });
+
+    // ─── copyTableAsMarkdown ─────────────────────────────────────────────
+
+    describe('copyTableAsMarkdown', () => {
+        it('copies markdown source as plain text', async () => {
+            const webview = createMockWebView();
+            const view = provider.createView(webview, make2dTable());
+
+            await view.copyTableAsMarkdown();
+
+            expect(clipboard.copyText).toHaveBeenCalledOnce();
+            const text = (clipboard.copyText as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+            expect(text).toContain('|');
+            expect(text).toContain('---');
+        });
+    });
+
+    // ─── copyTableAsHtml ────────────────────────────────────────────────
+
+    describe('copyTableAsHtml', () => {
+        it('copies CF_HTML and HTML source', async () => {
+            const webview = createMockWebView();
+            const view = provider.createView(webview, make2dTable());
+
+            await view.copyTableAsHtml();
+
+            expect(clipboard.copyItems).toHaveBeenCalledOnce();
+            const items = (clipboard.copyItems as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+            expect(items).toHaveLength(2);
+            expect(items[0].format).toBe('HTML Format');
+            expect(items[1].format).toBe('Text');
+            // Text item should be raw HTML markup.
+            expect(items[1].data).toContain('<table');
         });
     });
 
@@ -499,12 +533,12 @@ describe('SimpleDataTableProvider', () => {
     // ─── in-page script content ─────────────────────────────────────────
 
     describe('in-page script', () => {
-        it('includes row selection handling', () => {
+        it('includes cell selection handling', () => {
             const webview = createMockWebView();
             provider.createView(webview, make2dTable());
             const html: string = webview.setContent.mock.calls[0]![0];
 
-            expect(html).toContain('row-selected');
+            expect(html).toContain('cell-selected');
         });
 
         it('includes drag-drop support', () => {
@@ -516,13 +550,12 @@ describe('SimpleDataTableProvider', () => {
             expect(html).toContain('draggable');
         });
 
-        it('includes context menu tracking for copyCell', () => {
+        it('does not adopt cells on contextmenu', () => {
             const webview = createMockWebView();
             provider.createView(webview, make2dTable());
             const html: string = webview.setContent.mock.calls[0]![0];
 
-            expect(html).toContain('contextmenu');
-            expect(html).toContain('lastContextTarget');
+            expect(html).not.toContain("addEventListener('contextmenu'");
         });
 
         it('checks active class before responding to commands', () => {

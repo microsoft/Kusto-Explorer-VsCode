@@ -185,7 +185,17 @@
       },
       {
         "command": "msKustoExplorer.copyData",
-        "title": "Copy Table",
+        "title": "Copy",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "msKustoExplorer.copyDataAsMarkdown",
+        "title": "Copy as Markdown",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "msKustoExplorer.copyDataAsHtml",
+        "title": "Copy as HTML",
         "icon": "$(copy)"
       },
       {
@@ -213,12 +223,8 @@
         "icon": "$(file-media)"
       },
       {
-        "command": "msKustoExplorer.copyCell",
-        "title": "Copy Cell"
-      },
-      {
-        "command": "msKustoExplorer.copyTableAsExpression",
-        "title": "Copy as Expression",
+        "command": "msKustoExplorer.copyTableAsDatatable",
+        "title": "Copy as datatable",
         "icon": "$(symbol-snippet)"
       },
       {
@@ -594,19 +600,24 @@
       ],
       "webview/context": [
         {
-          "command": "msKustoExplorer.copyCell",
+          "command": "msKustoExplorer.copyData",
           "when": "webviewId == msKustoExplorer_resultsView || (webviewId == msKustoExplorer_resultViewer && !chartVisible && !queryVisible) || (webviewId == msKustoExplorer_singletonView && !chartVisible && !queryVisible)",
           "group": "9_cutcopypaste@1"
         },
         {
-          "command": "msKustoExplorer.copyData",
+          "command": "msKustoExplorer.copyDataAsMarkdown",
           "when": "webviewId == msKustoExplorer_resultsView || (webviewId == msKustoExplorer_resultViewer && !chartVisible && !queryVisible) || (webviewId == msKustoExplorer_singletonView && !chartVisible && !queryVisible)",
           "group": "9_cutcopypaste@2"
         },
         {
-          "command": "msKustoExplorer.copyTableAsExpression",
+          "command": "msKustoExplorer.copyDataAsHtml",
           "when": "webviewId == msKustoExplorer_resultsView || (webviewId == msKustoExplorer_resultViewer && !chartVisible && !queryVisible) || (webviewId == msKustoExplorer_singletonView && !chartVisible && !queryVisible)",
           "group": "9_cutcopypaste@3"
+        },
+        {
+          "command": "msKustoExplorer.copyTableAsDatatable",
+          "when": "webviewId == msKustoExplorer_resultsView || (webviewId == msKustoExplorer_resultViewer && !chartVisible && !queryVisible) || (webviewId == msKustoExplorer_singletonView && !chartVisible && !queryVisible)",
+          "group": "9_cutcopypaste@4"
         },
         {
           "command": "msKustoExplorer.savePanelResults",
