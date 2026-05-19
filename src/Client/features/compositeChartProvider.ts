@@ -38,6 +38,13 @@ class CompositeChartView implements IChartView {
     renderChart(data: ResultTable, options: ChartOptions, darkMode: boolean): void {
         if (options.type === ChartType.TimePivot) {
             this.activeView = this.timePivotView;
+            // The plotly view caches its last structured payload and replays
+            // it on `chartViewReady` after a page rebuild. When we delegate
+            // to TimePivot, we must invalidate that cache so the rebuilt
+            // page does not draw the previous plotly chart over the new
+            // TimePivot HTML.
+            const plotly = this.plotlyView as IChartView & { clearReplayState?: () => void };
+            plotly.clearReplayState?.();
         } else {
             this.activeView = this.plotlyView;
         }

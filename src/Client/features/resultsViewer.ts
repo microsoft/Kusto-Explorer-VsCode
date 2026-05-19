@@ -40,6 +40,15 @@ class WebViewAdapter implements IWebView {
     headHtml = '';
     scriptsHtml = '';
     contentHtml = '';
+    /**
+     * When true, `setContent` still updates `contentHtml` (so a subsequent
+     * page rebuild embeds it inline) but no `postMessage` is sent, and
+     * `invoke` is a no-op. The host sets this while preparing chart/table
+     * state for an imminent `webview.html = …` reassignment so the
+     * about-to-be-replaced page doesn't briefly redraw the new chart
+     * before the rebuild causes another redraw via `chartViewReady`.
+     */
+    suppressMessages = false;
 
     constructor(webview: vscode.Webview, contentCommand = 'setChartHtml') {
         this.webview = webview;
@@ -53,10 +62,12 @@ class WebViewAdapter implements IWebView {
 
     setContent(html: string): void {
         this.contentHtml = html;
+        if (this.suppressMessages) { return; }
         this.webview.postMessage({ command: this.contentCommand, html });
     }
 
     invoke(command: string, args?: Record<string, unknown>): void {
+        if (this.suppressMessages) { return; }
         this.webview.postMessage({ command, ...args });
     }
 
@@ -271,6 +282,58 @@ async function saveResults(source: { data: server.ResultData }): Promise<{ uri: 
 
     await vscode.workspace.fs.writeFile(finalUri, Buffer.from(content, 'utf-8'));
     return { uri: finalUri, alreadyOpen: false };
+}
+
+/**
+ * Stores a per-table view state into `resultData.tableViews`, looked up by
+ * `state.name`. Existing entries with the same name are replaced; otherwise
+ * the new entry is appended. Mutates `resultData` in place; callers rely on
+ * the same object reference being picked up by the eventual save.
+ */
+function storeTableView(resultData: server.ResultData, state: server.ResultTableView): void {
+    if (!resultData.tableViews) {
+        resultData.tableViews = [];
+    }
+    const idx = resultData.tableViews.findIndex(v => v.name === state.name);
+    if (idx >= 0) {
+        resultData.tableViews[idx] = state;
+    } else {
+        resultData.tableViews.push(state);
+    }
+}
+
+/**
+ * Finds the saved view for a table by name. Returns `undefined` if no
+ * matching entry exists in `resultData.tableViews`.
+ */
+function findTableView(resultData: server.ResultData, tableName: string): server.ResultTableView | undefined {
+    return resultData.tableViews?.find(v => v.name === tableName);
+}
+
+/**
+ * Writes the current `resultData` JSON back into the backing text document
+ * and saves it. .kqr documents are not user-authored — there is no UI
+ * affordance for "dirty" on the bottom results panel or singleton view —
+ * so any in-grid edit (chart options, column resize/reorder) must persist
+ * automatically. Callers must set the `ignoringSelfEdit` flag around this
+ * call so the resulting `onDidChangeTextDocument` event does not trigger
+ * a full re-render of the panel that originated the edit.
+ */
+async function persistResultDataToDocument(document: vscode.TextDocument, resultData: server.ResultData): Promise<void> {
+    const content = JSON.stringify(resultData, null, 2);
+    if (document.getText() === content) return;
+    const fullRange = new vscode.Range(
+        document.positionAt(0),
+        document.positionAt(document.getText().length)
+    );
+    const edit = new vscode.WorkspaceEdit();
+    edit.replace(document.uri, fullRange, content);
+    try {
+        await vscode.workspace.applyEdit(edit);
+        await document.save();
+    } catch {
+        /* best-effort — if the edit cannot be applied (doc closed, etc.) we silently drop */
+    }
 }
 
 // =============================================================================
@@ -592,9 +655,15 @@ export class ResultsViewer {
         if (hasTable && this.resultsPanel) {
             for (let i = 0; i < resultData.tables.length; i++) {
                 const adapter = new WebViewAdapter(this.resultsPanel.webview, `setTableContent-${i}`);
-                const view = this.dataTableProvider.createView(adapter, resultData.tables[i]!);
+                const table = resultData.tables[i]!;
+                const view = this.dataTableProvider.createView(adapter, table, findTableView(resultData, table.name));
                 this.panelTableViews.push(view);
                 this.panelTableWebViews.push(adapter);
+                // Mirror webview-side resize/reorder back into the in-memory
+                // ResultData so the next save serializes the updated layout.
+                view.onDidChangeViewState((state) => {
+                    storeTableView(resultData, state);
+                });
             }
         }
 
@@ -717,9 +786,18 @@ export class ResultsViewer {
         if (this.singletonView) {
             for (let i = 0; i < resultData.tables.length; i++) {
                 const adapter = new WebViewAdapter(this.singletonView.webview, `setTableContent-${i}`);
-                const view = this.dataTableProvider.createView(adapter, resultData.tables[i]!);
+                const table = resultData.tables[i]!;
+                const view = this.dataTableProvider.createView(adapter, table, findTableView(resultData, table.name));
                 this.singletonTableViews.push(view);
                 this.singletonTableWebViews.push(adapter);
+                view.onDidChangeViewState((state) => {
+                    storeTableView(resultData, state);
+                    // Singleton views are backed by a .kqr file (history
+                    // entry or .kqr document opened-as-singleton). Persist
+                    // the layout change back to disk so it survives
+                    // switching to another history item and back.
+                    this.scheduleSingletonWriteBack();
+                });
             }
         }
 
@@ -728,13 +806,29 @@ export class ResultsViewer {
         const columnNames = chartTable?.columns?.map(c => c.name) ?? [];
 
         // Render chart and editor content into adapters BEFORE building HTML
-        // so their contentHtml is embedded inline in the page.
-        if (hasChart && chartOptions) {
-            const table = chartTable;
-            if (table) {
-                this.singletonChartView?.renderChart(table, chartOptions, darkMode);
+        // so their contentHtml is embedded inline in the page. Suppress
+        // postMessage during this prep — the page is about to be replaced
+        // by `webview.html = …`, so any messages would only cause the
+        // outgoing page to briefly redraw the new chart (a visible flash)
+        // before the new page rebuilds and the `chartViewReady` handshake
+        // replays state cleanly on the fresh page.
+        const chartAdapter = this.singletonWebView;
+        const editorAdapter = this.singletonEditorWebView;
+        const priorChartSuppress = chartAdapter?.suppressMessages ?? false;
+        const priorEditorSuppress = editorAdapter?.suppressMessages ?? false;
+        if (chartAdapter) { chartAdapter.suppressMessages = true; }
+        if (editorAdapter) { editorAdapter.suppressMessages = true; }
+        try {
+            if (hasChart && chartOptions) {
+                const table = chartTable;
+                if (table) {
+                    this.singletonChartView?.renderChart(table, chartOptions, darkMode);
+                }
+                this.singletonEditorView?.setOptions(rawChartOptions, columnNames, chartDefaults);
             }
-            this.singletonEditorView?.setOptions(rawChartOptions, columnNames, chartDefaults);
+        } finally {
+            if (chartAdapter) { chartAdapter.suppressMessages = priorChartSuppress; }
+            if (editorAdapter) { editorAdapter.suppressMessages = priorEditorSuppress; }
         }
 
         const html = this.htmlBuilder.BuildMultiTabbedHtml(hasChart, mode, this.singletonWebView, this.singletonEditorWebView, chartOptions, columnNames,
@@ -1402,6 +1496,14 @@ function singletonTitleForMode(mode: ResultViewMode): string {
  * Can show chart, data tables and query in different tabs.
  */
 class DocumentViewProvider implements vscode.CustomTextEditorProvider {
+    /**
+     * Per-panel flag set while we apply our own WorkspaceEdit to the
+     * backing document. The `onDidChangeTextDocument` listener consults
+     * this map to skip re-rendering on self-triggered edits (chart options,
+     * column resize/reorder) which would otherwise dispose+recreate all
+     * data table views and lose in-flight UI state.
+     */
+    private readonly ignoringSelfEdit = new Map<vscode.WebviewPanel, boolean>();
 
     constructor(private readonly viewer: IViewerPanelState, private readonly server: IServer, private readonly chartProvider: IChartProvider, private readonly chartEditorProvider: IChartEditorProvider, private readonly dataTableProvider: IDataTableProvider) {
     }
@@ -1449,7 +1551,6 @@ class DocumentViewProvider implements vscode.CustomTextEditorProvider {
 
         // Debounce timer for chart options updates
         let chartOptionsTimer: ReturnType<typeof setTimeout> | undefined;
-        let ignoringSelfEdit = false;
 
         // Wire chart editor options callback
         docEditorView.onOptionsChanged = async (options) => {
@@ -1464,14 +1565,14 @@ class DocumentViewProvider implements vscode.CustomTextEditorProvider {
             );
             const edit = new vscode.WorkspaceEdit();
             edit.replace(document.uri, fullRange, content);
-            ignoringSelfEdit = true;
+            this.ignoringSelfEdit.set(webviewPanel, true);
             await vscode.workspace.applyEdit(edit);
-            ignoringSelfEdit = false;
+            this.ignoringSelfEdit.set(webviewPanel, false);
             if (chartOptionsTimer) { clearTimeout(chartOptionsTimer); }
             chartOptionsTimer = setTimeout(async () => {
                 await this.updateChartOnly(state, webviewPanel);
-                ignoringSelfEdit = true;
-                try { await document.save(); } finally { ignoringSelfEdit = false; }
+                this.ignoringSelfEdit.set(webviewPanel, true);
+                try { await document.save(); } finally { this.ignoringSelfEdit.set(webviewPanel, false); }
             }, 600);
         };
 
@@ -1516,7 +1617,7 @@ class DocumentViewProvider implements vscode.CustomTextEditorProvider {
         // Re-render when the document content changes (e.g. external edit)
         const changeSubscription = vscode.workspace.onDidChangeTextDocument(async e => {
             if (e.document.uri.toString() === document.uri.toString()) {
-                if (ignoringSelfEdit) {
+                if (this.ignoringSelfEdit.get(webviewPanel)) {
                     return;
                 }
                 await this.updateWebview(document, webviewPanel);
@@ -1542,6 +1643,7 @@ class DocumentViewProvider implements vscode.CustomTextEditorProvider {
             this.viewer.dataTableWebViews.delete(webviewPanel);
             this.viewer.viewerStates.delete(webviewPanel);
             this.viewer.webviewDocuments.delete(webviewPanel);
+            this.ignoringSelfEdit.delete(webviewPanel);
             vscode.commands.executeCommand('setContext', 'msKustoExplorer.resultViewerHasChart', false);
             vscode.commands.executeCommand('setContext', 'msKustoExplorer.resultViewerChartActive', false);
             vscode.commands.executeCommand('setContext', 'msKustoExplorer.resultViewerShowingData', false);
@@ -1616,9 +1718,20 @@ class DocumentViewProvider implements vscode.CustomTextEditorProvider {
         const docTableWebViews: WebViewAdapter[] = [];
         for (let i = 0; i < resultData.tables.length; i++) {
             const adapter = new WebViewAdapter(webviewPanel.webview, `setTableContent-${i}`);
-            const view = this.dataTableProvider.createView(adapter, resultData.tables[i]!);
+            const table = resultData.tables[i]!;
+            const view = this.dataTableProvider.createView(adapter, table, findTableView(resultData, table.name));
             docTableViews.push(view);
             docTableWebViews.push(adapter);
+            view.onDidChangeViewState((state) => {
+                storeTableView(resultData, state);
+                // Persist to the backing document immediately. .kqr docs
+                // have no Ctrl+S affordance from the webview side, so we
+                // auto-save (same model the chart editor uses for options).
+                this.ignoringSelfEdit.set(webviewPanel, true);
+                void persistResultDataToDocument(document, resultData).finally(() => {
+                    this.ignoringSelfEdit.set(webviewPanel, false);
+                });
+            });
         }
         this.viewer.dataTableViews.set(webviewPanel, docTableViews);
         this.viewer.dataTableWebViews.set(webviewPanel, docTableWebViews);

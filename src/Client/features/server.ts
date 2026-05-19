@@ -560,6 +560,25 @@ export interface ResultData {
     clientRequestId?: string;
     tables: ResultTable[];
     charts?: ResultChart[];
+    tableViews?: ResultTableView[];
+}
+
+/**
+ * Per-table presentation state. Looked up by `name` (matches
+ * `ResultTable.name`). Optional/absent fields mean "use default behavior"
+ * (original column order, auto width).
+ */
+export interface ResultTableView {
+    /** Name of the `ResultTable` this view applies to. */
+    name: string;
+    /**
+     * Display order for columns. Each entry is the index into the table's
+     * original `columns[]` array, plus an optional pixel width. The array
+     * must be a permutation of valid column indices to fully describe the
+     * order; if it is shorter, missing columns are appended in their
+     * original order. Entries with out-of-range indices are ignored.
+     */
+    columns?: Array<{ index: number; width?: number }>;
 }
 
 /** Serializable representation of a named chart bound to an optional result table. */

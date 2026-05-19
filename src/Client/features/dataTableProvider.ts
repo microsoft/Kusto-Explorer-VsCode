@@ -12,7 +12,7 @@
  * content by mapping the adapter's content command to a specific div.
  */
 
-import type { IServer, ResultTable } from './server';
+import type { IServer, ResultTable, ResultTableView } from './server';
 import type { IWebView } from './webview';
 import type { IClipboard } from './clipboard';
 import { formatCfHtml } from './clipboard';
@@ -37,13 +37,29 @@ export interface IDataTableView {
     copyTableAsHtml(): Promise<void>;
     /** Toggle search box visibility. */
     toggleSearch(): void;
+    /**
+     * Current presentation state (column order/widths), or undefined when
+     * the user has not made any adjustments. Callers persist this into the
+     * matching `ResultData.tableViews[i]` slot.
+     */
+    getViewState(): ResultTableView | undefined;
+    /**
+     * Fires whenever the view state changes (user resized or reordered
+     * columns). Subscribers typically mark the document dirty and update
+     * the cached `ResultData.tableViews[i]`.
+     */
+    onDidChangeViewState(listener: (state: ResultTableView) => void): { dispose(): void };
     /** Release handlers and resources. */
     dispose(): void;
 }
 
 /** Provider for creating data table views bound to webview regions. */
 export interface IDataTableProvider {
-    createView(webview: IWebView, table: ResultTable): IDataTableView;
+    /**
+     * @param view Optional initial presentation state. When provided, the
+     *             grid is rendered with the saved column order and widths.
+     */
+    createView(webview: IWebView, table: ResultTable, view?: ResultTableView): IDataTableView;
 }
 
 // ─── Implementation ─────────────────────────────────────────────────────────
@@ -78,12 +94,21 @@ class DataTableView implements IDataTableView {
      * to subset the table for expression / HTML produced for drag-and-drop.
      */
     private currentSelection: { rows: number[]; cols: number[] } | null = null;
+    /**
+     * Current per-column view state. `undefined` means "all defaults".
+     * Mutated whenever the webview reports a resize or (eventually) a
+     * reorder, then handed back via `getViewState()` and emitted to
+     * `viewStateListeners`.
+     */
+    private viewState: ResultTableView | undefined;
+    private readonly viewStateListeners = new Set<(state: ResultTableView) => void>();
 
-    constructor(webview: IWebView, server: IServer, clipboard: IClipboard, table: ResultTable) {
+    constructor(webview: IWebView, server: IServer, clipboard: IClipboard, table: ResultTable, view?: ResultTableView) {
         this.webview = webview;
         this.server = server;
         this.clipboard = clipboard;
         this.table = table;
+        this.viewState = view;
         this.token = makeToken();
         webview.setup(DataTableView.buildHeadHtml(), '');
         this.subscription = webview.handle((msg) => {
@@ -102,6 +127,9 @@ class DataTableView implements IDataTableView {
                 this.currentSelection = sel ?? null;
                 this.resolveExpression();
             }
+            if (msg.command === 'setColumnView') {
+                this.applyColumnViewFromWebview(msg.columns);
+            }
         });
 
         const data = {
@@ -115,8 +143,50 @@ class DataTableView implements IDataTableView {
             rows: table.rows.map(row => row.map(cell => formatCellValue(cell)))
         };
         const json = JSON.stringify(data).replace(/<\//g, '<\\/');
-        webview.setContent(`<table></table>${this.buildInitScript(json)}`);
+        const viewJson = JSON.stringify(this.viewState ?? null).replace(/<\//g, '<\\/');
+        webview.setContent(`<table></table>${this.buildInitScript(json, viewJson)}`);
         this.resolveExpression();
+    }
+
+    getViewState(): ResultTableView | undefined {
+        return this.viewState;
+    }
+
+    onDidChangeViewState(listener: (state: ResultTableView) => void): { dispose(): void } {
+        this.viewStateListeners.add(listener);
+        return {
+            dispose: () => { this.viewStateListeners.delete(listener); }
+        };
+    }
+
+    /**
+     * Webview reported a column-view change (resize or reorder). Validate,
+     * store as the new view state, and notify listeners so the host can
+     * persist and mark the document dirty.
+     */
+    private applyColumnViewFromWebview(raw: unknown): void {
+        if (!Array.isArray(raw)) return;
+        const colCount = this.table.columns.length;
+        const seen = new Set<number>();
+        const columns: Array<{ index: number; width?: number }> = [];
+        for (const entry of raw as Array<{ index?: unknown; width?: unknown }>) {
+            if (!entry || typeof entry !== 'object') continue;
+            const idx = entry.index;
+            if (typeof idx !== 'number' || !Number.isInteger(idx) || idx < 0 || idx >= colCount) continue;
+            if (seen.has(idx)) continue;
+            seen.add(idx);
+            const w = entry.width;
+            const next: { index: number; width?: number } = { index: idx };
+            if (typeof w === 'number' && Number.isFinite(w) && w > 0) {
+                next.width = Math.round(w);
+            }
+            columns.push(next);
+        }
+        const state: ResultTableView = { name: this.table.name, columns };
+        this.viewState = state;
+        for (const listener of this.viewStateListeners) {
+            try { listener(state); } catch { /* listeners are best-effort */ }
+        }
     }
 
     async copyTableAsDatatable(): Promise<void> {
@@ -432,8 +502,11 @@ class DataTableView implements IDataTableView {
     /**
      * Builds the inline init script that is delivered with the table content.
      * Uses container-relative DOM queries and the instance token for message scoping.
+     * @param tableDataJson Stringified `{ columns, rows }` payload.
+     * @param viewJson      Stringified `ResultTableView` or `null` when no
+     *                      initial view state is provided.
      */
-    private buildInitScript(tableDataJson: string): string {
+    private buildInitScript(tableDataJson: string, viewJson: string): string {
         const token = this.token;
         return `<script>
 (function() {
@@ -455,6 +528,10 @@ class DataTableView implements IDataTableView {
     var cachedFullExpression = '';
     var cachedFullHtml = '';
     var tableData = ${tableDataJson};
+    // Saved presentation state to apply on first render. Shape:
+    //   { columns: [{ index, width? }, ...] } | null
+    // index is the position in tableData.columns; width is in pixels.
+    var tableView = ${viewJson};
 
     // ── Initialize Simple-DataTables grid ──
     // Map Kusto column types to Simple-DataTables sort types so numeric and
@@ -575,6 +652,177 @@ class DataTableView implements IDataTableView {
         postSelectionChange();
     });
 
+    // After every internal re-render the library rebuilds tbody (and may
+    // touch thead). Re-apply our column order so reorder survives sort,
+    // page, and search.
+    function reapplyColOrder() {
+        try { applyColOrder(); } catch (_) { /* table not initialized yet */ }
+    }
+    grid.on('datatable.update', reapplyColOrder);
+    grid.on('datatable.page', reapplyColOrder);
+    grid.on('datatable.search', reapplyColOrder);
+    grid.on('datatable.refresh', reapplyColOrder);
+
+    // ── Column-view state ───────────────────────────────────────────────
+    // Stamp each data-column header with its ORIGINAL column index (the
+    // index into tableData.columns), so resize/reorder can map a th back
+    // to a stable identity even after columns get rearranged. The gutter
+    // header (cellIndex 0) is intentionally left unstamped.
+    function stampOriginalColIndex() {
+        var ths = tableEl.querySelectorAll('thead th');
+        for (var i = 1; i < ths.length; i++) {
+            if (ths[i].dataset.col === undefined || ths[i].dataset.col === '') {
+                ths[i].dataset.col = String(i - 1);
+            }
+        }
+    }
+    stampOriginalColIndex();
+
+    // Apply any saved widths from the initial view state. We do this once,
+    // after the grid has built its thead. Setting widths pins layout to
+    // table-layout: fixed so the widths actually take effect for cells.
+    // Reorder restore is handled by colOrder below.
+    function applyInitialView() {
+        if (!tableView || !tableView.columns) return;
+        var anyWidth = false;
+        for (var p = 0; p < tableView.columns.length; p++) {
+            var pe = tableView.columns[p];
+            if (pe && typeof pe.width === 'number' && pe.width > 0) { anyWidth = true; break; }
+        }
+        if (!anyWidth) return;
+        // Defer until layout is valid. When the host tab is inactive at
+        // init time (display:none / zero size), every th.offsetWidth is
+        // zero — we cannot capture sensible natural widths in that state.
+        applySavedWidthsWhenLaidOut();
+    }
+
+    /**
+     * Apply saved widths from tableView.columns and pin to table-layout:
+     * fixed. Must run only when the table has a real layout (positive
+     * offsetWidths). Captures natural widths of EVERY column BEFORE
+     * applying any saved widths, because once an inline width is set on
+     * one column in auto layout the browser redistributes remaining space
+     * and unstyled columns (notably the gutter) report a squished
+     * offsetWidth — which would then get frozen by ensurePinned.
+     */
+    function applySavedWidthsWhenLaidOut() {
+        if (tableLayoutPinned) return;
+        var ths = tableEl.querySelectorAll('thead th');
+        if (ths.length === 0) {
+            try { requestAnimationFrame(applySavedWidthsWhenLaidOut); }
+            catch (_) { setTimeout(applySavedWidthsWhenLaidOut, 100); }
+            return;
+        }
+        // Ready when every th has positive offsetWidth.
+        for (var k = 0; k < ths.length; k++) {
+            if (ths[k].offsetWidth <= 0) {
+                try { requestAnimationFrame(applySavedWidthsWhenLaidOut); }
+                catch (_) { setTimeout(applySavedWidthsWhenLaidOut, 100); }
+                return;
+            }
+        }
+        // 1) Pin every column to its current natural width.
+        for (var i = 0; i < ths.length; i++) {
+            if (!ths[i].style.width) {
+                ths[i].style.width = ths[i].offsetWidth + 'px';
+            }
+        }
+        // 2) Overwrite data columns with their saved widths by original index.
+        var thsByCol = {};
+        for (var m = 1; m < ths.length; m++) {
+            thsByCol[ths[m].dataset.col] = ths[m];
+        }
+        for (var j = 0; j < tableView.columns.length; j++) {
+            var entry = tableView.columns[j];
+            if (!entry || typeof entry.index !== 'number') continue;
+            var th = thsByCol[String(entry.index)];
+            if (!th) continue;
+            if (typeof entry.width === 'number' && entry.width > 0) {
+                th.style.width = entry.width + 'px';
+            }
+        }
+        // 3) Total table width = sum of pinned column widths.
+        var total = 0;
+        for (var n = 0; n < ths.length; n++) {
+            total += parseFloat(ths[n].style.width) || ths[n].offsetWidth;
+        }
+        tableEl.style.setProperty('width', total + 'px', 'important');
+        tableEl.style.tableLayout = 'fixed';
+        tableLayoutPinned = true;
+    }
+    applyInitialView();
+
+    // ── Column reorder ─────────────────────────────────────────────────
+    // colOrder is the desired display order of ORIGINAL data-column indices.
+    // Length === dataColCount. The gutter column (cellIndex 0) is not part
+    // of colOrder and never moves.
+    var colOrder = [];
+    for (var coI = 0; coI < dataColCount; coI++) colOrder.push(coI);
+    if (tableView && tableView.columns) {
+        var seenCO = {};
+        var orderCO = [];
+        for (var coJ = 0; coJ < tableView.columns.length; coJ++) {
+            var coEntry = tableView.columns[coJ];
+            if (!coEntry || typeof coEntry.index !== 'number') continue;
+            if (coEntry.index < 0 || coEntry.index >= dataColCount) continue;
+            if (seenCO[coEntry.index]) continue;
+            orderCO.push(coEntry.index);
+            seenCO[coEntry.index] = true;
+        }
+        for (var coK = 0; coK < dataColCount; coK++) {
+            if (!seenCO[coK]) orderCO.push(coK);
+        }
+        if (orderCO.length === dataColCount) colOrder = orderCO;
+    }
+
+    /**
+     * Reorder the cells of thead and every tbody row to match colOrder.
+     * Skips the gutter cell (cellIndex 0). Idempotent.
+     */
+    function applyColOrder() {
+        var theadRow = tableEl.querySelector('thead tr');
+        if (theadRow) reorderRowCells(theadRow, function(c) { return c.dataset ? c.dataset.col : null; });
+        var tbody = tableEl.querySelector('tbody');
+        if (tbody) {
+            for (var rOI = 0; rOI < tbody.rows.length; rOI++) {
+                reorderRowCells(tbody.rows[rOI], function(c) { return c.getAttribute('data-orig-col'); });
+            }
+        }
+    }
+    function reorderRowCells(rowEl, getOrigIdx) {
+        var byCol = {};
+        var cells = rowEl.cells;
+        for (var i = 1; i < cells.length; i++) {
+            var oc = getOrigIdx(cells[i]);
+            if (oc !== null && oc !== undefined && oc !== '') byCol[String(oc)] = cells[i];
+        }
+        for (var j = 0; j < colOrder.length; j++) {
+            var cell = byCol[String(colOrder[j])];
+            if (cell) rowEl.appendChild(cell); // moves to the end, building order
+        }
+    }
+    applyColOrder();
+
+    /**
+     * Posts the current column view (original-index + width per data
+     * column, in display order) to the host. Called on resize mouseup.
+     */
+    function postColumnView() {
+        var ths = tableEl.querySelectorAll('thead th');
+        var cols = [];
+        for (var i = 1; i < ths.length; i++) {
+            var idxStr = ths[i].dataset.col;
+            if (idxStr === undefined || idxStr === '') continue;
+            var idx = parseInt(idxStr, 10);
+            if (isNaN(idx)) continue;
+            var entry = { index: idx };
+            var w = parseFloat(ths[i].style.width);
+            if (!isNaN(w) && w > 0) entry.width = Math.round(w);
+            cols.push(entry);
+        }
+        window._vscodeApi.postMessage({ command: 'setColumnView', columns: cols, _token: token });
+    }
+
     // Make the container focusable (tabindex=-1) so mousedown can hand it
     // keyboard focus. Without this, our mousedown handlers' preventDefault
     // calls suppress the browser's default focus transfer to the iframe
@@ -640,6 +888,7 @@ class DataTableView implements IDataTableView {
         tableEl.style.tableLayout = 'fixed';
         tableLayoutPinned = true;
     }
+
     var EDGE_PX = 6;
     var resizing = null;          // { th, startX, startWidth }
     var suppressNextClick = false;
@@ -684,6 +933,7 @@ class DataTableView implements IDataTableView {
         if (!resizing) return;
         resizing = null;
         document.body.classList.remove('col-resizing');
+        postColumnView();
     }
     document.addEventListener('mousemove', onDocMouseMove);
     document.addEventListener('mouseup', onDocMouseUp);
@@ -807,6 +1057,14 @@ class DataTableView implements IDataTableView {
     // mousedown target so the dragstart handler can tell where the user
     // grabbed the table.
     var lastDragOriginTarget = null;
+    // Column-reorder drag state. reorderSourceCol is the ORIGINAL column
+    // index being dragged; reorderTargetCol is the original index of the
+    // hovered drop column; reorderInsertBefore is true when the drop is to
+    // the left of the target, false for the right side.
+    var reorderSourceCol = null;
+    var reorderTargetCol = null;
+    var reorderInsertBefore = false;
+    var reorderIndicator = null;
     // When the mousedown handler has just established a selection (e.g. it
     // pre-selected a row on gutter mousedown so drag-extension works), set
     // this flag so the click handler that fires next does not interpret the
@@ -1295,15 +1553,42 @@ class DataTableView implements IDataTableView {
         // grab point came from the last mousedown.
         var origin = lastDragOriginTarget;
         // Drag from the column-header row is reserved for sort / column
-        // selection — cancel any HTML5 drag started there. The corner cell
-        // is the exception (drag carries the whole table), and a fully
-        // selected column also lets the user drag the selection by its
-        // header.
+        // selection / column REORDER. The corner cell carries the whole
+        // table, a fully selected column carries the selection, and a
+        // plain (unselected) data header initiates a column reorder.
         var th = origin && origin.closest ? origin.closest('thead th') : null;
         var fromCorner = th && th.cellIndex === 0;
         var fromSelectedHeader = th && !fromCorner && th.classList.contains('col-selected');
-        if (th && !fromCorner && !fromSelectedHeader) {
+        var fromPlainHeader = th && !fromCorner && !fromSelectedHeader;
+        // If the user grabbed the resize edge, the mousedown handler already
+        // called preventDefault — dragstart should not have fired. Guard
+        // anyway in case the threshold differs slightly.
+        if (fromPlainHeader && nearRightEdge(th, e.clientX)) {
             e.preventDefault();
+            return;
+        }
+        if (fromPlainHeader) {
+            var srcOrig = parseInt(th.dataset.col, 10);
+            if (isNaN(srcOrig)) { e.preventDefault(); return; }
+            reorderSourceCol = srcOrig;
+            reorderTargetCol = null;
+            reorderInsertBefore = false;
+            try { e.dataTransfer.setData('application/x-kusto-col', String(srcOrig)); } catch (_) {}
+            e.dataTransfer.effectAllowed = 'move';
+            // Small drag image: a clone of the header cell.
+            var colGhost = th.cloneNode(true);
+            colGhost.style.position = 'absolute';
+            colGhost.style.top = '-1000px';
+            colGhost.style.left = '-1000px';
+            colGhost.style.background = 'var(--vscode-editor-background, #1e1e1e)';
+            colGhost.style.color = 'var(--vscode-editor-foreground, #ddd)';
+            colGhost.style.padding = '4px 10px';
+            colGhost.style.border = '1px solid var(--vscode-focusBorder, #007acc)';
+            colGhost.style.opacity = '0.9';
+            colGhost.style.pointerEvents = 'none';
+            document.body.appendChild(colGhost);
+            try { e.dataTransfer.setDragImage(colGhost, 10, 10); } catch (_) {}
+            setTimeout(function() { if (colGhost.parentNode) colGhost.parentNode.removeChild(colGhost); }, 0);
             return;
         }
         var expr = fromCorner ? cachedFullExpression : cachedExpression;
@@ -1330,6 +1615,87 @@ class DataTableView implements IDataTableView {
             }
             e.preventDefault();
         }
+    });
+
+    // ── Column-reorder drop tracking ─────────────────────────────────────
+    function ensureReorderIndicator() {
+        if (reorderIndicator) return reorderIndicator;
+        var dc = tableEl.closest('.datatable-container') || container;
+        // The indicator is positioned relative to the scroll container so
+        // it tracks horizontal scrolling.
+        if (getComputedStyle(dc).position === 'static') {
+            dc.style.position = 'relative';
+        }
+        reorderIndicator = document.createElement('div');
+        reorderIndicator.style.position = 'absolute';
+        reorderIndicator.style.top = '0';
+        reorderIndicator.style.width = '2px';
+        reorderIndicator.style.background = 'var(--vscode-focusBorder, #007acc)';
+        reorderIndicator.style.pointerEvents = 'none';
+        reorderIndicator.style.zIndex = '50';
+        reorderIndicator.style.display = 'none';
+        dc.appendChild(reorderIndicator);
+        return reorderIndicator;
+    }
+
+    container.addEventListener('dragover', function(e) {
+        if (reorderSourceCol === null) return;
+        var th = e.target.closest ? e.target.closest('thead th') : null;
+        if (!th || !tableEl.contains(th) || th.cellIndex === 0) return;
+        e.preventDefault();
+        try { e.dataTransfer.dropEffect = 'move'; } catch (_) {}
+        var rect = th.getBoundingClientRect();
+        var mid = rect.left + rect.width / 2;
+        var insertBefore = e.clientX < mid;
+        var tgt = parseInt(th.dataset.col, 10);
+        if (isNaN(tgt)) return;
+        reorderTargetCol = tgt;
+        reorderInsertBefore = insertBefore;
+        var dc = tableEl.closest('.datatable-container') || container;
+        var dcRect = dc.getBoundingClientRect();
+        var x = (insertBefore ? rect.left : rect.right) - dcRect.left + dc.scrollLeft;
+        var ind = ensureReorderIndicator();
+        ind.style.left = (x - 1) + 'px';
+        ind.style.height = dc.clientHeight + 'px';
+        ind.style.display = 'block';
+    });
+
+    container.addEventListener('drop', function(e) {
+        if (reorderSourceCol === null) return;
+        e.preventDefault();
+        if (reorderIndicator) reorderIndicator.style.display = 'none';
+        var src = reorderSourceCol;
+        var tgt = reorderTargetCol;
+        var before = reorderInsertBefore;
+        reorderSourceCol = null;
+        reorderTargetCol = null;
+        if (tgt === null || src === tgt) return;
+        var srcPos = colOrder.indexOf(src);
+        if (srcPos < 0) return;
+        colOrder.splice(srcPos, 1);
+        var newTgtPos = colOrder.indexOf(tgt);
+        if (newTgtPos < 0) {
+            // Target somehow vanished — restore source at original position.
+            colOrder.splice(srcPos, 0, src);
+            return;
+        }
+        var insertAt = before ? newTgtPos : newTgtPos + 1;
+        colOrder.splice(insertAt, 0, src);
+        // Clear selection: cellIndex positions are about to shift.
+        if (selectedCells.size > 0 || selAnchor) {
+            selectedCells.clear();
+            selAnchor = null;
+            applySelection();
+            postSelectionChange();
+        }
+        applyColOrder();
+        postColumnView();
+    });
+
+    container.addEventListener('dragend', function() {
+        reorderSourceCol = null;
+        reorderTargetCol = null;
+        if (reorderIndicator) reorderIndicator.style.display = 'none';
     });
 
     // ── Listen for commands from the extension ──
@@ -1422,7 +1788,7 @@ export class DataTableProvider implements IDataTableProvider {
         this.clipboard = clipboard;
     }
 
-    createView(webview: IWebView, table: ResultTable): IDataTableView {
-        return new DataTableView(webview, this.server, this.clipboard, table);
+    createView(webview: IWebView, table: ResultTable, view?: ResultTableView): IDataTableView {
+        return new DataTableView(webview, this.server, this.clipboard, table, view);
     }
 }
