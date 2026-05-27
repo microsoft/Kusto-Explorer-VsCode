@@ -1082,8 +1082,8 @@
         "properties": {
           "msKustoExplorer.editor.showQuerySeparators": {
             "type": "boolean",
-            "default": true,
-            "description": "Show query separator lines (---) in the editor."
+            "default": false,
+            "description": "Show subtle separator lines between query blocks in the editor."
           }
         }
       },

@@ -16,6 +16,7 @@ import type { HistoryPanel } from './historyPanel';
 import type { IClipboard } from './clipboard';
 import type { ClipboardItem } from './clipboard';
 import { ENTITY_DEFINITION_SCHEME } from './entityDefinitionProvider';
+import { isQueryRangeInScope } from './queryRangeScope';
 
 const PASTE_KIND = vscode.DocumentDropOrPasteEditKind.Text.append('kusto');
 const QUERY_RUNNING_CONTEXT_KEY = 'msKustoExplorer.queryRunning';
@@ -159,6 +160,14 @@ export class QueryEditor {
                 { language: 'kusto' },
                 this.codeLensProvider
             )
+        );
+        context.subscriptions.push(
+            vscode.window.onDidChangeActiveTextEditor(() => this.codeLensProvider.refresh()),
+            vscode.window.onDidChangeTextEditorSelection(event => {
+                if (event.textEditor.document.languageId === 'kusto') {
+                    this.codeLensProvider.refresh();
+                }
+            })
         );
 
         // Register paste provider for clipboard context
@@ -642,6 +651,7 @@ class KustoCodeLensProvider implements vscode.CodeLensProvider {
 
     async provideCodeLenses(document: vscode.TextDocument): Promise<vscode.CodeLens[]> {
         const isEntityDefinition = document.uri.scheme === ENTITY_DEFINITION_SCHEME;
+        const activeSelections = getActiveSelectionRanges(document);
 
         const result = await this.server.getQueryRanges(document.uri.toString());
         if (!result || !result.ranges.length) {
@@ -663,22 +673,35 @@ class KustoCodeLensProvider implements vscode.CodeLensProvider {
                 continue;
             }
 
-            lenses.push(new vscode.CodeLens(vsRange, {
-                title: '⬚ Select',
-                command: 'msKustoExplorer.selectQuery',
-                tooltip: 'Select this query',
-                arguments: [range.start.line, range.start.character, range.end.line, range.end.character]
-            }));
+            const isInScope = isQueryRangeInScope(range, activeSelections);
+            const isQueryRangeRunning = !isEntityDefinition
+                && this.runningQueryRangeKeys.has(getQueryRangeKey(document.uri.toString(), range));
+            if (!isInScope && !isQueryRangeRunning) {
+                continue;
+            }
 
-            // Hide Run, Format, and Results lenses in entity definition documents
-            if (!isEntityDefinition) {
-                const isQueryRangeRunning = this.runningQueryRangeKeys.has(getQueryRangeKey(document.uri.toString(), range));
+            if (isInScope) {
+                lenses.push(new vscode.CodeLens(vsRange, {
+                    title: '⬚ Select',
+                    command: 'msKustoExplorer.selectQuery',
+                    tooltip: 'Select this query',
+                    arguments: [range.start.line, range.start.character, range.end.line, range.end.character]
+                }));
+            }
+
+            // Hide Run, Format, and Results lenses in entity definition documents.
+            // Keep the running indicator visible even if focus moves to another query.
+            if (!isEntityDefinition && (isInScope || isQueryRangeRunning)) {
                 lenses.push(new vscode.CodeLens(vsRange, {
                     title: isQueryRangeRunning ? '$(sync~spin) Running' : '▶ Run',
                     command: isQueryRangeRunning ? 'msKustoExplorer.runQuery.running' : 'msKustoExplorer.runQuery',
                     tooltip: isQueryRangeRunning ? 'This Kusto query is running' : 'Run this query',
                     arguments: [range.start.line, range.start.character, range.end.line, range.end.character]
                 }));
+            }
+
+            if (!isInScope) {
+                continue;
             }
 
             lenses.push(new vscode.CodeLens(vsRange, {
@@ -729,6 +752,18 @@ class KustoCodeLensProvider implements vscode.CodeLensProvider {
 
         return lenses;
     }
+}
+
+function getActiveSelectionRanges(document: vscode.TextDocument): SelectionRange[] {
+    const activeEditor = vscode.window.activeTextEditor;
+    if (!activeEditor || activeEditor.document.uri.toString() !== document.uri.toString()) {
+        return [];
+    }
+
+    return activeEditor.selections.map(selection => ({
+        start: { line: selection.start.line, character: selection.start.character },
+        end: { line: selection.end.line, character: selection.end.character }
+    }));
 }
 
 // =============================================================================
@@ -806,12 +841,12 @@ class KustoPasteEditProvider implements vscode.DocumentPasteEditProvider {
  */
 function activateQuerySeparators(context: vscode.ExtensionContext, server: IServer, errorRangeDecoration: vscode.TextEditorDecorationType): void {
 
-    // Decoration for separator line between queries
+    // Optional, subtle separator line between queries.
     const querySeparatorDecoration = vscode.window.createTextEditorDecorationType({
         isWholeLine: true,
-        borderWidth: '0 0 3px 0',
+        borderWidth: '0 0 1px 0',
         borderStyle: 'solid',
-        borderColor: 'rgba(128, 128, 128, 0.25)',
+        borderColor: 'rgba(128, 128, 128, 0.14)',
     });
 
     // Map to track debounce timers per document URI
@@ -834,7 +869,7 @@ function activateQuerySeparators(context: vscode.ExtensionContext, server: IServ
             );
 
             const config = vscode.workspace.getConfiguration('msKustoExplorer');
-            const enableSeparators = config.get<boolean>('editor.showQuerySeparators', true);
+            const enableSeparators = config.get<boolean>('editor.showQuerySeparators', false);
 
             const firstEditor = editors[0];
             if (!firstEditor) {
