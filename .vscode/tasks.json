@@ -6,7 +6,7 @@
       "type": "shell",
       "command": "npm run compile",
       "options": {
-        "cwd": "${workspaceFolder}\\src\\Client"
+        "cwd": "${workspaceFolder}/src/Client"
       },
       "problemMatcher": []
     },
@@ -15,7 +15,7 @@
       "type": "shell",
       "command": "npm run build-debug-server",
       "options": {
-        "cwd": "${workspaceFolder}\\src\\Client"
+        "cwd": "${workspaceFolder}/src/Client"
       },
       "problemMatcher": "$msCompile"
     },

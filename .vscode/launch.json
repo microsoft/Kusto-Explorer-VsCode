@@ -7,10 +7,10 @@
       "request": "launch",
       "preLaunchTask": "Build Extension Debug",
       "args": [
-        "--extensionDevelopmentPath=${workspaceFolder}\\src\\Client"
+        "--extensionDevelopmentPath=${workspaceFolder}/src/Client"
       ],
       "outFiles": [
-        "${workspaceFolder}\\src\\Client\\dist\\**\\*.js"
+        "${workspaceFolder}/src/Client/dist/**/*.js"
       ]
     }
   ]
