@@ -21,6 +21,7 @@ import { isQueryRangeInScope } from './queryRangeScope';
 const PASTE_KIND = vscode.DocumentDropOrPasteEditKind.Text.append('kusto');
 const QUERY_RUNNING_CONTEXT_KEY = 'msKustoExplorer.queryRunning';
 const MIN_QUERY_RUNNING_INDICATOR_MS = 500;
+const CODE_LENS_REFRESH_DEBOUNCE_MS = 100;
 
 /**
  * Builds a SelectionRange from optional CodeLens arguments.
@@ -155,6 +156,17 @@ export class QueryEditor {
 
         // Register CodeLens provider for queries
         this.codeLensProvider = new KustoCodeLensProvider(this.server, this.history);
+        let codeLensRefreshTimer: NodeJS.Timeout | undefined;
+        const scheduleCodeLensRefresh = () => {
+            if (codeLensRefreshTimer) {
+                clearTimeout(codeLensRefreshTimer);
+            }
+
+            codeLensRefreshTimer = setTimeout(() => {
+                this.codeLensProvider.refresh();
+                codeLensRefreshTimer = undefined;
+            }, CODE_LENS_REFRESH_DEBOUNCE_MS);
+        };
         context.subscriptions.push(
             vscode.languages.registerCodeLensProvider(
                 { language: 'kusto' },
@@ -162,10 +174,19 @@ export class QueryEditor {
             )
         );
         context.subscriptions.push(
-            vscode.window.onDidChangeActiveTextEditor(() => this.codeLensProvider.refresh()),
+            vscode.window.onDidChangeActiveTextEditor(editor => {
+                if (editor?.document.languageId === 'kusto') {
+                    scheduleCodeLensRefresh();
+                }
+            }),
             vscode.window.onDidChangeTextEditorSelection(event => {
                 if (event.textEditor.document.languageId === 'kusto') {
-                    this.codeLensProvider.refresh();
+                    scheduleCodeLensRefresh();
+                }
+            }),
+            new vscode.Disposable(() => {
+                if (codeLensRefreshTimer) {
+                    clearTimeout(codeLensRefreshTimer);
                 }
             })
         );
@@ -661,23 +682,25 @@ class KustoCodeLensProvider implements vscode.CodeLensProvider {
         const lenses: vscode.CodeLens[] = [];
 
         for (const range of result.ranges) {
-            const vsRange = new vscode.Range(
-                range.start.line, range.start.character,
-                range.end.line, range.end.character
-            );
-
-            const queryText = document.getText(vsRange);
-
-            // Skip empty or whitespace-only query ranges
-            if (queryText.trim().length === 0) {
-                continue;
-            }
-
             const isInScope = isQueryRangeInScope(range, activeSelections);
             const isQueryRangeRunning = !isEntityDefinition
                 && this.runningQueryRangeKeys.has(getQueryRangeKey(document.uri.toString(), range));
             if (!isInScope && !isQueryRangeRunning) {
                 continue;
+            }
+
+            const vsRange = new vscode.Range(
+                range.start.line, range.start.character,
+                range.end.line, range.end.character
+            );
+            let queryText: string | undefined;
+
+            // Skip empty or whitespace-only query ranges
+            if (isInScope) {
+                queryText = document.getText(vsRange);
+                if (queryText.trim().length === 0) {
+                    continue;
+                }
             }
 
             if (isInScope) {
@@ -700,7 +723,7 @@ class KustoCodeLensProvider implements vscode.CodeLensProvider {
                 }));
             }
 
-            if (!isInScope) {
+            if (!isInScope || queryText === undefined) {
                 continue;
             }
 
