@@ -1,0 +1,36 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build Client",
+      "type": "shell",
+      "command": "npm run compile",
+      "options": {
+        "cwd": "${workspaceFolder}/src/Client"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Build Debug Server",
+      "type": "shell",
+      "command": "npm run build-debug-server",
+      "options": {
+        "cwd": "${workspaceFolder}/src/Client"
+      },
+      "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "Build Extension Debug",
+      "dependsOrder": "sequence",
+      "dependsOn": [
+        "Build Client",
+        "Build Debug Server"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": []
+    }
+  ]
+}

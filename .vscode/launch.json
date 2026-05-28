@@ -1,0 +1,17 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run Extension",
+      "type": "extensionHost",
+      "request": "launch",
+      "preLaunchTask": "Build Extension Debug",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}/src/Client"
+      ],
+      "outFiles": [
+        "${workspaceFolder}/src/Client/dist/**/*.js"
+      ]
+    }
+  ]
+}

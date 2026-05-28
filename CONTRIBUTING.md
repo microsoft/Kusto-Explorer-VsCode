@@ -124,17 +124,17 @@ npm run compile
 ### Running Locally
 
 1. Open the repository in VS Code
-2. Press `F5` to launch the Extension Development Host
-3. Open a `.kql` file to activate the extension
+2. Select the **Run Extension** debug profile
+3. Press `F5` to build the client, build the debug server, and launch the Extension Development Host
+4. Open a `.kql` file to activate the extension
 
 ## Debugging
 
 ### Debugging the Client
 
-1. Open the `src/Client` folder in VS Code
-2. Build the client using the `compile` task in the **NPM SCRIPTS** explorer panel
-3. Build the server using `build-debug-server` in the same panel
-4. Press **F5** to launch the Extension Development Host with debugging enabled
+1. Open the repository root folder in VS Code
+2. Select the **Run Extension** debug profile
+3. Press **F5** to build the client, build the debug server, and launch the Extension Development Host with debugging enabled
 
 ### Debugging the Server
 
