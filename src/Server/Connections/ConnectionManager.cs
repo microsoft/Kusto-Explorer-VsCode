@@ -400,16 +400,23 @@ public class ConnectionManager : IConnectionManager
                 using (resultReader)
                 {
                     var dataSet = KustoDataReaderParser.ParseV1(resultReader, null);
-                    var mainResult = dataSet?.GetMainResultsOrNull();
-                    var tables = dataSet != null
-                        ? dataSet.Tables.Where(t => t.TableKind == WellKnownDataSet.PrimaryResult).Select(t => (DataTable)t.TableData).ToImmutableList()
-                        : null;
-                    var chartOptions = mainResult?.VisualizationOptions != null && mainResult.VisualizationOptions.Visualization != Data.Utils.VisualizationKind.None
-                        ? ChartOptions.FromChartVisualizationOptions(mainResult.VisualizationOptions)
-                        : null;
-                    var charts = chartOptions != null
-                        ? ImmutableList.Create(new ResultChart { Options = chartOptions })
-                        : null;
+                    var primaryTables = dataSet != null
+                        ? dataSet.Tables.Where(t => t.TableKind == WellKnownDataSet.PrimaryResult).ToImmutableList()
+                        : ImmutableList<Kusto.Data.Data.KustoResponseDataTable>.Empty;
+                    var tables = primaryTables.Select(t => (DataTable)t.TableData).ToImmutableList();
+
+                    // A `render` may be attached to any statement, not only the main result.
+                    ImmutableList<ResultChart>.Builder? chartsBuilder = null;
+                    foreach (var t in primaryTables)
+                    {
+                        var viz = t.VisualizationOptions;
+                        if (viz == null || viz.Visualization == Data.Utils.VisualizationKind.None) continue;
+                        var opts = ChartOptions.FromChartVisualizationOptions(viz);
+                        chartsBuilder ??= ImmutableList.CreateBuilder<ResultChart>();
+                        chartsBuilder.Add(new ResultChart { TableName = t.TableData?.TableName, Options = opts });
+                    }
+                    var charts = chartsBuilder?.ToImmutable();
+
                     return new ExecuteResult
                     {
                         Tables = tables,

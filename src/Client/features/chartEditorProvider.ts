@@ -82,13 +82,20 @@ const defaultableChartOptionKeys: Array<keyof ChartOptions> = [
 
 // ─── Interfaces ─────────────────────────────────────────────────────────────
 
+/** Lightweight description of a result table for the chart editor. */
+export interface ChartEditorTableInfo {
+    name: string;
+    columns: string[];
+}
+
 /**
  * View for the chart-options edit panel in a webview.
  * Created by `IChartEditorProvider.createView()`.
  */
 export interface IChartEditorView {
-    /** Populate (or re-populate) the edit panel with the given options and column names. */
-    setOptions(options: ChartOptions | undefined, columnNames: string[], defaults?: Partial<ChartOptions>): void;
+    /** Populate (or re-populate) the edit panel with the given options and column names.
+     *  `tables` lists all sibling result tables (used by graph chart options). */
+    setOptions(options: ChartOptions | undefined, columnNames: string[], defaults?: Partial<ChartOptions>, tables?: ChartEditorTableInfo[], primaryTableName?: string): void;
     /** Fires when the user changes any chart option in the edit panel. */
     onOptionsChanged: ((options: ChartOptions) => void) | undefined;
     /** Release handlers and resources. */
@@ -121,19 +128,23 @@ class ChartEditorView implements IChartEditorView {
                     ? this.captureCurrentDefaults(this.currentOptions, this.currentDefaults)
                     : this.restoreMatchingDefaults(this.currentOptions, this.currentDefaults);
                 this.currentOptions = updatedOptions;
-                this.webview.setContent(this.buildFormHtml(updatedOptions, this.lastColumnNames, this.currentDefaults));
+                this.webview.setContent(this.buildFormHtml(updatedOptions, this.lastColumnNames, this.currentDefaults, this.lastTables, this.lastPrimaryTableName));
                 this.onOptionsChanged?.(updatedOptions);
             }
         });
     }
 
     private lastColumnNames: string[] = [];
+    private lastTables: ChartEditorTableInfo[] = [];
+    private lastPrimaryTableName: string | undefined;
 
-    setOptions(options: ChartOptions | undefined, columnNames: string[], defaults?: Partial<ChartOptions>): void {
+    setOptions(options: ChartOptions | undefined, columnNames: string[], defaults?: Partial<ChartOptions>, tables?: ChartEditorTableInfo[], primaryTableName?: string): void {
         this.currentOptions = options ?? { type: 'Column' };
         this.lastColumnNames = columnNames;
+        this.lastTables = tables ?? [];
+        this.lastPrimaryTableName = primaryTableName;
         this.currentDefaults = defaults ?? {};
-        this.webview.setContent(this.buildFormHtml(this.currentOptions, columnNames, this.currentDefaults));
+        this.webview.setContent(this.buildFormHtml(this.currentOptions, columnNames, this.currentDefaults, this.lastTables, this.lastPrimaryTableName));
     }
 
     dispose(): void {
@@ -494,6 +505,44 @@ class ChartEditorView implements IChartEditorView {
             }
         }
 
+        // Repopulate the node Id/Label/Kind column dropdowns from the columns
+        // of the newly selected Nodes Table. Done entirely client-side using
+        // the table→columns map embedded on the select, so the form is not
+        // rebuilt (which would reset section collapse state and focus).
+        function _editorOnNodesTableChanged() {
+            var sel = document.getElementById('opt-nodesTable');
+            if (sel) {
+                var map = {};
+                try { map = JSON.parse(sel.getAttribute('data-node-columns') || '{}'); } catch (e) {}
+                var cols = map[sel.value] || [];
+                ['opt-nodeIdColumn', 'opt-nodeLabelColumn', 'opt-nodeKindColumn'].forEach(function(id) {
+                    var colSel = document.getElementById(id);
+                    if (!colSel) return;
+                    var prev = colSel.value;
+                    var html = '<option value="">(auto)</option>';
+                    var keep = false;
+                    for (var i = 0; i < cols.length; i++) {
+                        var c = String(cols[i]);
+                        var selAttr = (c === prev) ? ' selected' : '';
+                        if (c === prev) keep = true;
+                        html += '<option value="' + _editorEscapeAttr(c) + '"' + selAttr + '>' + _editorEscapeHtml(c) + '</option>';
+                    }
+                    colSel.innerHTML = html;
+                    // If the previously selected column no longer exists, fall
+                    // back to (auto).
+                    colSel.value = keep ? prev : '';
+                });
+            }
+            _editorOnChartOptionChanged();
+        }
+
+        function _editorEscapeHtml(s) {
+            return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
+        function _editorEscapeAttr(s) {
+            return _editorEscapeHtml(s).replace(/"/g, '&quot;');
+        }
+
         document.addEventListener('click', function(e) {
             if (e.target.closest && e.target.closest('.header-actions')) {
                 return;
@@ -584,6 +633,16 @@ class ChartEditorView implements IChartEditorView {
             if (xTickAngle && xTickAngle.value !== '') opts.xTickAngle = Number(xTickAngle.value);
             var yTickAngle = document.getElementById('opt-yTickAngle');
             if (yTickAngle && yTickAngle.value !== '') opts.yTickAngle = Number(yTickAngle.value);
+            var nodesTable = document.getElementById('opt-nodesTable');
+            if (nodesTable && nodesTable.value) opts.nodesTable = nodesTable.value;
+            var nodeIdColumn = document.getElementById('opt-nodeIdColumn');
+            if (nodeIdColumn && nodeIdColumn.value) opts.nodeIdColumn = nodeIdColumn.value;
+            var nodeLabelColumn = document.getElementById('opt-nodeLabelColumn');
+            if (nodeLabelColumn && nodeLabelColumn.value) opts.nodeLabelColumn = nodeLabelColumn.value;
+            var nodeKindColumn = document.getElementById('opt-nodeKindColumn');
+            if (nodeKindColumn && nodeKindColumn.value) opts.nodeKindColumn = nodeKindColumn.value;
+            var edgeKindColumn = document.getElementById('opt-edgeKindColumn');
+            if (edgeKindColumn && edgeKindColumn.value) opts.edgeKindColumn = edgeKindColumn.value;
             return opts;
         }
 
@@ -633,7 +692,7 @@ class ChartEditorView implements IChartEditorView {
         <\/script>`;
     }
 
-    private buildFormHtml(chartOptions: ChartOptions, columnNames: string[], defaults: Partial<ChartOptions>): string {
+    private buildFormHtml(chartOptions: ChartOptions, columnNames: string[], defaults: Partial<ChartOptions>, tables: ChartEditorTableInfo[] = [], primaryTableName?: string): string {
         const opts = chartOptions;
         const formatDefaultLabel = (value: string) => `Default (${value})`;
         const formatAngleLabel = (value: number | undefined) => value == null ? 'Auto' : `${value}°`;
@@ -696,6 +755,53 @@ class ChartEditorView implements IChartEditorView {
         const xColOptions = ['', ...columnNames].map(c =>
             `<option value="${escapeHtml(c)}"${c === (opts.xColumn ?? '') ? ' selected' : ''}>${c || '(auto)'}</option>`
         ).join('');
+
+        const currentEdgeKindColumn = opts.edgeKindColumn ?? '';
+        const edgeKindColumnOptions = ['', ...columnNames].map(c =>
+            `<option value="${escapeHtml(c)}"${c === currentEdgeKindColumn ? ' selected' : ''}>${c || '(auto)'}</option>`
+        ).join('');
+
+        // Sibling tables (everything except the primary/edges table) — used to
+        // populate graph node table/column dropdowns.
+        const siblingTables = tables.filter(t => !primaryTableName || t.name !== primaryTableName);
+        const siblingNames = siblingTables.map(t => t.name).filter(n => !!n);
+        const currentNodesTable = opts.nodesTable ?? '';
+        // Options: (auto) = '' → auto-sense a sibling named "nodes";
+        //          then each sibling table by name.
+        const nodesTableOptions = [
+            `<option value=""${currentNodesTable === '' ? ' selected' : ''}>(auto)</option>`,
+            ...siblingNames.map(n =>
+                `<option value="${escapeHtml(n)}"${n === currentNodesTable ? ' selected' : ''}>${escapeHtml(n)}</option>`
+            ),
+        ].join('');
+        // Resolve which sibling table to source node-column choices from. If
+        // the user chose one explicitly, use it; otherwise auto-sense only a
+        // sibling literally named "nodes" (case-insensitive).
+        const resolveNodesTable = (): ChartEditorTableInfo | undefined => {
+            if (currentNodesTable) {
+                const m = siblingTables.find(t => t.name === currentNodesTable);
+                if (m) return m;
+            }
+            return siblingTables.find(t => (t.name ?? '').toLowerCase() === 'nodes');
+        };
+        const nodesTable = resolveNodesTable();
+        const nodeColumnNames = nodesTable?.columns ?? [];
+        const buildNodeColOptions = (current: string) => ['', ...nodeColumnNames].map(c =>
+            `<option value="${escapeHtml(c)}"${c === current ? ' selected' : ''}>${c || '(auto)'}</option>`
+        ).join('');
+        const nodeIdColumnOptions = buildNodeColOptions(opts.nodeIdColumn ?? '');
+        const nodeLabelColumnOptions = buildNodeColOptions(opts.nodeLabelColumn ?? '');
+        const nodeKindColumnOptions = buildNodeColOptions(opts.nodeKindColumn ?? '');
+        // Map of nodes-table select value → that table's column names, so the
+        // page can repopulate the node-column dropdowns client-side when the
+        // user changes the Nodes Table (no server round-trip / form rebuild,
+        // which would reset section collapse state and focus). The empty-string
+        // key ('(auto)') maps to whichever sibling table resolution picks.
+        const nodeColumnsByTable: { [tableValue: string]: string[] } = { '': nodeColumnNames };
+        for (const t of siblingTables) {
+            if (t.name) { nodeColumnsByTable[t.name] = t.columns ?? []; }
+        }
+        const nodeColumnsByTableJson = escapeHtml(JSON.stringify(nodeColumnsByTable));
 
         const colOptionsList = columnNames.map(c =>
             `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`
@@ -979,6 +1085,32 @@ class ChartEditorView implements IChartEditorView {
                 <div class="field">
                     <label for="opt-yTickAngle">Tick Label Angle</label>
                     <select id="opt-yTickAngle" onchange="_editorOnChartOptionChanged()">${yTickAngleOptions}</select>
+                </div>
+            </div>
+
+            <div class="section-header collapsed" onclick="_editorToggleSection(this)">
+                <span class="chevron">&#9662;</span>Graph
+            </div>
+            <div class="section-body collapsed">
+                <div class="field">
+                    <label for="opt-nodesTable">Nodes Table</label>
+                    <select id="opt-nodesTable" data-node-columns="${nodeColumnsByTableJson}" onchange="_editorOnNodesTableChanged()">${nodesTableOptions}</select>
+                </div>
+                <div class="field">
+                    <label for="opt-nodeIdColumn">Node Id Column</label>
+                    <select id="opt-nodeIdColumn" onchange="_editorOnChartOptionChanged()">${nodeIdColumnOptions}</select>
+                </div>
+                <div class="field">
+                    <label for="opt-nodeLabelColumn">Node Label Column</label>
+                    <select id="opt-nodeLabelColumn" onchange="_editorOnChartOptionChanged()">${nodeLabelColumnOptions}</select>
+                </div>
+                <div class="field">
+                    <label for="opt-nodeKindColumn">Node Kind Column</label>
+                    <select id="opt-nodeKindColumn" onchange="_editorOnChartOptionChanged()">${nodeKindColumnOptions}</select>
+                </div>
+                <div class="field">
+                    <label for="opt-edgeKindColumn">Edge Kind Column</label>
+                    <select id="opt-edgeKindColumn" onchange="_editorOnChartOptionChanged()">${edgeKindColumnOptions}</select>
                 </div>
             </div>`;
     }

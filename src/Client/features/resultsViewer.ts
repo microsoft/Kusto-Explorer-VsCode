@@ -311,6 +311,34 @@ function findTableView(resultData: server.ResultData, tableName: string): server
 }
 
 /**
+ * Stores per-chart presentation state into `resultData.chartViews`. Looked
+ * up by matching `name` (when set) or `tableName`. Mutates in place.
+ */
+function storeChartView(resultData: server.ResultData, state: server.ResultChartView): void {
+    if (!resultData.chartViews) {
+        resultData.chartViews = [];
+    }
+    const idx = resultData.chartViews.findIndex(v => chartViewKeyMatches(v, state));
+    if (idx >= 0) {
+        resultData.chartViews[idx] = state;
+    } else {
+        resultData.chartViews.push(state);
+    }
+}
+
+/** Find a previously-saved chart view by name/tableName. */
+function findChartView(resultData: server.ResultData, chart: server.ResultChart | undefined): server.ResultChartView | undefined {
+    if (!chart || !resultData.chartViews) return undefined;
+    return resultData.chartViews.find(v => chartViewKeyMatches(v, chart));
+}
+
+function chartViewKeyMatches(a: { name?: string; tableName?: string }, b: { name?: string; tableName?: string }): boolean {
+    if (a.name && b.name) return a.name === b.name;
+    if (a.tableName && b.tableName) return a.tableName === b.tableName;
+    return !a.name && !b.name && !a.tableName && !b.tableName;
+}
+
+/**
  * Writes the current `resultData` JSON back into the backing text document
  * and saves it. .kqr documents are not user-authored — there is no UI
  * affordance for "dirty" on the bottom results panel or singleton view —
@@ -501,6 +529,15 @@ export class ResultsViewer {
                 this.panelChartView = this.chartProvider.createView(panelAdapter);
                 this.panelWebView = panelAdapter;
                 this.wireChartView(this.panelChartView);
+                this.panelChartView.onDidChangeViewState?.((state) => {
+                    if (!this.lastPanelResultData) return;
+                    const raw = getPrimaryChart(this.lastPanelResultData);
+                    storeChartView(this.lastPanelResultData, {
+                        ...state,
+                        ...(raw?.name ? { name: raw.name } : {}),
+                        ...(raw?.tableName ? { tableName: raw.tableName } : {}),
+                    });
+                });
 
                 // Create chart editor view for the bottom panel
                 const panelEditorAdapter = new WebViewAdapter(webviewView.webview, 'setEditPanelContent');
@@ -674,9 +711,9 @@ export class ResultsViewer {
         if (hasChart && chartOptions) {
             const table = chartTable;
             if (table) {
-                this.panelChartView?.renderChart(table, chartOptions, darkMode);
+                this.panelChartView?.renderChart(table, chartOptions, darkMode, { tables: resultData.tables }, findChartView(resultData, rawChart));
             }
-            this.panelEditorView?.setOptions(rawChartOptions, columnNames, chartDefaults);
+            this.panelEditorView?.setOptions(rawChartOptions, columnNames, chartDefaults, resultData.tables.map(t => ({ name: t.name, columns: t.columns.map(c => c.name) })), chartTable?.name);
         }
 
         const html = this.htmlBuilder.BuildMultiTabbedHtml(hasChart, mode, this.panelWebView, this.panelEditorWebView, chartOptions, columnNames,
@@ -824,9 +861,9 @@ export class ResultsViewer {
             if (hasChart && chartOptions) {
                 const table = chartTable;
                 if (table) {
-                    this.singletonChartView?.renderChart(table, chartOptions, darkMode);
+                    this.singletonChartView?.renderChart(table, chartOptions, darkMode, { tables: resultData.tables }, findChartView(resultData, rawChart));
                 }
-                this.singletonEditorView?.setOptions(rawChartOptions, columnNames, chartDefaults);
+                this.singletonEditorView?.setOptions(rawChartOptions, columnNames, chartDefaults, resultData.tables.map(t => ({ name: t.name, columns: t.columns.map(c => c.name) })), chartTable?.name);
             }
         } finally {
             if (chartAdapter) { chartAdapter.suppressMessages = priorChartSuppress; }
@@ -994,6 +1031,16 @@ export class ResultsViewer {
         this.singletonChartView = this.chartProvider.createView(singletonAdapter);
         this.singletonWebView = singletonAdapter;
         this.wireChartView(this.singletonChartView);
+        this.singletonChartView.onDidChangeViewState?.((state) => {
+            if (!this.singletonResultData) return;
+            const raw = getPrimaryChart(this.singletonResultData);
+            storeChartView(this.singletonResultData, {
+                ...state,
+                ...(raw?.name ? { name: raw.name } : {}),
+                ...(raw?.tableName ? { tableName: raw.tableName } : {}),
+            });
+            this.scheduleSingletonWriteBack();
+        });
 
         // Create chart editor view for the singleton view
         const singletonEditorAdapter = new WebViewAdapter(this.singletonView.webview, 'setEditPanelContent');
@@ -1112,7 +1159,7 @@ export class ResultsViewer {
         const darkMode = isDarkMode();
         const table = getPrimaryChartTable(modifiedData, rawChart);
         if (table && chartOptions) {
-            this.singletonChartView?.renderChart(table, chartOptions, darkMode);
+            this.singletonChartView?.renderChart(table, chartOptions, darkMode, { tables: modifiedData.tables }, findChartView(modifiedData, rawChart));
         }
     }
 
@@ -1123,7 +1170,7 @@ export class ResultsViewer {
         if (!chartOptions) { return; }
         const table = getPrimaryChartTable(this.lastPanelResultData, rawChart);
         if (table) {
-            this.panelChartView?.renderChart(table, chartOptions, isDarkMode());
+            this.panelChartView?.renderChart(table, chartOptions, isDarkMode(), { tables: this.lastPanelResultData.tables }, findChartView(this.lastPanelResultData, rawChart));
         }
     }
 
@@ -1583,6 +1630,18 @@ class DocumentViewProvider implements vscode.CustomTextEditorProvider {
         this.viewer.wireChartView(docChartView);
         this.viewer.chartViews.set(webviewPanel, docChartView);
         this.viewer.chartWebViews.set(webviewPanel, docAdapter);
+        docChartView.onDidChangeViewState?.((state) => {
+            const docState = this.viewer.viewerStates.get(webviewPanel);
+            if (!docState?.resultData) return;
+            const raw = getPrimaryChart(docState.resultData);
+            storeChartView(docState.resultData, {
+                ...state,
+                ...(raw?.name ? { name: raw.name } : {}),
+                ...(raw?.tableName ? { tableName: raw.tableName } : {}),
+            });
+            // Document-backed views write through their text document on save;
+            // mutating in place is sufficient for the next save to capture it.
+        });
 
         // Create chart editor view for this document view
         const docEditorAdapter = new WebViewAdapter(webviewPanel.webview, 'setEditPanelContent');
@@ -1796,10 +1855,10 @@ class DocumentViewProvider implements vscode.CustomTextEditorProvider {
             const table = chartTable;
             if (table) {
                 const controller = this.viewer.chartViews.get(webviewPanel);
-                controller?.renderChart(table, chartOptions, darkMode);
+                controller?.renderChart(table, chartOptions, darkMode, { tables: resultData.tables }, findChartView(resultData, rawChart));
             }
             const editorView = this.viewer.editorViews.get(webviewPanel);
-            editorView?.setOptions(rawChartOptions, columnNames, chartDefaults);
+            editorView?.setOptions(rawChartOptions, columnNames, chartDefaults, resultData.tables.map(t => ({ name: t.name, columns: t.columns.map(c => c.name) })), chartTable?.name);
         }
 
         const html = this.BuildMultiTabbedHtml(hasChart, 'all', docWebView, docEditorWebView, chartOptions, columnNames,
@@ -1817,7 +1876,7 @@ class DocumentViewProvider implements vscode.CustomTextEditorProvider {
         const table = getPrimaryChartTable(modifiedData, rawChart);
         if (table) {
             const controller = this.viewer.chartViews.get(webviewPanel);
-            controller?.renderChart(table, chartOptions, darkMode);
+            controller?.renderChart(table, chartOptions, darkMode, { tables: modifiedData.tables }, findChartView(modifiedData, rawChart));
         }
     }
 

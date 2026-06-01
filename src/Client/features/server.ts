@@ -561,6 +561,7 @@ export interface ResultData {
     tables: ResultTable[];
     charts?: ResultChart[];
     tableViews?: ResultTableView[];
+    chartViews?: ResultChartView[];
 }
 
 /**
@@ -586,6 +587,30 @@ export interface ResultChart {
     name?: string;
     tableName?: string;
     options: ChartOptions;
+}
+
+/**
+ * Per-chart presentation state. Looked up by matching `name` (if set) or
+ * `tableName`. Optional/absent fields mean "use default behavior".
+ */
+export interface ResultChartView {
+    /** Matches `ResultChart.name`, if the chart has one. */
+    name?: string;
+    /** Matches `ResultChart.tableName`, if the chart is bound to a specific table. */
+    tableName?: string;
+    /** Graph chart-specific state: cached node positions keyed by node id. */
+    graph?: {
+        /**
+         * Layout seed used to make the cose layout reproducible. Absent means
+         * "derive from a hash of the data" (the default first-render seed).
+         * Changed by the user via the reroll button.
+         */
+        seed?: number;
+        /** Full snapshot of node positions, keyed by node id. */
+        positions?: { [nodeId: string]: { x: number; y: number } };
+        /** True once the user has manually dragged any node. */
+        manual?: boolean;
+    };
 }
 
 /** Serializable representation of a data table. */
@@ -642,6 +667,12 @@ export interface ChartOptions {
     aggregation?: string;
     maxSeries?: number;
     maxPointsPerSeries?: number;
+    // Graph chart options
+    nodesTable?: string;
+    nodeIdColumn?: string;
+    nodeLabelColumn?: string;
+    nodeKindColumn?: string;
+    edgeKindColumn?: string;
 }
 
 /** Position in a document. */
