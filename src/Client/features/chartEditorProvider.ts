@@ -505,6 +505,44 @@ class ChartEditorView implements IChartEditorView {
             }
         }
 
+        // Repopulate the node Id/Label/Kind column dropdowns from the columns
+        // of the newly selected Nodes Table. Done entirely client-side using
+        // the table→columns map embedded on the select, so the form is not
+        // rebuilt (which would reset section collapse state and focus).
+        function _editorOnNodesTableChanged() {
+            var sel = document.getElementById('opt-nodesTable');
+            if (sel) {
+                var map = {};
+                try { map = JSON.parse(sel.getAttribute('data-node-columns') || '{}'); } catch (e) {}
+                var cols = map[sel.value] || [];
+                ['opt-nodeIdColumn', 'opt-nodeLabelColumn', 'opt-nodeKindColumn'].forEach(function(id) {
+                    var colSel = document.getElementById(id);
+                    if (!colSel) return;
+                    var prev = colSel.value;
+                    var html = '<option value="">(auto)</option>';
+                    var keep = false;
+                    for (var i = 0; i < cols.length; i++) {
+                        var c = String(cols[i]);
+                        var selAttr = (c === prev) ? ' selected' : '';
+                        if (c === prev) keep = true;
+                        html += '<option value="' + _editorEscapeAttr(c) + '"' + selAttr + '>' + _editorEscapeHtml(c) + '</option>';
+                    }
+                    colSel.innerHTML = html;
+                    // If the previously selected column no longer exists, fall
+                    // back to (auto).
+                    colSel.value = keep ? prev : '';
+                });
+            }
+            _editorOnChartOptionChanged();
+        }
+
+        function _editorEscapeHtml(s) {
+            return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
+        function _editorEscapeAttr(s) {
+            return _editorEscapeHtml(s).replace(/"/g, '&quot;');
+        }
+
         document.addEventListener('click', function(e) {
             if (e.target.closest && e.target.closest('.header-actions')) {
                 return;
@@ -728,20 +766,23 @@ class ChartEditorView implements IChartEditorView {
         const siblingTables = tables.filter(t => !primaryTableName || t.name !== primaryTableName);
         const siblingNames = siblingTables.map(t => t.name).filter(n => !!n);
         const currentNodesTable = opts.nodesTable ?? '';
-        const nodesTableOptions = ['', ...siblingNames].map(n =>
-            `<option value="${escapeHtml(n)}"${n === currentNodesTable ? ' selected' : ''}>${n || '(auto)'}</option>`
-        ).join('');
+        // Options: (auto) = '' → auto-sense a sibling named "nodes";
+        //          then each sibling table by name.
+        const nodesTableOptions = [
+            `<option value=""${currentNodesTable === '' ? ' selected' : ''}>(auto)</option>`,
+            ...siblingNames.map(n =>
+                `<option value="${escapeHtml(n)}"${n === currentNodesTable ? ' selected' : ''}>${escapeHtml(n)}</option>`
+            ),
+        ].join('');
         // Resolve which sibling table to source node-column choices from. If
-        // user chose one explicitly, use it; else prefer one literally named
-        // "nodes" (case-insensitive); else if there's exactly one sibling, use it.
+        // the user chose one explicitly, use it; otherwise auto-sense only a
+        // sibling literally named "nodes" (case-insensitive).
         const resolveNodesTable = (): ChartEditorTableInfo | undefined => {
             if (currentNodesTable) {
                 const m = siblingTables.find(t => t.name === currentNodesTable);
                 if (m) return m;
             }
-            const named = siblingTables.find(t => (t.name ?? '').toLowerCase() === 'nodes');
-            if (named) return named;
-            return siblingTables.length === 1 ? siblingTables[0] : undefined;
+            return siblingTables.find(t => (t.name ?? '').toLowerCase() === 'nodes');
         };
         const nodesTable = resolveNodesTable();
         const nodeColumnNames = nodesTable?.columns ?? [];
@@ -751,6 +792,16 @@ class ChartEditorView implements IChartEditorView {
         const nodeIdColumnOptions = buildNodeColOptions(opts.nodeIdColumn ?? '');
         const nodeLabelColumnOptions = buildNodeColOptions(opts.nodeLabelColumn ?? '');
         const nodeKindColumnOptions = buildNodeColOptions(opts.nodeKindColumn ?? '');
+        // Map of nodes-table select value → that table's column names, so the
+        // page can repopulate the node-column dropdowns client-side when the
+        // user changes the Nodes Table (no server round-trip / form rebuild,
+        // which would reset section collapse state and focus). The empty-string
+        // key ('(auto)') maps to whichever sibling table resolution picks.
+        const nodeColumnsByTable: { [tableValue: string]: string[] } = { '': nodeColumnNames };
+        for (const t of siblingTables) {
+            if (t.name) { nodeColumnsByTable[t.name] = t.columns ?? []; }
+        }
+        const nodeColumnsByTableJson = escapeHtml(JSON.stringify(nodeColumnsByTable));
 
         const colOptionsList = columnNames.map(c =>
             `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`
@@ -1043,7 +1094,7 @@ class ChartEditorView implements IChartEditorView {
             <div class="section-body collapsed">
                 <div class="field">
                     <label for="opt-nodesTable">Nodes Table</label>
-                    <select id="opt-nodesTable" onchange="_editorOnChartOptionChanged()">${nodesTableOptions}</select>
+                    <select id="opt-nodesTable" data-node-columns="${nodeColumnsByTableJson}" onchange="_editorOnNodesTableChanged()">${nodesTableOptions}</select>
                 </div>
                 <div class="field">
                     <label for="opt-nodeIdColumn">Node Id Column</label>

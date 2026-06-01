@@ -53,6 +53,15 @@ class GraphChartView implements IChartView {
     private currentChartName: string | undefined;
     private currentChartTableName: string | undefined;
     /**
+     * Signature of the last graph state we emitted to listeners. Used to
+     * suppress redundant emits — e.g. when reopening an already-saved graph
+     * the page replays and reports back the exact positions we loaded, which
+     * must NOT re-dirty the result/history file. The first auto-layout (which
+     * differs from the empty/loaded signature) still emits so positions are
+     * persisted and stay fixed across sessions.
+     */
+    private lastEmittedSignature: string | undefined;
+    /**
      * Monotonic render token. Each render embeds the current value into the
      * page; position messages echo it back. Messages whose token is not the
      * current one are ignored — this prevents a superseded Cytoscape instance
@@ -91,13 +100,24 @@ class GraphChartView implements IChartView {
         });
     }
 
-    private emitState(): void {
+    private buildState(): ResultChartView {
         const graph: NonNullable<ResultChartView['graph']> = { positions: this.cachedPositions };
         if (this.cachedSeed !== undefined) { graph.seed = this.cachedSeed; }
         if (this.cachedManual) { graph.manual = true; }
         const state: ResultChartView = { graph };
         if (this.currentChartName) state.name = this.currentChartName;
         if (this.currentChartTableName) state.tableName = this.currentChartTableName;
+        return state;
+    }
+
+    private emitState(): void {
+        const state = this.buildState();
+        // Only notify (and thus persist) when the state actually changed.
+        // Replaying a saved layout reports back identical positions; emitting
+        // those again would needlessly dirty the file on every open.
+        const signature = JSON.stringify(state);
+        if (signature === this.lastEmittedSignature) { return; }
+        this.lastEmittedSignature = signature;
         for (const l of this.stateListeners) l(state);
     }
 
@@ -135,6 +155,13 @@ class GraphChartView implements IChartView {
         }
         if (viewState?.graph?.seed !== undefined) { this.cachedSeed = viewState.graph.seed; }
         if (viewState?.graph?.manual) { this.cachedManual = true; }
+        // Prime the emit signature with the loaded state so that when the page
+        // replays and reports back these exact positions we don't treat it as
+        // a change and re-dirty the file. (First-ever render has no saved
+        // positions, so the auto-layout will differ and be persisted.)
+        if (saved && Object.keys(saved).length > 0) {
+            this.lastEmittedSignature = JSON.stringify(this.buildState());
+        }
         this.doRender(data, options, darkMode, ctx);
     }
 
@@ -317,10 +344,14 @@ export class GraphChartProvider implements IChartProvider {
 
         // Deterministic seed derived from the graph's node ids + edges so that
         // re-running a query that yields identical data produces an identical
-        // cose layout. A seedOverride (from the reroll button / persisted
-        // state) takes precedence.
+        // cose layout. Both the node ids and the edge keys are sorted before
+        // hashing so the seed is independent of row order — the same logical
+        // graph produces the same layout regardless of how the rows are
+        // ordered. A seedOverride (from the reroll button / persisted state)
+        // takes precedence.
         const nodeIdsSorted = [...nodeMap.keys()].sort();
-        const seedItems = nodeIdsSorted.concat(edges.map(e => e.data.source + '\u0001' + e.data.target));
+        const edgeKeysSorted = edges.map(e => e.data.source + '\u0001' + e.data.target).sort();
+        const seedItems = nodeIdsSorted.concat(edgeKeysSorted);
         const layoutSeed = seedOverride !== undefined ? (seedOverride >>> 0) : hashStringList(seedItems);
 
         let cx = 0, cy_ = 0, n_ = 0;
@@ -576,7 +607,7 @@ export class GraphChartProvider implements IChartProvider {
         // page-level _vscodeApi handle established by the host harness.
         var renderToken = ${token};
         var layoutSeed = (${layoutSeed} >>> 0);
-        function postPositions(manual) {
+        function postPositions(manual, attempt) {
             var api = window._vscodeApi;
             var positions = {};
             cy.nodes().forEach(function(n) {
@@ -585,11 +616,12 @@ export class GraphChartProvider implements IChartProvider {
             });
             if (api) {
                 try { api.postMessage({ command: 'graphChartPositions', positions: positions, token: renderToken, seed: layoutSeed, manual: !!manual }); } catch (e) {}
-            } else {
+            } else if ((attempt || 0) < 50) {
                 // Harness may not have initialised yet on the very first
                 // render; retry shortly so we never lose the initial cose
-                // positions.
-                setTimeout(function() { postPositions(manual); }, 50);
+                // positions. Bound the retries (~2.5s) so we never leak an
+                // unbounded background timer loop if it never initialises.
+                setTimeout(function() { postPositions(manual, (attempt || 0) + 1); }, 50);
             }
         }
         // Capture after each user drag (marks the layout as manually adjusted).
@@ -690,12 +722,11 @@ function findNodesTable(edges: ResultTable, ctx?: ChartRenderContext, explicitNa
         const match = others.find(t => t.name?.toLowerCase() === lower);
         if (match) return match;
     }
-    // Prefer a sibling literally named "nodes" (case-insensitive).
-    const named = others.find(t => t.name?.toLowerCase() === 'nodes');
-    if (named) return named;
-    // Otherwise auto-pick only when there's exactly one candidate; ambiguous
-    // multi-table cases stay edges-only until an explicit option is added.
-    return others.length === 1 ? others[0] : undefined;
+    // Auto-sense: only adopt a sibling literally named "nodes" (case-insensitive).
+    // We deliberately do NOT auto-pick "the single other table" — a result set
+    // may contain unrelated tables, and silently treating one as nodes is
+    // surprising. Users wanting a specific table can select it explicitly.
+    return others.find(t => t.name?.toLowerCase() === 'nodes');
 }
 
 function pickColumn(table: ResultTable, candidates: string[]): ColumnRef | undefined {
