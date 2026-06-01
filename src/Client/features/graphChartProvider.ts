@@ -26,6 +26,7 @@
 import type { ChartOptions, ResultTable, ResultChartView } from './server';
 import { ChartColorways, ChartMode, getColumnRef, getColumnRefByIndex } from './chartProvider';
 import type { IChartView, IWebView, IChartProvider, ColumnRef, ChartRenderContext } from './chartProvider';
+import * as vscode from 'vscode';
 
 const CytoscapeJsCdn = 'https://cdn.jsdelivr.net/npm/cytoscape@3.30.2/dist/cytoscape.min.js';
 
@@ -38,6 +39,17 @@ class GraphChartView implements IChartView {
     private readonly stateListeners = new Set<(state: ResultChartView) => void>();
     /** Latest known node positions, keyed by node id. Survives re-renders. */
     private cachedPositions: { [nodeId: string]: { x: number; y: number } } = {};
+    /** Current layout seed (reported by the page; bumped on reroll). */
+    private cachedSeed: number | undefined;
+    /** True once the user has manually dragged a node. */
+    private cachedManual = false;
+    /** Last render arguments, so a reroll can re-render with new state. */
+    private lastRenderArgs: {
+        data: ResultTable;
+        options: ChartOptions;
+        darkMode: boolean;
+        ctx: ChartRenderContext | undefined;
+    } | undefined;
     private currentChartName: string | undefined;
     private currentChartTableName: string | undefined;
     /**
@@ -51,7 +63,7 @@ class GraphChartView implements IChartView {
 
     constructor(
         private readonly webview: IWebView,
-        private readonly render: (data: ResultTable, options: ChartOptions, darkMode: boolean, ctx: ChartRenderContext | undefined, positions: { [id: string]: { x: number; y: number } }, token: number) => string | undefined
+        private readonly render: (data: ResultTable, options: ChartOptions, darkMode: boolean, ctx: ChartRenderContext | undefined, positions: { [id: string]: { x: number; y: number } }, token: number, seed: number | undefined) => string | undefined
     ) {
         this.subscription = webview.handle((msg) => {
             if (msg && msg.command === 'graphChartPositions' && msg.positions) {
@@ -64,14 +76,49 @@ class GraphChartView implements IChartView {
                 // during a drag) and we want to retain positions for unmoved
                 // nodes too.
                 this.cachedPositions = { ...this.cachedPositions, ...positions };
-                const state: ResultChartView = {
-                    graph: { positions: this.cachedPositions },
-                };
-                if (this.currentChartName) state.name = this.currentChartName;
-                if (this.currentChartTableName) state.tableName = this.currentChartTableName;
-                for (const l of this.stateListeners) l(state);
+                if (typeof msg.seed === 'number') { this.cachedSeed = msg.seed; }
+                if (msg.manual === true) { this.cachedManual = true; }
+                this.emitState();
+                return;
+            }
+            if (msg && msg.command === 'graphChartReroll') {
+                if (typeof msg.token === 'number' && msg.token !== this.renderToken) {
+                    return;
+                }
+                void this.reroll();
+                return;
             }
         });
+    }
+
+    private emitState(): void {
+        const graph: NonNullable<ResultChartView['graph']> = { positions: this.cachedPositions };
+        if (this.cachedSeed !== undefined) { graph.seed = this.cachedSeed; }
+        if (this.cachedManual) { graph.manual = true; }
+        const state: ResultChartView = { graph };
+        if (this.currentChartName) state.name = this.currentChartName;
+        if (this.currentChartTableName) state.tableName = this.currentChartTableName;
+        for (const l of this.stateListeners) l(state);
+    }
+
+    /** Re-runs the layout with a new seed, discarding cached positions. */
+    private async reroll(): Promise<void> {
+        if (!this.lastRenderArgs) { return; }
+        if (this.cachedManual) {
+            const choice = await vscode.window.showWarningMessage(
+                'Regenerating the layout will discard your manual node placements. Continue?',
+                { modal: true }, 'Regenerate'
+            );
+            if (choice !== 'Regenerate') { return; }
+        }
+        this.cachedSeed = (this.cachedSeed ?? 0) + 1;
+        this.cachedPositions = {};
+        this.cachedManual = false;
+        const { data, options, darkMode, ctx } = this.lastRenderArgs;
+        this.doRender(data, options, darkMode, ctx);
+        // Persist the new seed and cleared positions immediately; the page
+        // will also report fresh positions once cose settles.
+        this.emitState();
     }
 
     copyChart(): void {
@@ -81,13 +128,20 @@ class GraphChartView implements IChartView {
     renderChart(data: ResultTable, options: ChartOptions, darkMode: boolean, ctx?: ChartRenderContext, viewState?: ResultChartView): void {
         this.currentChartName = viewState?.name;
         this.currentChartTableName = viewState?.tableName;
-        // Adopt any saved positions from disk; in-session edits already merge here.
+        // Adopt any saved state from disk; in-session edits already merge here.
         const saved = viewState?.graph?.positions;
         if (saved) {
             this.cachedPositions = { ...this.cachedPositions, ...saved };
         }
+        if (viewState?.graph?.seed !== undefined) { this.cachedSeed = viewState.graph.seed; }
+        if (viewState?.graph?.manual) { this.cachedManual = true; }
+        this.doRender(data, options, darkMode, ctx);
+    }
+
+    private doRender(data: ResultTable, options: ChartOptions, darkMode: boolean, ctx: ChartRenderContext | undefined): void {
+        this.lastRenderArgs = { data, options, darkMode, ctx };
         const token = ++this.renderToken;
-        const bodyHtml = this.render(data, options, darkMode, ctx, this.cachedPositions, token);
+        const bodyHtml = this.render(data, options, darkMode, ctx, this.cachedPositions, token, this.cachedSeed);
         if (bodyHtml) {
             this.webview.setContent(bodyHtml);
         } else {
@@ -136,10 +190,10 @@ export class GraphChartProvider implements IChartProvider {
             `<script src="${CytoscapeJsCdn}" charset="utf-8"></script>`,
             ''
         );
-        return new GraphChartView(webview, (data, options, darkMode, ctx, positions, token) => this.renderGraphHtml(data, options, darkMode, ctx, positions, token));
+        return new GraphChartView(webview, (data, options, darkMode, ctx, positions, token, seed) => this.renderGraphHtml(data, options, darkMode, ctx, positions, token, seed));
     }
 
-    private renderGraphHtml(data: ResultTable, options: ChartOptions, darkMode: boolean, ctx: ChartRenderContext | undefined, positions: { [id: string]: { x: number; y: number } }, token: number): string | undefined {
+    private renderGraphHtml(data: ResultTable, options: ChartOptions, darkMode: boolean, ctx: ChartRenderContext | undefined, positions: { [id: string]: { x: number; y: number } }, token: number, seedOverride: number | undefined): string | undefined {
         if (data.columns.length < 2 || data.rows.length === 0) return undefined;
 
         if (options.mode === ChartMode.Light) darkMode = false;
@@ -263,10 +317,11 @@ export class GraphChartProvider implements IChartProvider {
 
         // Deterministic seed derived from the graph's node ids + edges so that
         // re-running a query that yields identical data produces an identical
-        // cose layout.
+        // cose layout. A seedOverride (from the reroll button / persisted
+        // state) takes precedence.
         const nodeIdsSorted = [...nodeMap.keys()].sort();
         const seedItems = nodeIdsSorted.concat(edges.map(e => e.data.source + '\u0001' + e.data.target));
-        const layoutSeed = hashStringList(seedItems);
+        const layoutSeed = seedOverride !== undefined ? (seedOverride >>> 0) : hashStringList(seedItems);
 
         let cx = 0, cy_ = 0, n_ = 0;
         if (havePositions) {
@@ -292,17 +347,21 @@ export class GraphChartProvider implements IChartProvider {
         const elements = [...nodes, ...edges];
 
         const colors = ChartColorways.Default;
-        const edgeKindStyles: { kind: string; color: string }[] = [];
-        let eki = 0;
-        for (const k of edgeKinds) {
-            edgeKindStyles.push({ kind: k, color: colors[eki % colors.length]! });
-            eki++;
-        }
+        // Assign node and edge kinds from different parts of the colorway so a
+        // node kind and an (unrelated) edge kind don't get the same color and
+        // imply a relationship. Nodes take the palette from the start; edges
+        // continue after the node kinds, wrapping around as needed.
         const nodeKindStyles: { kind: string; color: string }[] = [];
         let nki = 0;
         for (const k of nodeKinds) {
             nodeKindStyles.push({ kind: k, color: colors[nki % colors.length]! });
             nki++;
+        }
+        const edgeKindStyles: { kind: string; color: string }[] = [];
+        let eki = 0;
+        for (const k of edgeKinds) {
+            edgeKindStyles.push({ kind: k, color: colors[(nodeKindStyles.length + eki) % colors.length]! });
+            eki++;
         }
 
         const title = options.title ? escapeHtml(options.title) : '';
@@ -390,9 +449,38 @@ export class GraphChartProvider implements IChartProvider {
 .gc-legend-item { display: flex; align-items: center; gap: 6px; line-height: 1.6; }
 .gc-legend-swatch { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 10px; border: 1px solid ${theme.nodeBorder}; }
 .gc-legend-swatch.edge { width: 14px; height: 2px; border-radius: 0; border: 0; flex: 0 0 14px; }
+.gc-toolbar {
+    position: absolute;
+    top: ${title ? '34px' : '6px'};
+    left: 8px;
+    z-index: 4;
+    display: flex;
+    gap: 4px;
+}
+.gc-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    background: ${theme.background};
+    color: ${theme.foreground};
+    border: 1px solid ${theme.nodeBorder};
+    border-radius: 3px;
+    cursor: pointer;
+    opacity: 0.85;
+}
+.gc-btn:hover { opacity: 1; }
+.gc-btn svg { width: 14px; height: 14px; fill: currentColor; }
 </style>
 <div class="gc-wrapper">
     ${title ? `<div class="gc-title">${title}</div>` : ''}
+    <div class="gc-toolbar">
+        <button id="gc-reroll" class="gc-btn" title="Regenerate layout">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.45 4.14A6 6 0 1 0 14 8h-1.5a4.5 4.5 0 1 1-1.02-2.86L9 7h5V2l-1.55 2.14z"/></svg>
+        </button>
+    </div>
     <div id="gc-cy" class="gc-cy"></div>
     ${legendHtml}
     <div id="gc-status" class="gc-status">Loading graph…</div>
@@ -487,7 +575,8 @@ export class GraphChartProvider implements IChartProvider {
         // across re-renders (and saved into the .kqr file). Uses the
         // page-level _vscodeApi handle established by the host harness.
         var renderToken = ${token};
-        function postPositions() {
+        var layoutSeed = (${layoutSeed} >>> 0);
+        function postPositions(manual) {
             var api = window._vscodeApi;
             var positions = {};
             cy.nodes().forEach(function(n) {
@@ -495,16 +584,26 @@ export class GraphChartProvider implements IChartProvider {
                 positions[n.id()] = { x: p.x, y: p.y };
             });
             if (api) {
-                try { api.postMessage({ command: 'graphChartPositions', positions: positions, token: renderToken }); } catch (e) {}
+                try { api.postMessage({ command: 'graphChartPositions', positions: positions, token: renderToken, seed: layoutSeed, manual: !!manual }); } catch (e) {}
             } else {
                 // Harness may not have initialised yet on the very first
                 // render; retry shortly so we never lose the initial cose
                 // positions.
-                setTimeout(postPositions, 50);
+                setTimeout(function() { postPositions(manual); }, 50);
             }
         }
-        // Capture after each user drag.
-        cy.on('dragfree', 'node', postPositions);
+        // Capture after each user drag (marks the layout as manually adjusted).
+        cy.on('dragfree', 'node', function() { postPositions(true); });
+        // Reroll button: ask the host to re-run the layout with a new seed.
+        var rerollBtn = document.getElementById('gc-reroll');
+        if (rerollBtn) {
+            rerollBtn.addEventListener('click', function() {
+                var api = window._vscodeApi;
+                if (api) {
+                    try { api.postMessage({ command: 'graphChartReroll', token: renderToken }); } catch (e) {}
+                }
+            });
+        }
         // Build the layout. When we have saved positions we use 'preset' and
         // feed the coordinates EXPLICITLY via a positions callback (relying on
         // element.position alone can fall back to a grid in some cytoscape
@@ -531,9 +630,9 @@ export class GraphChartProvider implements IChartProvider {
             // deterministic PRNG seeded from a hash of the data, run the
             // layout, then restore Math.random.
             layout = cy.layout({ name: 'cose', animate: false, fit: true, padding: 20, randomize: true });
-            layout.one('layoutstop', postPositions);
+            layout.one('layoutstop', function() { postPositions(false); });
             var _origRandom = Math.random;
-            var _seed = (${layoutSeed} >>> 0) || 1;
+            var _seed = layoutSeed || 1;
             Math.random = function() {
                 // mulberry32
                 _seed |= 0; _seed = (_seed + 0x6D2B79F5) | 0;

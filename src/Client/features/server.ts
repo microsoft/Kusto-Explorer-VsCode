@@ -600,7 +600,16 @@ export interface ResultChartView {
     tableName?: string;
     /** Graph chart-specific state: cached node positions keyed by node id. */
     graph?: {
+        /**
+         * Layout seed used to make the cose layout reproducible. Absent means
+         * "derive from a hash of the data" (the default first-render seed).
+         * Changed by the user via the reroll button.
+         */
+        seed?: number;
+        /** Full snapshot of node positions, keyed by node id. */
         positions?: { [nodeId: string]: { x: number; y: number } };
+        /** True once the user has manually dragged any node. */
+        manual?: boolean;
     };
 }
 
