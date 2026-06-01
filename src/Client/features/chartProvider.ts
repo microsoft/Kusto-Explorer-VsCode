@@ -5,7 +5,7 @@
  * Chart provider interfaces and constants.
  */
 
-import type { ChartOptions, ResultColumn, ResultTable } from './server';
+import type { ChartOptions, ResultColumn, ResultTable, ResultChartView } from './server';
 import type { IWebView } from './webview';
 
 // Re-export so consumers can import from chartProvider
@@ -14,20 +14,39 @@ export type { IWebView } from './webview';
 // ─── Interfaces ────────────────────────────────────────────────────────
 
 /**
+ * Optional cross-table context for chart rendering. Most chart types only
+ * need the primary `data` table, but a few (currently the graph chart) can
+ * draw on sibling tables in the same result — for example, an edges table
+ * paired with a nodes table. Providers should treat `ctx` as advisory and
+ * still produce a sensible chart from `data` alone when it's absent.
+ */
+export interface ChartRenderContext {
+    /** All tables in the originating ResultData, in their original order. */
+    tables: ResultTable[];
+}
+
+/**
  * View for interacting with a chart rendered inside a webview.
  * Created by IChartProvider.createView().
  *
  * The host sets `onCopyResult` / `onCopyError` to receive copy outcomes.
  */
 export interface IChartView {
-    /** Render the chart with the given data/options and push to the webview. */
-    renderChart(data: ResultTable, options: ChartOptions, darkMode: boolean): void;
+    /** Render the chart with the given data/options and push to the webview.
+     *  `viewState` carries any saved presentation state for this chart (e.g. graph node positions). */
+    renderChart(data: ResultTable, options: ChartOptions, darkMode: boolean, ctx?: ChartRenderContext, viewState?: ResultChartView): void;
     /** Trigger the chart copy flow (extension → webview → extension). */
     copyChart(): void;
     /** Called when the webview produces a chart image for copying. */
     onCopyResult: ((pngDataUrl: string, svgDataUrl?: string) => void) | undefined;
     /** Called when the webview chart copy fails. */
     onCopyError: ((error: string) => void) | undefined;
+    /**
+     * Subscribe to view-state changes (e.g. user dragged a graph node).
+     * Optional; chart views without persistent UI state may omit this.
+     * Listeners receive the new state to be merged into ResultData.chartViews.
+     */
+    onDidChangeViewState?(listener: (state: ResultChartView) => void): { dispose(): void };
     /** Release handlers and resources. */
     dispose(): void;
 }

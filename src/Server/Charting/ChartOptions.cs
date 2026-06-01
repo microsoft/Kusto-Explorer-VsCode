@@ -243,6 +243,37 @@ public class ChartOptions
     public string? MarkerSize { get; init; }
 
     /// <summary>
+    /// Name of the sibling result table to use as the nodes table for graph charts.
+    /// If null, the provider auto-detects (prefers a table named "nodes", else the single non-empty other table).
+    /// </summary>
+    [DataMember(Name = "nodesTable")]
+    public string? NodesTable { get; init; }
+
+    /// <summary>
+    /// Name of the column on the nodes table that contains the node id. If null, auto-detected by name (id, name, ...).
+    /// </summary>
+    [DataMember(Name = "nodeIdColumn")]
+    public string? NodeIdColumn { get; init; }
+
+    /// <summary>
+    /// Name of the column on the nodes table to use as the node label. If null, auto-detected by name.
+    /// </summary>
+    [DataMember(Name = "nodeLabelColumn")]
+    public string? NodeLabelColumn { get; init; }
+
+    /// <summary>
+    /// Name of the column on the nodes table to use as the node kind (drives per-kind coloring). If null, auto-detected by name.
+    /// </summary>
+    [DataMember(Name = "nodeKindColumn")]
+    public string? NodeKindColumn { get; init; }
+
+    /// <summary>
+    /// Name of the column on the edges table to use as the edge kind. If null, falls back to the first <see cref="SeriesColumns"/> entry.
+    /// </summary>
+    [DataMember(Name = "edgeKindColumn")]
+    public string? EdgeKindColumn { get; init; }
+
+    /// <summary>
     /// Converts a <see cref="ChartVisualizationOptions"/> from the Kusto SDK to a <see cref="ChartOptions"/>.
     /// </summary>
     public static ChartOptions FromChartVisualizationOptions(ChartVisualizationOptions options)
@@ -308,6 +339,11 @@ public class ChartOptions
             MarkerShape = this.MarkerShape ?? defaults.MarkerShape,
             CycleMarkerShapes = this.CycleMarkerShapes ?? defaults.CycleMarkerShapes,
             MarkerSize = this.MarkerSize ?? defaults.MarkerSize,
+            NodesTable = this.NodesTable ?? defaults.NodesTable,
+            NodeIdColumn = this.NodeIdColumn ?? defaults.NodeIdColumn,
+            NodeLabelColumn = this.NodeLabelColumn ?? defaults.NodeLabelColumn,
+            NodeKindColumn = this.NodeKindColumn ?? defaults.NodeKindColumn,
+            EdgeKindColumn = this.EdgeKindColumn ?? defaults.EdgeKindColumn,
         };
     }
 

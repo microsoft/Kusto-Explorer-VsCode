@@ -561,6 +561,7 @@ export interface ResultData {
     tables: ResultTable[];
     charts?: ResultChart[];
     tableViews?: ResultTableView[];
+    chartViews?: ResultChartView[];
 }
 
 /**
@@ -586,6 +587,21 @@ export interface ResultChart {
     name?: string;
     tableName?: string;
     options: ChartOptions;
+}
+
+/**
+ * Per-chart presentation state. Looked up by matching `name` (if set) or
+ * `tableName`. Optional/absent fields mean "use default behavior".
+ */
+export interface ResultChartView {
+    /** Matches `ResultChart.name`, if the chart has one. */
+    name?: string;
+    /** Matches `ResultChart.tableName`, if the chart is bound to a specific table. */
+    tableName?: string;
+    /** Graph chart-specific state: cached node positions keyed by node id. */
+    graph?: {
+        positions?: { [nodeId: string]: { x: number; y: number } };
+    };
 }
 
 /** Serializable representation of a data table. */
@@ -642,6 +658,12 @@ export interface ChartOptions {
     aggregation?: string;
     maxSeries?: number;
     maxPointsPerSeries?: number;
+    // Graph chart options
+    nodesTable?: string;
+    nodeIdColumn?: string;
+    nodeLabelColumn?: string;
+    nodeKindColumn?: string;
+    edgeKindColumn?: string;
 }
 
 /** Position in a document. */
