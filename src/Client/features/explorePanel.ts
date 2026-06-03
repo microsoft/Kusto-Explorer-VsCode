@@ -74,6 +74,10 @@ interface ExploreState {
     columns: ClassifiedColumn[];
     selectedDimensions: string[];
     selectedMeasures: string[];
+    /** How the selected numeric measure is aggregated (sum/avg/min/max). Ignored
+     *  while measuring rows (count); preserved so switching back to a column
+     *  restores the last-used function. */
+    selectedAggregate: AggKind;
     collapsed: boolean;
     totalCount: number | null;
     /** Whole-table sum of the primary selected measure (the root bubble's value),
@@ -91,6 +95,35 @@ interface ExploreState {
 
 /** Cap on rows rendered as bubbles (render-limit, not a query semantics limit). */
 const MAX_FLOWER_ROWS = 200;
+
+/** The aggregate functions a numeric measure can be summarized with. The dial on
+ *  the caption glyph scrubs through these in order. Each maps to its Kusto function,
+ *  the result-column header prefix that encodes the choice (parsed back by
+ *  parseMeasureHeader for the glyph), a compact glyph, and a human label. */
+type AggKind = 'sum' | 'avg' | 'min' | 'max';
+const AGGREGATES: Record<AggKind, { func: string; prefix: string; glyph: string; label: string }> = {
+    sum: { func: 'sum', prefix: 'Sum of ', glyph: 'Σ', label: 'Sum' },
+    avg: { func: 'avg', prefix: 'Avg of ', glyph: 'x̄', label: 'Avg' },
+    min: { func: 'min', prefix: 'Min of ', glyph: '↓', label: 'Min' },
+    max: { func: 'max', prefix: 'Max of ', glyph: '↑', label: 'Max' },
+};
+const AGG_ORDER: AggKind[] = ['sum', 'avg', 'min', 'max'];
+/** True when a result-column header is an aggregated measure (any agg prefix), as
+ *  opposed to the fixed `Count` column or a grouping dimension. */
+function isMeasureHeader(name: string): boolean {
+    return AGG_ORDER.some(k => name.startsWith(AGGREGATES[k].prefix));
+}
+/** Maps a human aggregate label (as shown on the dial) back to its kind. */
+function aggKindFromLabel(label: string): AggKind {
+    const found = AGG_ORDER.find(k => AGGREGATES[k].label === label);
+    return found ?? 'sum';
+}
+/** Maps a compact glyph back to its human aggregate label (for the hover-expand
+ *  affordance on the glyph dial). Returns '' for the non-aggregate '#' (rows). */
+function aggLabelFromGlyph(glyph: string): string {
+    const found = AGG_ORDER.find(k => AGGREGATES[k].glyph === glyph);
+    return found ? AGGREGATES[found].label : '';
+}
 
 /** Max dimension nubs offered in the dimension category bloom. */
 const MAX_DIMENSION_NUBS = 5;
@@ -120,8 +153,6 @@ function categoryAngle(key: string): number { return CATEGORY_ANGLE[key] ?? 90; 
 function isActiveStacked(state: ExploreState): boolean {
     return state.drillChain.length > 0 && state.selectedDimensions.length === 0;
 }
-/** Max secondary measure values rendered inside a bubble before an overflow "…". */
-const MAX_BUBBLE_VALUES = 2;
 /** Max characters of a measure column name shown inside a bubble value line. */
 const MAX_MEASURE_NAME_LEN = 12;
 
@@ -149,6 +180,7 @@ export class ExplorePanel {
             columns: classifyColumns(columns),
             selectedDimensions: [],
             selectedMeasures: [],
+            selectedAggregate: 'sum',
             collapsed: true,
             totalCount: null,
             totalMeasure: null,
@@ -197,7 +229,7 @@ export class ExplorePanel {
         );
     }
 
-    private handleMessage(message: { command?: string; column?: string; key?: string; index?: string }): void {
+    private handleMessage(message: { command?: string; column?: string; key?: string; index?: string; agg?: string }): void {
         switch (message?.command) {
             case 'ready':
                 this.ready = true;
@@ -217,6 +249,23 @@ export class ExplorePanel {
             case 'toggleMeasure':
                 if (this.state && typeof message.column === 'string') {
                     this.toggleSelection(this.state.selectedMeasures, message.column);
+                }
+                break;
+            case 'setMeasure':
+                if (this.state && typeof message.column === 'string') {
+                    // Measure dial (single-select): empty column = "rows" (count),
+                    // otherwise the chosen numeric column. Replaces the whole
+                    // selection — only one measure is shown at a time now.
+                    this.state.selectedMeasures = message.column ? [message.column] : [];
+                    void this.runGrouping();
+                }
+                break;
+            case 'setAggregate':
+                if (this.state && typeof message.agg === 'string' && message.agg in AGGREGATES) {
+                    // Aggregate dial (single-select). Only meaningful with a column
+                    // measure selected; while measuring rows it's a no-op (count).
+                    this.state.selectedAggregate = message.agg as AggKind;
+                    if (this.state.selectedMeasures.length > 0) { void this.runGrouping(); }
                 }
                 break;
             case 'focusBubble':
@@ -253,6 +302,16 @@ export class ExplorePanel {
             case 'popToRoot':
                 if (this.state) {
                     this.popToRoot();
+                }
+                break;
+            case 'clearGrouping':
+                if (this.state) {
+                    // Clicking the bubble that owns the open cloud undoes its
+                    // dimension selection: the cloud collapses and the level falls
+                    // back to a single ungrouped bubble.
+                    this.state.selectedDimensions = [];
+                    this.state.focusKey = null;
+                    void this.runGrouping();
                 }
                 break;
             default:
@@ -345,22 +404,19 @@ export class ExplorePanel {
         if (!this.state) { return; }
         const crumb = this.state.drillChain[index];
         if (!crumb) { return; }
-        // The crumb just below the clicked one captured the grouping that was live
-        // when the clicked bubble was the bottom level; restore that (or the current
-        // grouping if it's already the deepest crumb).
-        const childCrumb = this.state.drillChain[index + 1];
+        // Returning to a previous level lands it ungrouped (cloud closed): the
+        // dimension selection is cleared so you re-pick how to explore from there.
         this.state.drillChain = this.state.drillChain.slice(0, index + 1);
-        this.state.selectedDimensions = childCrumb
-            ? [...childCrumb.fromDimensions]
-            : [...this.state.selectedDimensions];
+        this.state.selectedDimensions = [];
         this.state.focusKey = null;
         void this.runGrouping();
     }
 
-    /** Pops all the way back to the root (the original top-level grouping). */
+    /** Pops all the way back to the root, ungrouped (the dimension selection is
+     *  cleared so the root falls back to a single bubble). */
     private popToRoot(): void {
         if (!this.state || this.state.drillChain.length === 0) { return; }
-        this.state.selectedDimensions = [...this.state.drillChain[0].fromDimensions];
+        this.state.selectedDimensions = [];
         this.state.drillChain = [];
         this.state.focusKey = null;
         void this.runGrouping();
@@ -389,6 +445,19 @@ export class ExplorePanel {
         return predicates.length > 0 ? ` | where ${predicates.join(' and ')}` : '';
     }
 
+    /** The result-column header for an aggregated measure, e.g. "Avg of price".
+     *  Encodes the current aggregate so parseMeasureHeader can recover the glyph. */
+    private measureHeader(column: string): string {
+        return AGGREGATES[this.state!.selectedAggregate].prefix + column;
+    }
+
+    /** The summarize expression for an aggregated measure, e.g.
+     *  `["Avg of price"]=avg([price])`, using the current aggregate function. */
+    private measureExpr(column: string): string {
+        const a = AGGREGATES[this.state!.selectedAggregate];
+        return `${bracket(a.prefix + column)}=${a.func}(${bracket(column)})`;
+    }
+
     /**
      * Recomputes each locked bubble's snapshot value with the CURRENT measures, so
      * the displayed value on every related bubble (locked + active) reflects the
@@ -400,14 +469,14 @@ export class ExplorePanel {
         const measures = [...this.state.selectedMeasures];
         const { source, cluster, database } = this.state;
         const aggs = [`${bracket('Count')}=count()`,
-            ...measures.map(m => `${bracket('Sum of ' + m)}=sum(${bracket(m)})`)];
+            ...measures.map(m => this.measureExpr(m))];
 
-        // The root bubble (whole table) shows the sum of the primary measure too,
-        // so selecting a measure updates the top bubble like all the others.
+        // The root bubble (whole table) shows the same aggregate of the primary
+        // measure too, so selecting a measure updates the top bubble like all the others.
         const primary = measures[0];
         const rootPromise = primary
             ? (async () => {
-                const query = `${bracket(source)} | summarize ${bracket('Sum of ' + primary)}=sum(${bracket(primary)})`;
+                const query = `${bracket(source)} | summarize ${this.measureExpr(primary)}`;
                 try {
                     const result = await this.server.runQuery(query, cluster, database, true, 1);
                     if (token !== this.renderToken || !this.state) { return; }
@@ -472,7 +541,7 @@ export class ExplorePanel {
         this.render();
 
         const aggs = [`${bracket('Count')}=count()`,
-            ...measures.map(m => `${bracket('Sum of ' + m)}=sum(${bracket(m)})`)];
+            ...measures.map(m => this.measureExpr(m))];
         const byClause = dims.length > 0 ? ` by ${dims.map(bracket).join(', ')}` : '';
         // Drill chain → a `where` that scopes the cloud to the locked-in ancestor
         // bubble values, so each descend narrows to one slice (bounded) rather
@@ -484,7 +553,7 @@ export class ExplorePanel {
         // With no dimension it's a single bubble, so order by the metric.
         const orderClause = dims.length > 0
             ? ` | order by ${dims.map(d => `${bracket(d)} asc`).join(', ')}`
-            : ` | order by ${measures.length > 0 ? bracket('Sum of ' + measures[0]) : bracket('Count')} desc`;
+            : ` | order by ${measures.length > 0 ? bracket(this.measureHeader(measures[0]!)) : bracket('Count')} desc`;
         const query = `${bracket(source)}${whereClause} | summarize ${aggs.join(', ')}${byClause}${orderClause}`;
 
         try {
@@ -583,16 +652,15 @@ export class ExplorePanel {
 
         const catsHtml = this.categoryNubsHtml(state);
 
-        // When a measure is selected the root bubble shows its whole-table sum as
-        // the primary number (with the row count demoted to a secondary line),
-        // mirroring how every other bubble switches to the measure.
+        // Single measure shown: the selected numeric column (whole-table sum) or,
+        // with none, the row count shown as "# rows". The body is the same three
+        // lines as every other bubble.
         const hasMeasure = state.selectedMeasures.length > 0;
-        const rootPrimary = hasMeasure
+        const measureName = hasMeasure ? state.selectedMeasures[0]! : 'rows';
+        const aggGlyph = hasMeasure ? AGGREGATES[state.selectedAggregate].glyph : '#';
+        const rootValue = hasMeasure
             ? (state.totalMeasure === null ? '…' : formatMeasureValue(state.totalMeasure))
             : count;
-        const rootSecondary = hasMeasure
-            ? `<div class="bubble-value"><span class="bubble-agg">#</span><span class="bubble-value-num">${count}</span></div>`
-            : '';
 
         const drilled = state.drillChain.length > 0;
         // The cloud (and its drop zone) only makes sense once a DIMENSION groups
@@ -600,17 +668,26 @@ export class ExplorePanel {
         // "All" group that just duplicates the root bubble, so suppress it.
         const hasGroups = state.selectedDimensions.length > 0;
         // When drilled, the root bubble is a "previous" bubble: clicking it unlocks
-        // the whole chain and returns to the root level (its grouping shows as a
-        // cloud again). When not drilled there's nothing below it to unlock.
-        const rootAction = drilled ? ` data-action="popToRoot"` : '';
-        const rootBubbleClass = drilled ? 'bubble bubble-root clickable' : 'bubble bubble-root';
+        // the whole chain and returns to the root level (ungrouped). When not
+        // drilled but a dimension groups the data, clicking it clears that grouping
+        // (collapses the cloud back to the single source bubble).
+        const rootAction = drilled
+            ? ` data-action="popToRoot"`
+            : (hasGroups ? ` data-action="clearGrouping"` : '');
+        const rootClickable = drilled || hasGroups;
+        const rootBubbleClass = rootClickable ? 'bubble bubble-root clickable' : 'bubble bubble-root';
+        const rootTitle = drilled
+            ? 'Back to ' + state.source
+            : (hasGroups ? 'Clear grouping' : state.source);
+        // The root carries the measure dial only while it owns the measure choice
+        // (i.e. before drilling — once drilled, the deepest bubble owns it).
+        const rootDial = drilled ? '' : this.dialAttrs(state, hasMeasure ? measureName : null);
+        const rootAggDial = drilled ? '' : this.aggDialAttrs(state);
         const rootHub = `
                 <div class="bubble-hub" style="width:${HUB_SIZE}px;height:${HUB_SIZE}px;">
                     <div class="${rootBubbleClass}"${rootAction}
-                        title="${drilled ? 'Back to ' + escapeAttr(state.source) : escapeAttr(state.source)}">
-                        <div class="bubble-label">${escapeHtml(state.source)}</div>
-                        <div class="bubble-primary"><span class="bubble-primary-num">${rootPrimary}</span></div>
-                        ${rootSecondary}
+                        title="${escapeAttr(rootTitle)}">
+                        ${bubbleBody(state.source, rootValue, aggGlyph, measureName, rootDial, rootAggDial)}
                         <button class="thumb" data-action="toggleExpand" title="Open card (show all columns)">
                             <span class="thumb-grip"></span>
                         </button>
@@ -633,6 +710,31 @@ export class ExplorePanel {
     }
 
     /**
+     * Attributes that turn a bubble surface into the measure dial: the ordered
+     * option list (["rows", ...numeric columns]) and the current selection.
+     * Returns '' when the table has no numeric measure columns (nothing to dial).
+     */
+    private dialAttrs(state: ExploreState, current: string | null): string {
+        const cols = selectMeasureNubs(state.columns, MAX_MEASURE_NUBS).map(c => c.name);
+        if (cols.length === 0) { return ''; }
+        const options = ['rows', ...cols];
+        return ` data-dial="${escapeAttr(JSON.stringify(options))}" data-dial-current="${escapeAttr(current ?? 'rows')}" data-dial-kind="measure"`;
+    }
+
+    /**
+     * Attributes that turn the caption GLYPH into the aggregate dial: the ordered
+     * aggregate labels (Sum/Avg/Min/Max) and the current one. Returns '' unless a
+     * column measure is selected — "# rows" can only be counted, so there's no
+     * aggregate to scrub.
+     */
+    private aggDialAttrs(state: ExploreState): string {
+        if (state.selectedMeasures.length === 0) { return ''; }
+        const options = AGG_ORDER.map(k => AGGREGATES[k].label);
+        const current = AGGREGATES[state.selectedAggregate].label;
+        return ` data-dial="${escapeAttr(JSON.stringify(options))}" data-dial-current="${escapeAttr(current)}" data-dial-kind="aggregate"`;
+    }
+
+    /**
      * Renders the category nubs (dimension, measure) tucked behind the bubble.
      * Each is a stable colored dot that blooms its member nubs in a downward arc
      * on hover; a category with active selections stays lit at rest with a count.
@@ -648,10 +750,7 @@ export class ExplorePanel {
         if (dimNubs.length > 0) {
             categories.push({ key: 'dimension', title: 'Group by', action: 'toggleDimension', members: dimNubs, selected: state.selectedDimensions });
         }
-        const measureNubs = selectMeasureNubs(state.columns, MAX_MEASURE_NUBS);
-        if (measureNubs.length > 0) {
-            categories.push({ key: 'measure', title: 'Measure', action: 'toggleMeasure', members: measureNubs, selected: state.selectedMeasures });
-        }
+        // The measure is chosen via the dial on the bubble surface, not a nub.
         return this.renderCategoryNubs(categories);
     }
 
@@ -779,21 +878,18 @@ export class ExplorePanel {
      */
     private activeBubbleHtml(state: ExploreState, crumb: DrillCrumb, followsRoot: boolean): string {
         const m = extractBubbleMetric(crumb.columns, crumb.row);
-        const secondary = m.hasMeasure
-            ? `<div class="bubble-value"><span class="bubble-agg">#</span><span class="bubble-value-num">${escapeHtml(m.countText)}</span></div>`
-            : '';
         const linkLabel = crumb.fromDimensions.length > 0
             ? `<span class="spine-link-label active-link-label" title="${escapeAttr(crumb.fromDimensions.join(' · '))}">${escapeHtml(crumb.fromDimensions.join(' · '))}</span>`
             : '';
         const rootCls = followsRoot ? ' bubble-hub-active-root' : '';
+        const dial = this.dialAttrs(state, state.selectedMeasures[0] ?? null);
+        const aggDial = this.aggDialAttrs(state);
         return `
             <div class="bubble-hub bubble-hub-active${rootCls}" style="width:${HUB_SIZE}px;height:${HUB_SIZE}px;">
                 ${linkLabel}
                 <div class="bubble bubble-locked bubble-active"
                     title="${escapeAttr(crumb.display)}">
-                    <div class="bubble-label">${escapeHtml(m.label)}</div>
-                    <div class="bubble-primary"><span class="bubble-primary-num">${escapeHtml(m.primaryText)}</span></div>
-                    ${secondary}
+                    ${bubbleBody(m.label, m.valueText, m.aggGlyph, m.measureName, dial, aggDial)}
                 </div>
                 ${this.activeStackedNubsHtml(state)}
             </div>`;
@@ -815,10 +911,7 @@ export class ExplorePanel {
         if (dimNubs.length > 0) {
             categories.push({ key: 'dimension', title: 'Group by', action: 'toggleDimension', members: dimNubs, selected: state.selectedDimensions });
         }
-        const measureNubs = selectMeasureNubs(state.columns, MAX_MEASURE_NUBS);
-        if (measureNubs.length > 0) {
-            categories.push({ key: 'measure', title: 'Measure', action: 'toggleMeasure', members: measureNubs, selected: state.selectedMeasures });
-        }
+        // The measure is chosen via the dial on the bubble surface, not a nub.
         return categories;
     }
 
@@ -834,18 +927,24 @@ export class ExplorePanel {
      */
     private lockedBubbleHtml(state: ExploreState, crumb: DrillCrumb, index: number, isDeepest: boolean): string {
         const m = extractBubbleMetric(crumb.columns, crumb.row);
-        const secondary = m.hasMeasure
-            ? `<div class="bubble-value"><span class="bubble-agg">#</span><span class="bubble-value-num">${escapeHtml(m.countText)}</span></div>`
-            : '';
         // Compact bubbles are 120px → their center/edge radius is 60px.
         const nubs = isDeepest ? this.renderCategoryNubs(this.stackNubCategories(state), BUBBLE_RADIUS) : '';
+        // Only the deepest locked bubble owns the live measure choice → only it
+        // gets the dial.
+        const dial = isDeepest ? this.dialAttrs(state, state.selectedMeasures[0] ?? null) : '';
+        const aggDial = isDeepest ? this.aggDialAttrs(state) : '';
+        // The deepest locked bubble owns the open cloud → clicking it clears that
+        // grouping (collapses the cloud). Ancestor bubbles pop the chain back to
+        // their level (ungrouped).
+        const action = isDeepest
+            ? ` data-action="clearGrouping"`
+            : ` data-action="popDrill" data-index="${index}"`;
+        const title = isDeepest ? 'Clear grouping' : 'Back to ' + crumb.display;
         return `
             <div class="locked-hub">
-                <div class="bubble bubble-locked clickable" data-action="popDrill" data-index="${index}"
-                    title="Back to ${escapeAttr(crumb.display)}">
-                    <div class="bubble-label">${escapeHtml(m.label)}</div>
-                    <div class="bubble-primary"><span class="bubble-primary-num">${escapeHtml(m.primaryText)}</span></div>
-                    ${secondary}
+                <div class="bubble bubble-locked clickable"${action}
+                    title="${escapeAttr(title)}">
+                    ${bubbleBody(m.label, m.valueText, m.aggGlyph, m.measureName, dial, aggDial)}
                 </div>
                 ${nubs}
             </div>`;
@@ -882,17 +981,19 @@ export class ExplorePanel {
     }
 
     private valueAreaHtml(state: ExploreState): string {
-        if (state.loading) {
+        // Only show the bare "Loading…" hint on a COLD load (no cloud to show yet).
+        // When a cloud is already on screen — e.g. switching the measure re-runs the
+        // query — we keep the existing bubbles up and just dim them (`is-refreshing`)
+        // so they update in place instead of flashing off to "Loading…" and back.
+        if (state.loading && !state.result) {
             return `<div class="hint">Loading…</div>`;
         }
         if (state.selectedDimensions.length === 0 && state.selectedMeasures.length === 0) {
-            // No grouping yet: a single total bubble. Same compact format as the
-            // grouped cloud bubbles it sits among.
+            // No grouping yet: a single total bubble in the same three-line layout.
             return `
                 <div class="flower">
                     <div class="bubble">
-                        <div class="bubble-label">All</div>
-                        <div class="bubble-primary"><span class="bubble-primary-num">${state.totalCount === null ? '—' : formatCompact(state.totalCount)}</span></div>
+                        ${bubbleBody('All', state.totalCount === null ? '—' : formatCompact(state.totalCount), '#', 'rows')}
                     </div>
                 </div>
                 <div class="hint">Pick a dimension to flower into groups, or a measure to add values.</div>`;
@@ -906,18 +1007,16 @@ export class ExplorePanel {
         const countIdx = result.columns.indexOf('Count');
         const measureCols = result.columns
             .map((name, i) => ({ name, i }))
-            .filter(c => c.name.startsWith('Sum of '));
+            .filter(c => isMeasureHeader(c.name));
         const dimIdxs = result.columns
             .map((name, i) => ({ name, i }))
-            .filter(c => c.name !== 'Count' && !c.name.startsWith('Sum of '))
+            .filter(c => c.name !== 'Count' && !isMeasureHeader(c.name))
             .map(c => c.i);
 
-        // Picking a measure promotes it to the PRIMARY metric: it drives the big
-        // number and the heat color, and Count is demoted to a secondary line.
-        // With no measure selected, Count stays primary.
+        // Single measure: the selected numeric column (promoted to the big value
+        // and the heat channel) or, with none, the row count. Only one measure is
+        // shown at a time now.
         const primaryMeasure = measureCols[0];
-        const secondaryMeasures = measureCols.slice(1);
-        const showMeasureNames = measureCols.length > 1;
 
         const metricOf = (row: unknown[]): number => primaryMeasure
             ? Number(row[primaryMeasure.i]) || 0
@@ -936,49 +1035,27 @@ export class ExplorePanel {
                 ? dimIdxs.map(i => formatCell(row[i])).join(' · ')
                 : 'All';
 
-            // Primary: the promoted measure if any, else the count.
-            let primaryHtml: string;
+            // The three-line body: big value + "glyph column" caption (or "# rows").
+            let valueText: string;
+            let aggGlyph: string;
+            let measureName: string;
             if (primaryMeasure) {
                 const pm = parseMeasureHeader(primaryMeasure.name);
-                // Caption is only useful when it disambiguates: show the name when
-                // more than one measure is selected, and the aggregate glyph only
-                // when it's NOT the implicit default (sum).
-                const showName = showMeasureNames;
-                const showGlyph = !pm.isDefault;
-                const cap = (showName || showGlyph)
-                    ? `<span class="bubble-primary-cap">${showGlyph ? `<span class="bubble-agg">${pm.glyph}</span>` : ''}${showName ? escapeHtml(truncateLabel(pm.column, MAX_MEASURE_NAME_LEN)) : ''}</span>`
-                    : '';
-                primaryHtml = `<div class="bubble-primary" title="${escapeAttr(primaryMeasure.name + ' = ' + formatCell(row[primaryMeasure.i]))}">`
-                    + `<span class="bubble-primary-num">${escapeHtml(formatMeasureValue(row[primaryMeasure.i]))}</span>`
-                    + cap + `</div>`;
+                valueText = formatMeasureValue(row[primaryMeasure.i]);
+                aggGlyph = pm.glyph;
+                measureName = pm.column;
             } else {
-                primaryHtml = `<div class="bubble-primary"><span class="bubble-primary-num">${escapeHtml(formatCompact(count))}</span></div>`;
+                valueText = formatCompact(count);
+                aggGlyph = '#';
+                measureName = 'rows';
             }
-
-            // Secondary lines: demoted count (only when a measure is primary)
-            // plus any additional measures, each a single compact row.
-            const secondary: string[] = [];
-            if (primaryMeasure) {
-                secondary.push(`<div class="bubble-value" title="${escapeAttr('Count = ' + formatNumber(count))}">`
-                    + `<span class="bubble-agg">#</span><span class="bubble-value-num">${escapeHtml(formatCompact(count))}</span></div>`);
-            }
-            for (const mc of secondaryMeasures.slice(0, MAX_BUBBLE_VALUES)) {
-                const m = parseMeasureHeader(mc.name);
-                const namePart = showMeasureNames
-                    ? `<span class="bubble-value-name">${escapeHtml(truncateLabel(m.column, MAX_MEASURE_NAME_LEN))}</span>`
-                    : '';
-                secondary.push(`<div class="bubble-value" title="${escapeAttr(mc.name + ' = ' + formatCell(row[mc.i]))}">`
-                    + `<span class="bubble-agg">${m.glyph}</span>${namePart}`
-                    + `<span class="bubble-value-num">${escapeHtml(formatMeasureValue(row[mc.i]))}</span></div>`);
-            }
-            const overflow = secondaryMeasures.length > MAX_BUBBLE_VALUES ? `<div class="bubble-more">…</div>` : '';
 
             const heat = heatColor(heatRank[rowIdx] ?? 0);
             const heatStyle = `border-color:${heat};`
                 + `background:color-mix(in srgb, ${heat} 16%, var(--vscode-editorWidget-background));`;
 
             const key = String(rowIdx);
-            const inner = `<div class="bubble-label">${escapeHtml(label)}</div>${primaryHtml}${secondary.join('')}${overflow}`;
+            const inner = bubbleBody(label, valueText, aggGlyph, measureName);
 
             // The focused bubble is enlarged (object permanence: its peers stay
             // visible but fade). It carries NO drill nubs — to descend you must
@@ -1005,7 +1082,8 @@ export class ExplorePanel {
 
         const capped = result.rows.length >= MAX_FLOWER_ROWS
             ? `<div class="hint">Showing top ${MAX_FLOWER_ROWS} groups.</div>` : '';
-        return `<div class="flower">${bubbles}</div>${capped}`;
+        const refreshing = state.loading ? ' is-refreshing' : '';
+        return `<div class="flower${refreshing}">${bubbles}</div>${capped}`;
     }
 
     // ─── Static shell ───────────────────────────────────────────────────
@@ -1075,6 +1153,9 @@ export class ExplorePanel {
        root-bubble → cloud distance. */
     .value-area-drilled { margin-top: 74px; }
     .flower { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+    /* A re-running query (e.g. a measure change) keeps the current cloud on screen
+       and just dims it while the new values land — avoids the off/on flash. */
+    .flower.is-refreshing { opacity: 0.55; transition: opacity 0.12s ease-out; }
     .bubble {
         display: flex; flex-direction: column; align-items: center; justify-content: center;
         width: 96px; height: 96px; flex: 0 0 auto; box-sizing: border-box;
@@ -1214,6 +1295,52 @@ export class ExplorePanel {
     .bubble-value-name { opacity: 0.7; overflow: hidden; text-overflow: ellipsis; }
     .bubble-value-num { font-variant-numeric: tabular-nums; }
     .bubble-more { font-size: 0.8em; opacity: 0.6; line-height: 0.8; }
+    /* Caption under the value: the aggregate glyph + the measure column name (or
+       "# rows"). The whole bubble surface is the measure dial. */
+    .bubble-cap { font-size: 0.72em; opacity: 0.7; max-width: 100%; display: flex; align-items: baseline; justify-content: center; gap: 4px; }
+    .bubble-cap-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    /* A bubble whose surface is the measure dial: vertical-drag to scrub measures. */
+    [data-dial] { cursor: ns-resize; }
+    /* The glyph (aggregate dial) and the name (measure dial) sit side by side, so the
+       ns-resize cursor alone can't tell them apart. On hover each lights up as its own
+       little pill — independently — so you can see they are two separate controls. */
+    .bubble-cap [data-dial] { border-radius: 5px; padding: 0 3px; margin: 0 -1px; transition: background 0.1s ease-out, box-shadow 0.1s ease-out; }
+    .bubble-cap .bubble-agg[data-dial]:hover { background: color-mix(in srgb, var(--role-measure) 22%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--role-measure) 45%, transparent); opacity: 1; }
+    .bubble-cap .bubble-cap-name[data-dial]:hover { background: color-mix(in srgb, var(--role-measure) 14%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--role-measure) 35%, transparent); opacity: 1; }
+    /* The glyph is tiny and easy to miss, so on hover the aggregate dial expands from
+       its glyph (e.g. Σ) into its full label (e.g. "Sum") — telling you what it is and
+       that it's an interactive handle. The label is hidden (not display:none) when idle
+       so it doesn't affect layout width until you actually hover. */
+    .bubble-agg .agg-label { display: none; }
+    .bubble-agg[data-dial]:hover .agg-glyph { display: none; }
+    .bubble-agg[data-dial]:hover .agg-label { display: inline; font-weight: 600; }
+
+    /* Measure dial: a translucent, finger-following scroll wheel of measure names
+       that appears over the dialed bubble while you drag vertically. The centered
+       item is the live pick; release snaps to it. Built/positioned by the script. */
+    .measure-dial-popup {
+        position: fixed; z-index: 50; width: 150px; height: 132px;
+        transform: translate(-50%, -50%); border-radius: 14px; overflow: hidden;
+        background: color-mix(in srgb, var(--vscode-editor-background) 72%, transparent);
+        backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px);
+        border: 1px solid var(--vscode-widget-border, rgba(128,128,128,0.35));
+        box-shadow: 0 6px 20px rgba(0,0,0,0.4);
+        -webkit-mask-image: linear-gradient(transparent, #000 28%, #000 72%, transparent);
+                mask-image: linear-gradient(transparent, #000 28%, #000 72%, transparent);
+        pointer-events: none;
+    }
+    .measure-dial-list { position: absolute; left: 0; right: 0; top: 50%; will-change: transform; }
+    .measure-dial-item {
+        height: 26px; line-height: 26px; text-align: center; font-size: 0.82em;
+        color: var(--vscode-descriptionForeground); white-space: nowrap; overflow: hidden;
+        text-overflow: ellipsis; padding: 0 10px; opacity: 0.65; transition: opacity 0.08s, transform 0.08s;
+    }
+    .measure-dial-item.current { color: var(--role-measure); opacity: 1; font-weight: 600; transform: scale(1.1); }
+    .measure-dial-center {
+        position: absolute; left: 10px; right: 10px; top: 50%; height: 26px; transform: translateY(-50%);
+        border-top: 1px solid var(--role-measure); border-bottom: 1px solid var(--role-measure);
+        opacity: 0.35; pointer-events: none;
+    }
 
     /* Collapsed bubble "hub": the bubble centered, with category nubs around it. */
     .bubble-hub { position: relative; }
@@ -1428,6 +1555,94 @@ export class ExplorePanel {
         dragState = null;
     });
 
+    // Measure dial: vertical drag on the caption NAME of a dial-capable bubble
+    // (root / active / deepest-locked) scrubs through ["rows", ...numeric columns].
+    // A translucent wheel follows the finger; releasing snaps to the centered item
+    // and selects it. Independent of the drill drag (those are the cloud bubbles).
+    let dialState = null;   // { el, startY, options, index, dragging, popup, list }
+    const DIAL_ROW_H = 26;
+    // The wheel travels faster than the finger so the whole list is reachable in a
+    // short drag — important when the dialed bubble sits near the top edge of the
+    // viewport and there's little room to drag upward.
+    const DIAL_GAIN = 2.2;
+    function dialSelectedIndex(s, dy) {
+        // Drag UP (dy<0) advances toward later options.
+        let sel = Math.round(s.index - (dy * DIAL_GAIN) / DIAL_ROW_H);
+        if (sel < 0) { sel = 0; }
+        if (sel > s.options.length - 1) { sel = s.options.length - 1; }
+        return sel;
+    }
+    function buildDialPopup(s) {
+        const p = document.createElement('div');
+        p.className = 'measure-dial-popup';
+        const list = document.createElement('div');
+        list.className = 'measure-dial-list';
+        s.options.forEach(function(opt) {
+            const item = document.createElement('div');
+            item.className = 'measure-dial-item';
+            item.textContent = opt;
+            list.appendChild(item);
+        });
+        p.appendChild(list);
+        const center = document.createElement('div');
+        center.className = 'measure-dial-center';
+        p.appendChild(center);
+        const r = s.el.getBoundingClientRect();
+        p.style.left = (r.left + r.width / 2) + 'px';
+        p.style.top = (r.top + r.height / 2) + 'px';
+        document.body.appendChild(p);
+        s.popup = p; s.list = list;
+    }
+    function updateDial(s, dy) {
+        const sel = dialSelectedIndex(s, dy);
+        const ty = -(s.index * DIAL_ROW_H + DIAL_ROW_H / 2) + dy * DIAL_GAIN;
+        s.list.style.transform = 'translateY(' + ty + 'px)';
+        const items = s.list.children;
+        for (let i = 0; i < items.length; i++) {
+            items[i].classList.toggle('current', i === sel);
+        }
+    }
+    app.addEventListener('pointerdown', function(e) {
+        if (!e.target.closest) { return; }
+        const el = e.target.closest('[data-dial]');
+        if (!el) { return; }
+        let options;
+        try { options = JSON.parse(el.getAttribute('data-dial')); } catch (_) { return; }
+        if (!options || options.length < 2) { return; }
+        const kind = el.getAttribute('data-dial-kind') || 'measure';
+        let idx = options.indexOf(el.getAttribute('data-dial-current') || 'rows');
+        if (idx < 0) { idx = 0; }
+        dialState = { el: el, startY: e.clientY, options: options, index: idx, kind: kind, dragging: false, popup: null, list: null };
+    });
+    window.addEventListener('pointermove', function(e) {
+        if (!dialState) { return; }
+        const dy = e.clientY - dialState.startY;
+        if (!dialState.dragging) {
+            if (Math.abs(dy) < DRAG_THRESHOLD) { return; }
+            dialState.dragging = true;
+            e.preventDefault();
+            buildDialPopup(dialState);
+        }
+        updateDial(dialState, dy);
+    });
+    window.addEventListener('pointerup', function(e) {
+        if (!dialState) { return; }
+        if (dialState.dragging) {
+            const sel = dialSelectedIndex(dialState, e.clientY - dialState.startY);
+            const chosen = dialState.options[sel];
+            if (dialState.popup) { dialState.popup.remove(); }
+            suppressClick = true;
+            if (dialState.kind === 'aggregate') {
+                // Dial labels are Sum/Avg/Min/Max → lowercase to the agg kind.
+                vscodeApi.postMessage({ command: 'setAggregate', agg: chosen.toLowerCase() });
+            } else {
+                // "rows" → empty column (count); a real column → that measure.
+                vscodeApi.postMessage({ command: 'setMeasure', column: chosen === 'rows' ? '' : chosen });
+            }
+        }
+        dialState = null;
+    });
+
     // Event delegation survives innerHTML swaps.
     app.addEventListener('click', function(e) {
         if (suppressClick) { suppressClick = false; return; }
@@ -1530,16 +1745,13 @@ function kustoLiteral(value: unknown, type?: string): string {
  * implicit default (sum). Falls back to Σ/the raw header for anything unrecognized.
  */
 function parseMeasureHeader(header: string): { glyph: string; column: string; isDefault: boolean } {
-    const prefixes: Array<[string, string, boolean]> = [
-        ['Sum of ', 'Σ', true],
-        ['Avg of ', 'x̄', false],
-        ['Min of ', '↓', false],
-        ['Max of ', '↑', false],
-    ];
-    for (const [prefix, glyph, isDefault] of prefixes) {
-        if (header.startsWith(prefix)) { return { glyph, column: header.slice(prefix.length), isDefault }; }
+    for (const kind of AGG_ORDER) {
+        const a = AGGREGATES[kind];
+        if (header.startsWith(a.prefix)) {
+            return { glyph: a.glyph, column: header.slice(a.prefix.length), isDefault: kind === 'sum' };
+        }
     }
-    return { glyph: 'Σ', column: header, isDefault: true };
+    return { glyph: AGGREGATES.sum.glyph, column: header, isDefault: true };
 }
 
 /** Truncates a label to a maximum length, appending an ellipsis when clipped. */
@@ -1548,13 +1760,32 @@ function truncateLabel(text: string, max: number): string {
 }
 
 /**
+ * The standard bubble body: a title line, the big value, then a caption line of
+ * "aggregate glyph + measure column name" (or "# rows" when measuring counts).
+ * Every bubble (root, cloud, locked, active) renders the same three lines so the
+ * measure shown is always self-describing. Escapes all of its inputs.
+ */
+function bubbleBody(label: string, valueText: string, aggGlyph: string, measureName: string, dialAttr = '', aggDialAttr = ''): string {
+    // The measure dial lives on the caption's NAME span; the aggregate dial lives
+    // on the GLYPH span. Both are small, precise ns-resize handles (the rest of the
+    // bubble surface is free for click/drag). glyph = HOW you aggregate, name = WHAT.
+    return `<div class="bubble-label">${escapeHtml(label)}</div>`
+        + `<div class="bubble-primary"><span class="bubble-primary-num">${escapeHtml(valueText)}</span></div>`
+        + `<div class="bubble-cap" title="${escapeAttr(aggGlyph + ' ' + measureName)}">`
+        + `<span class="bubble-agg"${aggDialAttr}><span class="agg-glyph">${escapeHtml(aggGlyph)}</span>`
+        + `<span class="agg-label">${escapeHtml(aggLabelFromGlyph(aggGlyph) || aggGlyph)}</span></span>`
+        + `<span class="bubble-cap-name"${dialAttr}>${escapeHtml(truncateLabel(measureName, MAX_MEASURE_NAME_LEN))}</span></div>`;
+}
+
+/**
  * Extracts the bits needed to render a result row as a (locked) bubble: its
- * dimension-value label and primary metric, mirroring valueAreaHtml's rule that
- * a selected measure is primary (big number) with Count demoted to a '#' line.
+ * dimension-value label and the single measure shown — the selected numeric
+ * column (big value + its glyph/name) or, with no measure, the row count shown
+ * as "# rows".
  */
 function extractBubbleMetric(
     columns: string[], row: unknown[],
-): { label: string; primaryText: string; countText: string; hasMeasure: boolean } {
+): { label: string; valueText: string; aggGlyph: string; measureName: string } {
     const countIdx = columns.indexOf('Count');
     const measureCols = columns
         .map((name, i) => ({ name, i }))
@@ -1570,14 +1801,15 @@ function extractBubbleMetric(
         : 'All';
     const primaryMeasure = measureCols[0];
     if (primaryMeasure) {
+        const pm = parseMeasureHeader(primaryMeasure.name);
         return {
             label,
-            primaryText: formatMeasureValue(row[primaryMeasure.i]),
-            countText: formatCompact(count),
-            hasMeasure: true,
+            valueText: formatMeasureValue(row[primaryMeasure.i]),
+            aggGlyph: pm.glyph,
+            measureName: pm.column,
         };
     }
-    return { label, primaryText: formatCompact(count), countText: '', hasMeasure: false };
+    return { label, valueText: formatCompact(count), aggGlyph: '#', measureName: 'rows' };
 }
 
 /**
