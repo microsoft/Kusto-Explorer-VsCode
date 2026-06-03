@@ -129,15 +129,15 @@ function aggLabelFromGlyph(glyph: string): string {
 const MAX_DIMENSION_NUBS = 5;
 
 /** Geometry of the collapsed bubble "hub" (the bubble plus the space its nubs occupy). */
-const HUB_SIZE = 280;
+const HUB_SIZE = 420;
 const HUB_CENTER = HUB_SIZE / 2;
-/** Radius of the hub bubbles (root/focus are 120px wide → 60px radius). A category
+/** Radius of the hub bubbles (root/focus are 180px wide → 90px radius). A category
  *  nub's center sits exactly on this edge. */
-const BUBBLE_RADIUS = 60;
+const BUBBLE_RADIUS = 90;
 /** Distance from hub center to a category nub's center — on the bubble edge. */
 const NUB_RADIUS = BUBBLE_RADIUS;
 /** Radius of the circle (centered on the bubble) that bloomed member dots ride. */
-const MEMBER_RADIUS = 104;
+const MEMBER_RADIUS = 156;
 /** Fixed angular gap (degrees) between adjacent member dots along their arc. */
 const MEMBER_ARC_GAP = 22;
 /** Each category kind has a FIXED angle on the bubble so it never moves with count
@@ -756,7 +756,7 @@ export class ExplorePanel {
 
     /** Lays out a set of category nubs at their fixed per-kind angles on the bubble
      *  edge. `hubCenter` is the center of the container the nubs ride (default the
-     *  280px hub; compact bubbles pass their own half-size). */
+     *  420px hub; compact bubbles pass their own half-size). */
     private renderCategoryNubs(categories: NubCategory[], hubCenter: number = HUB_CENTER): string {
         if (categories.length === 0) { return ''; }
 
@@ -850,7 +850,7 @@ export class ExplorePanel {
             // grouping choice. Shallower nodes stay compact and static.
             if (isActiveNode) {
                 // The active node following the root hub must clear the root's larger
-                // (80px) bloom reserve, not a locked bubble's 10px margin.
+                // (120px) bloom reserve, not a locked bubble's 10px margin.
                 const followsRoot = i === 0;
                 nodes.push(`<div class="spine-node">${this.activeBubbleHtml(state, crumb, followsRoot)}</div>`);
             } else {
@@ -870,7 +870,7 @@ export class ExplorePanel {
     }
 
     /**
-     * The deepest stacked bubble after a drag gesture: rendered as a full 280px
+     * The deepest stacked bubble after a drag gesture: rendered as a full 420px
      * hub (like the root) whose dimension nubs pick the next grouping (toggleDimension,
      * not a further descent — this bubble is already locked). It is the bottom of
      * the stack — the level you're currently on — so clicking its body does nothing.
@@ -927,7 +927,7 @@ export class ExplorePanel {
      */
     private lockedBubbleHtml(state: ExploreState, crumb: DrillCrumb, index: number, isDeepest: boolean): string {
         const m = extractBubbleMetric(crumb.columns, crumb.row);
-        // Compact bubbles are 120px → their center/edge radius is 60px.
+        // Compact bubbles are 180px → their center/edge radius is 90px.
         const nubs = isDeepest ? this.renderCategoryNubs(this.stackNubCategories(state), BUBBLE_RADIUS) : '';
         // Only the deepest locked bubble owns the live measure choice → only it
         // gets the dial.
@@ -1147,11 +1147,11 @@ export class ExplorePanel {
     .chip.role-other { border-left: 3px solid var(--role-other); }
     .chip-dc { opacity: 0.6; font-size: 0.85em; }
     .value-area { margin-top: 4px; }
-    /* When drilled, the cloud follows a compact 120px locked bubble that (unlike
-       the 280px root hub) reserves no bloom space below it, so the cloud lands far
-       too close. Add the missing reserve (~70px) so the gap matches the original
+    /* When drilled, the cloud follows a compact 180px locked bubble that (unlike
+       the 420px root hub) reserves no bloom space below it, so the cloud lands far
+       too close. Add the missing reserve (~110px) so the gap matches the original
        root-bubble → cloud distance. */
-    .value-area-drilled { margin-top: 74px; }
+    .value-area-drilled { margin-top: 114px; }
     .flower { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
     /* A re-running query (e.g. a measure change) keeps the current cloud on screen
        and just dims it while the new values land — avoids the off/on flash. */
@@ -1168,7 +1168,8 @@ export class ExplorePanel {
        solid accent ring, a faint accent-tinted fill and a lift so it reads as the
        anchor, while the derived aggregate bubbles stay as lighter neutral satellites. */
     .bubble-root {
-        cursor: default; width: 120px; height: 120px; position: relative;
+        cursor: default; width: 180px; height: 180px; position: relative;
+        font-size: 1.35em;
         border: 3px solid var(--root-accent);
         background:
             color-mix(in srgb, var(--root-accent) 14%, var(--vscode-editorWidget-background));
@@ -1182,7 +1183,8 @@ export class ExplorePanel {
     .bubble.faded:hover { opacity: 0.6; }
     /* The focused bubble is promoted to a sub-root hub with a gold ring + lift. */
     .bubble-focus {
-        cursor: pointer; width: 120px; height: 120px; position: relative;
+        cursor: pointer; width: 180px; height: 180px; position: relative;
+        font-size: 1.35em;
         border-width: 3px; box-shadow: 0 1px 8px rgba(0, 0, 0, 0.45);
         outline: 2px solid var(--focus-accent); outline-offset: 2px;
     }
@@ -1195,19 +1197,19 @@ export class ExplorePanel {
        drawn as a dashed CIRCLE the size of a locked bubble (the shape it will
        become once attached), centered in the column. Its top sits at the SAME 26px
        gap a real bubble would have once attached. Following a compact locked bubble
-       (10px margin) needs +16px; the root hub reserves ~80px of empty bloom space
+       (10px margin) needs +16px; the root hub reserves ~120px of empty bloom space
        below its bubble, so the root-following zone is pulled up to that same gap.
        The actual accepted drop area is larger (see overDropZone in script). */
     .drop-zone { display: none; }
     #app.dragging-bubble .drop-zone {
         display: flex; align-items: center; justify-content: center;
-        width: 120px; height: 120px; margin: 16px 0 6px;
+        width: 180px; height: 180px; margin: 16px 0 6px;
         border: 2px dashed color-mix(in srgb, var(--root-accent) 60%, transparent);
         border-radius: 50%;
         background: color-mix(in srgb, var(--root-accent) 6%, transparent);
         transition: background 0.1s, border-color 0.1s;
     }
-    #app.dragging-bubble .drop-zone.drop-zone-root { margin-top: -54px; }
+    #app.dragging-bubble .drop-zone.drop-zone-root { margin-top: -94px; }
     #app.dragging-bubble.over-dropzone .drop-zone {
         border-color: var(--root-accent);
         background: color-mix(in srgb, var(--root-accent) 18%, transparent);
@@ -1220,7 +1222,7 @@ export class ExplorePanel {
     .drag-ghost {
         position: fixed; z-index: 1000; left: 0; top: 0;
         transform: translate(-50%, -50%);
-        min-width: 64px; max-width: 120px; padding: 8px 10px;
+        min-width: 96px; max-width: 180px; padding: 8px 10px;
         border-radius: 50%; aspect-ratio: 1;
         display: flex; align-items: center; justify-content: center; text-align: center;
         font-size: 0.78em; overflow: hidden;
@@ -1261,15 +1263,16 @@ export class ExplorePanel {
         font-size: 0.7em; color: var(--role-dimension); pointer-events: none;
     }
     .active-link-label {
-        top: 67px; left: calc(50% + 10px);
+        top: 107px; left: calc(50% + 10px);
     }
-    /* The hub reserves ~80px below its centered bubble for the nub bloom space.
+    /* The hub reserves ~120px below its centered bubble for the nub bloom space.
        Pull the first locked node up into that zone (negative margin) so it sits
        the SAME short distance under the hub as locked bubbles sit from each other:
-       gap = 80 + margin-top + height = 80 - 72 + 18 = 26px. */
-    .spine-link-root { height: 18px; margin-top: -72px; }
+       gap = 120 + margin-top + height = 120 - 112 + 18 = 26px. */
+    .spine-link-root { height: 18px; margin-top: -112px; }
     .bubble-locked {
-        width: 120px; height: 120px;
+        width: 180px; height: 180px;
+        font-size: 1.35em;
         border: 3px solid var(--root-accent);
         background: color-mix(in srgb, var(--root-accent) 14%, var(--vscode-editorWidget-background));
     }
@@ -1279,7 +1282,7 @@ export class ExplorePanel {
        its outer half peeks out), matching the root/cloud bubbles. The bottom margin
        (10px) + the following spine-link (16px) = a 26px gap to the next bubble,
        matching the root→first gap so every bubble is evenly spaced. */
-    .locked-hub { position: relative; width: 120px; height: 120px; margin-bottom: 10px; }
+    .locked-hub { position: relative; width: 180px; height: 180px; margin-bottom: 10px; }
     .locked-hub .bubble-locked { position: relative; z-index: 1; }
     .locked-cat { cursor: default; }
     /* Locked bubbles reveal their interactive nubs on hover, like the big hubs. */
@@ -1299,8 +1302,10 @@ export class ExplorePanel {
        "# rows"). The whole bubble surface is the measure dial. */
     .bubble-cap { font-size: 0.72em; opacity: 0.7; max-width: 100%; display: flex; align-items: baseline; justify-content: center; gap: 4px; }
     .bubble-cap-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    /* A bubble whose surface is the measure dial: vertical-drag to scrub measures. */
-    [data-dial] { cursor: ns-resize; }
+    /* A bubble whose surface is the measure dial: click or drag to scrub measures.
+       The capsule highlight (below) is the affordance now, so keep the normal
+       cursor. */
+    [data-dial] { cursor: default; }
     /* The glyph (aggregate dial) and the name (measure dial) sit side by side, so the
        ns-resize cursor alone can't tell them apart. On hover each lights up as its own
        little pill — independently — so you can see they are two separate controls. */
@@ -1341,6 +1346,10 @@ export class ExplorePanel {
         border-top: 1px solid var(--role-measure); border-bottom: 1px solid var(--role-measure);
         opacity: 0.35; pointer-events: none;
     }
+    /* A click on a dial capsule opens the SAME wheel popup, but kept on screen and
+       draggable (pointer-events on) so you can scrub it without holding from the
+       capsule. Release snaps + commits; click away dismisses. */
+    .measure-dial-popup.is-open { pointer-events: auto; cursor: ns-resize; }
 
     /* Collapsed bubble "hub": the bubble centered, with category nubs around it. */
     .bubble-hub { position: relative; }
@@ -1354,19 +1363,19 @@ export class ExplorePanel {
         position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
         z-index: 1;
     }
-    /* The active hub is a full 280px hub but its bubble is centered, so 80px of
-       empty space sits above it (140px hub center − 60px bubble radius). Pull the
+    /* The active hub is a full 420px hub but its bubble is centered, so 120px of
+       empty space sits above it (210px hub center − 90px bubble radius). Pull the
        hub up under the preceding bubble so the active bubble lands a 26px gap below
-       it (preceding margin-bottom 10 + margin-top + 80 = 26 → margin-top -64), trim
+       it (preceding margin-bottom 10 + margin-top + 120 = 26 → margin-top -104), trim
        the empty bottom, then draw the connector ourselves (the preceding link is
        omitted) so the line spans that gap. */
-    .bubble-hub-active { margin-top: -64px; margin-bottom: -40px; }
+    .bubble-hub-active { margin-top: -104px; margin-bottom: -60px; }
     /* When the active hub follows the ROOT hub (just dropped, nothing locked yet),
-       the predecessor reserves 80px of bloom space below its bubble instead of a
-       10px margin, so pull up further: 26 − 80 − 80 = -134. */
-    .bubble-hub-active-root { margin-top: -134px; }
+       the predecessor reserves 120px of bloom space below its bubble instead of a
+       10px margin, so pull up further: 26 − 120 − 120 = -214. */
+    .bubble-hub-active-root { margin-top: -214px; }
     .bubble-hub-active::before {
-        content: ''; position: absolute; left: 50%; top: 54px;
+        content: ''; position: absolute; left: 50%; top: 94px;
         transform: translateX(-50%); width: 2px; height: 26px;
         background: var(--root-accent); opacity: 0.5; pointer-events: none;
     }
@@ -1416,7 +1425,7 @@ export class ExplorePanel {
        sits below the member dots so they remain hoverable/clickable. */
     .bloom-catch {
         position: absolute; transform: translate(-50%, -50%);
-        width: 260px; height: 260px; border-radius: 50%;
+        width: 390px; height: 390px; border-radius: 50%;
         z-index: 0; pointer-events: none;
     }
     .cat-nub.open .bloom-catch { pointer-events: auto; }
@@ -1602,6 +1611,40 @@ export class ExplorePanel {
             items[i].classList.toggle('current', i === sel);
         }
     }
+    // Posts the chosen option back to the extension (shared by the capsule drag,
+    // the open-wheel scrub, and a plain commit). kind = 'aggregate' | 'measure'.
+    function commitDialChoice(kind, chosen) {
+        if (kind === 'aggregate') {
+            // Dial labels are Sum/Avg/Min/Max → lowercase to the agg kind.
+            vscodeApi.postMessage({ command: 'setAggregate', agg: chosen.toLowerCase() });
+        } else {
+            // "rows" → empty column (count); a real column → that measure.
+            vscodeApi.postMessage({ command: 'setMeasure', column: chosen === 'rows' ? '' : chosen });
+        }
+    }
+    // The open click-wheel: a plain click on a dial capsule brings up the SAME
+    // translucent wheel popup, kept on screen and draggable so you can scrub it
+    // without holding the drag from the capsule. Drag + release snaps/commits;
+    // clicking away (or Escape) dismisses it.
+    let openWheel = null;
+    function closeDialWheel() {
+        if (openWheel) { if (openWheel.popup) { openWheel.popup.remove(); } openWheel = null; }
+    }
+    function openDialWheel(el, options, kind, current) {
+        closeDialWheel();
+        let idx = options.indexOf(current);
+        if (idx < 0) { idx = 0; }
+        const s = { el: el, options: options, index: idx, kind: kind, current: current, popup: null, list: null };
+        buildDialPopup(s);
+        s.popup.classList.add('is-open');
+        updateDial(s, 0); // show the current pick centered
+        // A pointerdown on the wheel starts a scrub (reusing the same drag path).
+        s.popup.addEventListener('pointerdown', function(ev) {
+            ev.stopPropagation();
+            dialState = { el: el, startY: ev.clientY, options: options, index: s.index, kind: kind, current: current, dragging: true, popup: s.popup, list: s.list, floating: true };
+        });
+        openWheel = s;
+    }
     app.addEventListener('pointerdown', function(e) {
         if (!e.target.closest) { return; }
         const el = e.target.closest('[data-dial]');
@@ -1610,9 +1653,10 @@ export class ExplorePanel {
         try { options = JSON.parse(el.getAttribute('data-dial')); } catch (_) { return; }
         if (!options || options.length < 2) { return; }
         const kind = el.getAttribute('data-dial-kind') || 'measure';
-        let idx = options.indexOf(el.getAttribute('data-dial-current') || 'rows');
+        const current = el.getAttribute('data-dial-current') || 'rows';
+        let idx = options.indexOf(current);
         if (idx < 0) { idx = 0; }
-        dialState = { el: el, startY: e.clientY, options: options, index: idx, kind: kind, dragging: false, popup: null, list: null };
+        dialState = { el: el, startY: e.clientY, options: options, index: idx, kind: kind, current: current, dragging: false, popup: null, list: null };
     });
     window.addEventListener('pointermove', function(e) {
         if (!dialState) { return; }
@@ -1627,20 +1671,31 @@ export class ExplorePanel {
     });
     window.addEventListener('pointerup', function(e) {
         if (!dialState) { return; }
+        const wasFloating = dialState.floating;
         if (dialState.dragging) {
+            // Drag gesture (from the capsule, or scrubbing the open wheel): snap
+            // the finger-wheel to the centered item and commit.
             const sel = dialSelectedIndex(dialState, e.clientY - dialState.startY);
             const chosen = dialState.options[sel];
             if (dialState.popup) { dialState.popup.remove(); }
+            if (wasFloating) { openWheel = null; }
             suppressClick = true;
-            if (dialState.kind === 'aggregate') {
-                // Dial labels are Sum/Avg/Min/Max → lowercase to the agg kind.
-                vscodeApi.postMessage({ command: 'setAggregate', agg: chosen.toLowerCase() });
-            } else {
-                // "rows" → empty column (count); a real column → that measure.
-                vscodeApi.postMessage({ command: 'setMeasure', column: chosen === 'rows' ? '' : chosen });
-            }
+            commitDialChoice(dialState.kind, chosen);
+        } else if (!wasFloating) {
+            // No drag from a capsule = a click: bring up the draggable wheel.
+            suppressClick = true;
+            openDialWheel(dialState.el, dialState.options, dialState.kind, dialState.current);
         }
         dialState = null;
+    });
+    // Click anywhere outside the open wheel (or pressing Escape) dismisses it.
+    window.addEventListener('pointerdown', function(e) {
+        if (openWheel && !(e.target.closest && e.target.closest('.measure-dial-popup')) && !(e.target.closest && e.target.closest('[data-dial]'))) {
+            closeDialWheel();
+        }
+    });
+    window.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') { closeDialWheel(); }
     });
 
     // Event delegation survives innerHTML swaps.
