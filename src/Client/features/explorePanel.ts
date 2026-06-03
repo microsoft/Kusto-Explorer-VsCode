@@ -3,16 +3,18 @@
 
 /*
  * The Explore panel — a singleton webview that opens a spatial, balloon-style
- * exploration of a table. The MVP shows ONE card:
- *  - collapsed: a single bubble with the table name and total row count;
- *  - expanded: the table's classified columns (dimensions are selectable) plus
- *    a value area that "flowers" into one bubble per dimension-value group
- *    (each bubble shows that group's count).
+ * exploration of a table. It shows a "drill spine": a root hub bubble (the
+ * source table) on top, locked aggregate bubbles stacking below, and a live
+ * cloud of child aggregate bubbles you drag down to drill. Each hub bubble
+ * carries an in-circle dimension facet at its bottom edge: drag it sideways to
+ * scrub candidate dimensions, then fling down to group (Shift to accumulate a
+ * combined grouping). Active groupings show as removable chips below the hub.
  *
  * The extension owns all state and generates the card/bubble HTML as strings.
  * The webview is a thin shell: it acquires the VS Code API, uses event
  * delegation so handlers survive innerHTML swaps, and posts intent messages
- * (toggleExpand / toggleDimension) back to the extension.
+ * (groupDimension / removeDimension / focusBubble / clearGrouping) back to the
+ * extension.
  *
  * Rendering is intentionally canvas-host-agnostic (plain HTML + flex/SVG) so
  * the card interior stays decoupled from any future pan/zoom canvas.
@@ -78,7 +80,6 @@ interface ExploreState {
      *  while measuring rows (count); preserved so switching back to a column
      *  restores the last-used function. */
     selectedAggregate: AggKind;
-    collapsed: boolean;
     totalCount: number | null;
     /** Whole-table sum of the primary selected measure (the root bubble's value),
      *  or null when no measure is selected / not yet computed. */
@@ -181,7 +182,6 @@ export class ExplorePanel {
             selectedDimensions: [],
             selectedMeasures: [],
             selectedAggregate: 'sum',
-            collapsed: true,
             totalCount: null,
             totalMeasure: null,
             result: null,
@@ -229,17 +229,11 @@ export class ExplorePanel {
         );
     }
 
-    private handleMessage(message: { command?: string; column?: string; key?: string; index?: string; agg?: string }): void {
+    private handleMessage(message: { command?: string; column?: string; key?: string; index?: string; agg?: string; accumulate?: boolean }): void {
         switch (message?.command) {
             case 'ready':
                 this.ready = true;
                 this.render();
-                break;
-            case 'toggleExpand':
-                if (this.state) {
-                    this.state.collapsed = !this.state.collapsed;
-                    this.render();
-                }
                 break;
             case 'toggleDimension':
                 if (this.state && typeof message.column === 'string') {
@@ -310,6 +304,32 @@ export class ExplorePanel {
                     // dimension selection: the cloud collapses and the level falls
                     // back to a single ungrouped bubble.
                     this.state.selectedDimensions = [];
+                    this.state.focusKey = null;
+                    void this.runGrouping();
+                }
+                break;
+            case 'groupDimension':
+                if (this.state && typeof message.column === 'string' && message.column) {
+                    // The bottom dimension facet flung a column down onto the drop
+                    // zone. Plain fling REPLACES the grouping; Shift+fling ACCUMULATES
+                    // (adds another grouping dimension), preserving combined grouping.
+                    if (message.accumulate) {
+                        if (!this.state.selectedDimensions.includes(message.column)) {
+                            this.state.selectedDimensions.push(message.column);
+                        }
+                    } else {
+                        this.state.selectedDimensions = [message.column];
+                    }
+                    this.state.focusKey = null;
+                    void this.runGrouping();
+                }
+                break;
+            case 'removeDimension':
+                if (this.state && typeof message.column === 'string') {
+                    // Removing one chip from the active dimension set (the × on a
+                    // dim chip). Collapses to ungrouped when the last one goes.
+                    const i = this.state.selectedDimensions.indexOf(message.column);
+                    if (i >= 0) { this.state.selectedDimensions.splice(i, 1); }
                     this.state.focusKey = null;
                     void this.runGrouping();
                 }
@@ -639,7 +659,7 @@ export class ExplorePanel {
     }
 
     private bodyHtml(state: ExploreState): string {
-        return state.collapsed ? this.collapsedHtml(state) : this.expandedHtml(state);
+        return this.collapsedHtml(state);
     }
 
     private collapsedHtml(state: ExploreState): string {
@@ -650,7 +670,6 @@ export class ExplorePanel {
             ? '…'
             : state.totalCount === null ? '—' : formatCompact(state.totalCount);
 
-        const catsHtml = this.categoryNubsHtml(state);
 
         // Single measure shown: the selected numeric column (whole-table sum) or,
         // with none, the row count shown as "# rows". The body is the same three
@@ -683,23 +702,25 @@ export class ExplorePanel {
         // (i.e. before drilling — once drilled, the deepest bubble owns it).
         const rootDial = drilled ? '' : this.dialAttrs(state, hasMeasure ? measureName : null);
         const rootAggDial = drilled ? '' : this.aggDialAttrs(state);
+        // The dimension facet (scrub + fling-to-group) and the active-dimension
+        // chips live on the root only while it owns the grouping (before drilling).
+        const rootFacet = drilled ? '' : this.dimFacetHtml(state);
+        const rootChips = drilled ? '' : this.dimChipsHtml(state);
         const rootHub = `
                 <div class="bubble-hub" style="width:${HUB_SIZE}px;height:${HUB_SIZE}px;">
                     <div class="${rootBubbleClass}"${rootAction}
                         title="${escapeAttr(rootTitle)}">
                         ${bubbleBody(state.source, rootValue, aggGlyph, measureName, rootDial, rootAggDial)}
-                        <button class="thumb" data-action="toggleExpand" title="Open card (show all columns)">
-                            <span class="thumb-grip"></span>
-                        </button>
+                        ${rootFacet}
                     </div>
-                    ${catsHtml}
+                    ${rootChips}
                 </div>`;
         // The drop zone is rendered whenever there are cloud bubbles to drag (a
         // dimension grouping exists), not only when one is focused — CSS keeps it
         // hidden until a drag is in flight. This lets you press-and-drag a bubble
         // directly without a focus click first.
         return `
-            <div class="card collapsed">
+            <div class="card">
                 ${this.drillSpineHtml(state, rootHub)}
                 ${hasGroups && !isActiveStacked(state)
                     ? `<div class="drop-zone${state.drillChain.length === 0 ? ' drop-zone-root' : ''}" data-dropzone="1"><span class="drop-zone-label">Drop here to drill in</span></div>`
@@ -735,89 +756,78 @@ export class ExplorePanel {
     }
 
     /**
-     * Renders the category nubs (dimension, measure) tucked behind the bubble.
-     * Each is a stable colored dot that blooms its member nubs in a downward arc
-     * on hover; a category with active selections stays lit at rest with a count.
+     * Candidate dimensions the bottom facet can scrub through: all eligible
+     * dimension columns (option A — the full inventory, no nub cap) minus any
+     * already locked up the drill chain and any already in the active grouping.
      */
-    private categoryNubsHtml(state: ExploreState): string {
-        // Once drilled, the root is an ancestor in the stack: it shows no nubs (only
-        // the deepest/bottom bubble does). Its grouping appears on the first
-        // connector line instead.
-        if (state.drillChain.length > 0) { return ''; }
-
-        const categories: NubCategory[] = [];
-        const dimNubs = selectDimensionNubs(state.columns, MAX_DIMENSION_NUBS);
-        if (dimNubs.length > 0) {
-            categories.push({ key: 'dimension', title: 'Group by', action: 'toggleDimension', members: dimNubs, selected: state.selectedDimensions });
+    private candidateDims(state: ExploreState): string[] {
+        const used = new Set<string>();
+        for (const crumb of state.drillChain) {
+            for (const lock of crumb.locks) { used.add(lock.dimension); }
         }
-        // The measure is chosen via the dial on the bubble surface, not a nub.
-        return this.renderCategoryNubs(categories);
+        return selectDimensionNubs(state.columns, state.columns.length)
+            .map(c => c.name)
+            .filter(n => !used.has(n) && !state.selectedDimensions.includes(n));
     }
 
-    /** Lays out a set of category nubs at their fixed per-kind angles on the bubble
-     *  edge. `hubCenter` is the center of the container the nubs ride (default the
-     *  420px hub; compact bubbles pass their own half-size). */
-    private renderCategoryNubs(categories: NubCategory[], hubCenter: number = HUB_CENTER): string {
-        if (categories.length === 0) { return ''; }
+    /**
+     * The in-circle dimension facet, anchored at the bottom interior of a hub
+     * bubble. Click it to open a vertical wheel of candidate fields; scroll to
+     * choose. When a grouping is already active its current field stays in the
+     * list (and the wheel opens on it) so it can be changed in place. Returns ''
+     * when there's nothing left to group by.
+     */
+    private dimFacetHtml(state: ExploreState): string {
+        const used = new Set<string>();
+        for (const crumb of state.drillChain) {
+            for (const lock of crumb.locks) { used.add(lock.dimension); }
+        }
+        const selected = state.selectedDimensions;
+        const current = selected.length > 0 ? selected[selected.length - 1] : null;
+        const allDims = selectDimensionNubs(state.columns, state.columns.length)
+            .map(c => c.name)
+            .filter(n => !used.has(n));
+        // Two lists drive the wheel depending on intent at open time:
+        //  • REPLACEMENT (no Shift): every available field — the current one stays
+        //    in so it can be changed in place; the pick replaces the whole grouping.
+        //  • ACCUMULATE (Shift held): only fields NOT already in use, since those
+        //    are the only ones that add a new breakdown to the combined grouping.
+        const selectedSet = new Set(selected);
+        const replaceOptions = allDims;
+        const accumulateOptions = allDims.filter(n => !selectedSet.has(n));
+        if (replaceOptions.length === 0) { return ''; }
+        const accumulating = selected.length > 0;
+        const tip = accumulating
+            ? 'Change the breakdown: click, scroll to a field (hold Shift to add another)'
+            : 'Break down by a field: click, then scroll to choose';
+        // A 2x2 cluster of tiny heat-tinted dots — a glyph for the bubble cloud
+        // this control blooms (cold→hot across the grid).
+        const dots = `<svg class="dim-facet-mark" viewBox="0 0 16 16" aria-hidden="true">`
+            + `<circle cx="5.4" cy="5.4" r="2.5" fill="hsl(212,70%,55%)"/>`
+            + `<circle cx="10.6" cy="5.4" r="2.5" fill="hsl(150,62%,48%)"/>`
+            + `<circle cx="5.4" cy="10.6" r="2.5" fill="hsl(40,85%,55%)"/>`
+            + `<circle cx="10.6" cy="10.6" r="2.5" fill="hsl(2,72%,55%)"/></svg>`;
+        return `<div class="dim-facet${accumulating ? ' is-accumulating' : ''}"`
+            + ` data-dimfacet="${escapeAttr(JSON.stringify(replaceOptions))}"`
+            + ` data-dimfacet-accumulate="${escapeAttr(JSON.stringify(accumulateOptions))}"`
+            + (current ? ` data-dimfacet-current="${escapeAttr(current)}"` : '')
+            + ` title="${escapeAttr(tip)}">`
+            + `${dots}</div>`;
+    }
 
-        return categories.map((cat) => {
-            // Each kind has a FIXED angle so a nub never moves when the number of
-            // categories changes; its center rides the bubble edge.
-            const catAngle = categoryAngle(cat.key);
-            const cp = anglePoint(hubCenter, NUB_RADIUS, catAngle);
-
-            // A static category (the root's locked-in grouping after you've drilled)
-            // just shows the chosen name(s) as a lit nub — no interactive bloom.
-            if (cat.static) {
-                const names = cat.selected;
-                const sp = names.length === 1
-                    ? `<span class="cat-pinned">${escapeHtml(names[0])}</span>`
-                    : names.length > 1 ? `<span class="cat-badge">${names.length}</span>` : '';
-                return `<div class="cat-nub cat-${cat.key} has-selection locked-cat"
-                    style="left:${cp.x}px;top:${cp.y}px;"
-                    title="${escapeAttr(names.join(', '))}">${sp}</div>`;
-            }
-
-            const selectedMembers = cat.members.filter(m => cat.selected.includes(m.name));
-            const selectedCount = selectedMembers.length;
-            // Exactly one pick → show its name below the hub; many → a count badge.
-            const pinned = selectedCount === 1
-                ? `<span class="cat-pinned">${escapeHtml(selectedMembers[0].name)}</span>`
-                : selectedCount > 1 ? `<span class="cat-badge">${selectedCount}</span>` : '';
-
-            // Members are small dots riding a larger circle centered on the BUBBLE,
-            // spaced a FIXED angular gap apart and centered on the category's radial
-            // direction. They live inside .cat-bloom (anchored at the category nub),
-            // so each member is offset by the category nub's hub position.
-            const n = cat.members.length;
-            const membersHtml = cat.members.map((m, mi) => {
-                const angle = catAngle + (mi - (n - 1) / 2) * MEMBER_ARC_GAP;
-                const hub = anglePoint(hubCenter, MEMBER_RADIUS, angle);
-                const x = hub.x - cp.x;
-                const y = hub.y - cp.y;
-                const sel = cat.selected.includes(m.name);
-                return `<button class="member m-${cat.key}${sel ? ' selected' : ''}"
-                    style="left:${x}px;top:${y}px;"
-                    data-action="${cat.action}" data-col="${escapeAttr(m.name)}"
-                    title="${escapeAttr(m.name)}"
-                    ><span class="member-label">${escapeHtml(m.name)}</span></button>`;
-            }).join('');
-
-            // An invisible disc centered on the bubble that, only while the category
-            // is open, captures pointer events across the whole bloom region — so
-            // the bloom stays sticky even over a hub that's otherwise click-through
-            // (the focused aggregate overlay). It sits below the member dots.
-            const catchX = hubCenter - cp.x;
-            const catchY = hubCenter - cp.y;
-            const bloomCatch = `<div class="bloom-catch" style="left:${catchX}px;top:${catchY}px;"></div>`;
-
-            return `<div class="cat-nub cat-${cat.key}${selectedCount > 0 ? ' has-selection' : ''}"
-                style="left:${cp.x}px;top:${cp.y}px;"
-                tabindex="0" title="${escapeAttr(cat.title)}">
-                ${pinned}
-                <div class="cat-bloom">${bloomCatch}${membersHtml}</div>
-            </div>`;
-        }).join('');
+    /**
+     * The active grouping shown as a row of removable chips just below the hub
+     * bubble (in the bloom-reserve space). Each chip's × removes that dimension,
+     * so accumulated (combined) groupings can be pruned one at a time.
+     */
+    private dimChipsHtml(state: ExploreState): string {
+        if (state.selectedDimensions.length === 0) { return ''; }
+        const chips = state.selectedDimensions.map(d =>
+            `<span class="dim-chip" title="${escapeAttr(d)}">`
+            + `<span class="dim-chip-label">${escapeHtml(truncateLabel(d, 14))}</span>`
+            + `<button class="dim-chip-x" data-action="removeDimension" data-col="${escapeAttr(d)}"`
+            + ` title="Remove ${escapeAttr(d)}">\u00d7</button></span>`).join('');
+        return `<div class="dim-chips">${chips}</div>`;
     }
 
     /**
@@ -871,10 +881,10 @@ export class ExplorePanel {
 
     /**
      * The deepest stacked bubble after a drag gesture: rendered as a full 420px
-     * hub (like the root) whose dimension nubs pick the next grouping (toggleDimension,
-     * not a further descent — this bubble is already locked). It is the bottom of
-     * the stack — the level you're currently on — so clicking its body does nothing.
-     * Already-locked dimensions are excluded.
+     * hub (like the root) whose bottom dimension facet picks the next grouping
+     * (groupDimension, not a further descent — this bubble is already locked). It
+     * is the bottom of the stack — the level you're currently on — so clicking its
+     * body does nothing. Already-locked dimensions are excluded from the facet.
      */
     private activeBubbleHtml(state: ExploreState, crumb: DrillCrumb, followsRoot: boolean): string {
         const m = extractBubbleMetric(crumb.columns, crumb.row);
@@ -890,45 +900,24 @@ export class ExplorePanel {
                 <div class="bubble bubble-locked bubble-active"
                     title="${escapeAttr(crumb.display)}">
                     ${bubbleBody(m.label, m.valueText, m.aggGlyph, m.measureName, dial, aggDial)}
+                    ${this.dimFacetHtml(state)}
                 </div>
-                ${this.activeStackedNubsHtml(state)}
+                ${this.dimChipsHtml(state)}
             </div>`;
-    }
-
-    /**
-     * Nubs for the deepest (bottom) stacked bubble — like the root's: the dimension
-     * category picks the grouping (toggleDimension, NOT a descent — already locked),
-     * excluding dimensions already locked up the chain; the measure category toggles
-     * measures. Shared by the active hub and the deepest compact locked bubble.
-     */
-    private stackNubCategories(state: ExploreState): NubCategory[] {
-        const used = new Set<string>();
-        for (const crumb of state.drillChain) {
-            for (const lock of crumb.locks) { used.add(lock.dimension); }
-        }
-        const categories: NubCategory[] = [];
-        const dimNubs = selectDimensionNubs(state.columns, MAX_DIMENSION_NUBS).filter(m => !used.has(m.name));
-        if (dimNubs.length > 0) {
-            categories.push({ key: 'dimension', title: 'Group by', action: 'toggleDimension', members: dimNubs, selected: state.selectedDimensions });
-        }
-        // The measure is chosen via the dial on the bubble surface, not a nub.
-        return categories;
-    }
-
-    private activeStackedNubsHtml(state: ExploreState): string {
-        return this.renderCategoryNubs(this.stackNubCategories(state));
     }
 
     /**
      * Renders a locked drill node as a bubble (from the snapshot captured when it
      * was picked), clickable to pop back to that level. Only the deepest (bottom)
-     * bubble carries nubs — ancestors are bare, their locked dimension shown on the
-     * connector line above them instead.
+     * bubble carries the dimension facet — ancestors are bare, their locked
+     * dimension shown on the connector line above them instead.
      */
     private lockedBubbleHtml(state: ExploreState, crumb: DrillCrumb, index: number, isDeepest: boolean): string {
         const m = extractBubbleMetric(crumb.columns, crumb.row);
-        // Compact bubbles are 180px → their center/edge radius is 90px.
-        const nubs = isDeepest ? this.renderCategoryNubs(this.stackNubCategories(state), BUBBLE_RADIUS) : '';
+        // Only the deepest locked bubble carries the dimension facet (pick the next
+        // grouping) and the active-dimension chips.
+        const facet = isDeepest ? this.dimFacetHtml(state) : '';
+        const chips = isDeepest ? this.dimChipsHtml(state) : '';
         // Only the deepest locked bubble owns the live measure choice → only it
         // gets the dial.
         const dial = isDeepest ? this.dialAttrs(state, state.selectedMeasures[0] ?? null) : '';
@@ -945,39 +934,10 @@ export class ExplorePanel {
                 <div class="bubble bubble-locked clickable"${action}
                     title="${escapeAttr(title)}">
                     ${bubbleBody(m.label, m.valueText, m.aggGlyph, m.measureName, dial, aggDial)}
+                    ${facet}
                 </div>
-                ${nubs}
+                ${chips}
             </div>`;
-    }
-
-    private expandedHtml(state: ExploreState): string {
-        const columnsHtml = state.columns.map(c => this.columnChipHtml(c, state)).join('');
-        return `
-            <div class="card expanded">
-                <div class="card-header">
-                    <button class="collapse-btn" data-action="toggleExpand" title="Collapse">▾</button>
-                    <span class="card-title">${escapeHtml(state.source)}</span>
-                    <span class="card-total">${formatNumber(state.totalCount)} rows</span>
-                </div>
-                <div class="columns">${columnsHtml}</div>
-                ${this.drillSpineHtml(state)}
-                <div class="value-area">${this.valueAreaHtml(state)}</div>
-                ${state.error ? `<div class="error">${escapeHtml(state.error)}</div>` : ''}
-            </div>`;
-    }
-
-    private columnChipHtml(col: ClassifiedColumn, state: ExploreState): string {
-        const isDimension = col.role === 'dimension';
-        const isMeasure = col.role === 'measure';
-        const selectable = isDimension || isMeasure;
-        const selected = isDimension
-            ? state.selectedDimensions.includes(col.name)
-            : isMeasure && state.selectedMeasures.includes(col.name);
-        const cls = ['chip', `role-${col.role}`, selectable ? 'selectable' : 'static', selected ? 'selected' : ''].join(' ');
-        const action = isDimension ? ` data-action="toggleDimension" data-col="${escapeAttr(col.name)}"`
-            : isMeasure ? ` data-action="toggleMeasure" data-col="${escapeAttr(col.name)}"` : '';
-        const dc = col.dcount !== undefined ? `<span class="chip-dc">${formatNumber(col.dcount)}</span>` : '';
-        return `<span class="${cls}"${action} title="${escapeAttr(col.type)} · ${col.role}">${selected ? '✓ ' : ''}${escapeHtml(col.name)}${dc}</span>`;
     }
 
     private valueAreaHtml(state: ExploreState): string {
@@ -1112,11 +1072,11 @@ export class ExplorePanel {
     }
     #app { display: flex; flex-direction: column; gap: 12px; }
     .card { display: flex; flex-direction: column; gap: 10px; }
-    /* Until the full pan/zoom canvas exists, center the collapsed hub (and its
-       flowering value area) along the panel width instead of hugging the left. */
-    .card.collapsed { align-items: center; }
-    .card.collapsed .value-area { align-self: stretch; }
-    .card.collapsed .flower { justify-content: center; }
+    /* Until the full pan/zoom canvas exists, center the hub (and its flowering
+       value area) along the panel width instead of hugging the left. */
+    .card { align-items: center; }
+    .card .value-area { align-self: stretch; }
+    .card .flower { justify-content: center; }
     .card-header { display: flex; align-items: center; gap: 8px; }
     .card-title { font-weight: 600; font-size: 1.1em; }
     .card-total { opacity: 0.7; font-size: 0.85em; }
@@ -1350,6 +1310,82 @@ export class ExplorePanel {
        draggable (pointer-events on) so you can scrub it without holding from the
        capsule. Release snaps + commits; click away dismisses. */
     .measure-dial-popup.is-open { pointer-events: auto; cursor: ns-resize; }
+
+    /* Dimension wheel: the VERTICAL twin of the measure dial. Appears centered on
+       the hub bubble when you click its facet; scroll (or drag) to scrub field
+       names. The centered item is the live pick. Built/positioned by the script. */
+    .dim-dial-popup {
+        position: fixed; z-index: 50; width: 160px; height: 132px;
+        transform: translate(-50%, -50%); border-radius: 14px; overflow: hidden;
+        background: color-mix(in srgb, var(--vscode-editor-background) 72%, transparent);
+        backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px);
+        border: 1px solid var(--vscode-widget-border, rgba(128,128,128,0.35));
+        box-shadow: 0 6px 20px rgba(0,0,0,0.4);
+        -webkit-mask-image: linear-gradient(transparent, #000 28%, #000 72%, transparent);
+                mask-image: linear-gradient(transparent, #000 28%, #000 72%, transparent);
+        pointer-events: none;
+    }
+    .dim-dial-popup.is-open { pointer-events: auto; cursor: ns-resize; }
+    .dim-dial-list { position: absolute; left: 0; right: 0; top: 50%; will-change: transform; }
+    .dim-dial-item {
+        height: 26px; line-height: 26px; text-align: center; font-size: 0.82em;
+        color: var(--vscode-descriptionForeground); white-space: nowrap; overflow: hidden;
+        text-overflow: ellipsis; padding: 0 10px; opacity: 0.65; transition: opacity 0.08s, transform 0.08s;
+    }
+    .dim-dial-item.current { color: var(--role-dimension); opacity: 1; font-weight: 600; transform: scale(1.1); }
+    .dim-dial-center {
+        position: absolute; left: 10px; right: 10px; top: 50%; height: 26px; transform: translateY(-50%);
+        border-top: 1px solid var(--role-dimension); border-bottom: 1px solid var(--role-dimension);
+        opacity: 0.35; pointer-events: none;
+    }
+
+    /* ── Dimension facet: the in-circle, bottom-interior dimension control ──
+       Icon-only — a 2x2 cluster of heat-tinted dots that hints at the bubble
+       cloud this control blooms — so the primary surface stays gesture-led, not
+       jargon. Calm at rest, brightens on hub hover. Click to open the field
+       scroller; while accumulating it shows a small "+" cue. */
+    .dim-facet {
+        position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%);
+        display: inline-flex; align-items: center; justify-content: center; z-index: 2;
+        width: 22px; height: 22px; border-radius: 50%;
+        user-select: none;
+        background: transparent;
+        box-shadow: none;
+        opacity: 0.55; cursor: pointer; touch-action: none;
+        transition: opacity 0.12s ease-out, background 0.12s ease-out, box-shadow 0.12s ease-out;
+    }
+    .bubble-hub:hover .dim-facet, .locked-hub:hover .dim-facet { opacity: 0.95; }
+    .dim-facet:hover {
+        opacity: 1;
+        background: color-mix(in srgb, var(--vscode-foreground) 14%, transparent);
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--vscode-foreground) 32%, transparent);
+    }
+    .dim-facet-mark { display: block; width: 15px; height: 15px; }
+
+    /* Active grouping chips: shown just below the hub bubble (in the bloom-reserve
+       space). The × prunes one dimension at a time so accumulated (combined)
+       groupings can be trimmed without losing the rest. */
+    .dim-chips {
+        position: absolute; left: 50%; top: calc(50% + 96px); transform: translateX(-50%);
+        display: flex; flex-wrap: wrap; gap: 4px; justify-content: center;
+        max-width: 260px; z-index: 3;
+    }
+    .dim-chip {
+        display: inline-flex; align-items: center; gap: 2px;
+        padding: 1px 4px 1px 8px; border-radius: 10px; font-size: 0.7em;
+        color: var(--vscode-foreground);
+        background: color-mix(in srgb, var(--role-dimension) 18%, var(--vscode-editorWidget-background));
+        border: 1px solid color-mix(in srgb, var(--role-dimension) 50%, transparent);
+        white-space: nowrap; user-select: none;
+    }
+    .dim-chip-label { overflow: hidden; text-overflow: ellipsis; max-width: 120px; }
+    .dim-chip-x {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 14px; height: 14px; padding: 0; border: none; border-radius: 50%;
+        background: transparent; color: inherit; opacity: 0.6; cursor: pointer;
+        font-size: 1.1em; line-height: 1;
+    }
+    .dim-chip-x:hover { opacity: 1; background: color-mix(in srgb, var(--role-dimension) 30%, transparent); }
 
     /* Collapsed bubble "hub": the bubble centered, with category nubs around it. */
     .bubble-hub { position: relative; }
@@ -1623,12 +1659,27 @@ export class ExplorePanel {
         }
     }
     // The open click-wheel: a plain click on a dial capsule brings up the SAME
-    // translucent wheel popup, kept on screen and draggable so you can scrub it
-    // without holding the drag from the capsule. Drag + release snaps/commits;
-    // clicking away (or Escape) dismisses it.
+    // translucent wheel popup, kept on screen. PRIMARY gesture = MOUSE WHEEL: spin
+    // the scroll wheel to bring your choice to the center (under the cursor), then
+    // CLICK to select it. ALTERNATIVE = drag the wheel (good for touch): drag +
+    // release snaps/commits. Clicking away (or Escape) dismisses it.
     let openWheel = null;
+    let dialCommitTimer = null;
+    function clearDialCommit() {
+        if (dialCommitTimer) { clearTimeout(dialCommitTimer); dialCommitTimer = null; }
+    }
     function closeDialWheel() {
+        clearDialCommit();
         if (openWheel) { if (openWheel.popup) { openWheel.popup.remove(); } openWheel = null; }
+    }
+    // Spin the open wheel by whole steps (mouse-wheel notches). Does NOT commit;
+    // a click on the wheel selects the centered item.
+    function scrollOpenWheel(s, dir) {
+        let idx = s.index + dir;
+        if (idx < 0) { idx = 0; }
+        if (idx > s.options.length - 1) { idx = s.options.length - 1; }
+        s.index = idx;
+        updateDial(s, 0);
     }
     function openDialWheel(el, options, kind, current) {
         closeDialWheel();
@@ -1638,10 +1689,18 @@ export class ExplorePanel {
         buildDialPopup(s);
         s.popup.classList.add('is-open');
         updateDial(s, 0); // show the current pick centered
-        // A pointerdown on the wheel starts a scrub (reusing the same drag path).
+        // PRIMARY: mouse-wheel scroll moves the menu (no auto-commit).
+        s.popup.addEventListener('wheel', function(ev) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            scrollOpenWheel(s, ev.deltaY > 0 ? 1 : -1);
+        }, { passive: false });
+        // A pointerdown on the open wheel begins either a click (select) or a
+        // vertical drag-scrub (touch); the pointerup resolves which.
         s.popup.addEventListener('pointerdown', function(ev) {
             ev.stopPropagation();
-            dialState = { el: el, startY: ev.clientY, options: options, index: s.index, kind: kind, current: current, dragging: true, popup: s.popup, list: s.list, floating: true };
+            clearDialCommit();
+            dialState = { el: el, startY: ev.clientY, options: options, index: s.index, kind: kind, current: current, dragging: false, popup: s.popup, list: s.list, floating: true };
         });
         openWheel = s;
     }
@@ -1681,7 +1740,22 @@ export class ExplorePanel {
             if (wasFloating) { openWheel = null; }
             suppressClick = true;
             commitDialChoice(dialState.kind, chosen);
-        } else if (!wasFloating) {
+        } else if (wasFloating) {
+            // A click on the open wheel = select. Pick whichever item was clicked
+            // (the centered one sits under the cursor; clicking another picks it).
+            const item = e.target.closest && e.target.closest('.measure-dial-item');
+            let sel = dialState.index;
+            if (item && dialState.list) {
+                const items = dialState.list.children;
+                for (let i = 0; i < items.length; i++) {
+                    if (items[i] === item) { sel = i; break; }
+                }
+            }
+            const chosen = dialState.options[sel];
+            suppressClick = true;
+            closeDialWheel();
+            commitDialChoice(dialState.kind, chosen);
+        } else {
             // No drag from a capsule = a click: bring up the draggable wheel.
             suppressClick = true;
             openDialWheel(dialState.el, dialState.options, dialState.kind, dialState.current);
@@ -1690,12 +1764,184 @@ export class ExplorePanel {
     });
     // Click anywhere outside the open wheel (or pressing Escape) dismisses it.
     window.addEventListener('pointerdown', function(e) {
-        if (openWheel && !(e.target.closest && e.target.closest('.measure-dial-popup')) && !(e.target.closest && e.target.closest('[data-dial]'))) {
-            closeDialWheel();
-        }
+        const onDial = e.target.closest && (e.target.closest('.measure-dial-popup') || e.target.closest('[data-dial]'));
+        if (openWheel && !onDial) { closeDialWheel(); }
+        const onDim = e.target.closest && (e.target.closest('.dim-dial-popup') || e.target.closest('[data-dimfacet]'));
+        if (openDim && !onDim) { closeDimWheel(); }
     });
     window.addEventListener('keydown', function(e) {
-        if (e.key === 'Escape') { closeDialWheel(); }
+        if (e.key === 'Escape') { closeDialWheel(); closeDimWheel(); }
+    });
+
+    // ── Dimension facet: click the icon to open, scroll to pick (auto-applies) ──
+    // CLICK the bottom-interior icon of a hub bubble → a VERTICAL scroll wheel of
+    // candidate field names opens centered on the bubble (the twin of the measure/
+    // aggregate dials). PRIMARY = MOUSE WHEEL: spin to move the menu; it AUTO-
+    // APPLIES the centered field a moment after you settle (the cloud blooms).
+    // ALT = drag the wheel vertically (touch); release applies. Hold SHIFT while
+    // it applies to ADD a breakdown (combined grouping) instead of replacing.
+    // Click the icon again, click away, or Escape to dismiss without changing.
+    let openDim = null;     // persistent wheel: { facetEl, options, index, rect, popup, list }
+    let dimDrag = null;     // active drag on the open wheel: { startY, startIndex, dragging, shift }
+    let dimPress = null;    // facet press waiting to resolve into an open-tap
+    let dimCommitTimer = null;
+    const DIM_ROW_H = 26;   // px height of one wheel item (matches CSS)
+    const DIM_GAIN = 2.2;   // drag-scrub travels a little faster than the finger
+    function clearDimCommit() {
+        if (dimCommitTimer) { clearTimeout(dimCommitTimer); dimCommitTimer = null; }
+    }
+    function buildDimPopup(s) {
+        const p = document.createElement('div');
+        p.className = 'dim-dial-popup is-open';
+        const list = document.createElement('div');
+        list.className = 'dim-dial-list';
+        s.options.forEach(function(opt) {
+            const item = document.createElement('div');
+            item.className = 'dim-dial-item';
+            item.textContent = opt;
+            list.appendChild(item);
+        });
+        p.appendChild(list);
+        const center = document.createElement('div');
+        center.className = 'dim-dial-center';
+        p.appendChild(center);
+        const r = s.rect;
+        // Center the wheel horizontally on the facet button, and vertically on
+        // the cursor that opened it — so the current (centered) item sits right
+        // under the pointer, and scrolling keeps the new pick under the pointer.
+        p.style.left = (r.left + r.width / 2) + 'px';
+        p.style.top = s.cursorY + 'px';
+        document.body.appendChild(p);
+        s.popup = p; s.list = list;
+    }
+    function updateDimWheel(s) {
+        const ty = -(s.index * DIM_ROW_H + DIM_ROW_H / 2);
+        s.list.style.transform = 'translateY(' + ty + 'px)';
+        const items = s.list.children;
+        for (let i = 0; i < items.length; i++) {
+            items[i].classList.toggle('current', i === s.index);
+        }
+    }
+    function setDimIndex(s, idx) {
+        if (idx < 0) { idx = 0; }
+        if (idx > s.options.length - 1) { idx = s.options.length - 1; }
+        s.index = idx;
+        updateDimWheel(s);
+    }
+    function closeDimWheel() {
+        clearDimCommit();
+        if (openDim) {
+            if (openDim.popup) { openDim.popup.remove(); }
+            openDim = null;
+        }
+        dimDrag = null;
+    }
+    // Apply the field the wheel is on. The mode (replace vs accumulate) was fixed
+    // when the wheel opened, from whether Shift was held on the facet press.
+    function commitDim(s) {
+        const column = s.options[s.index];
+        const accumulate = s.accumulate;
+        closeDimWheel();
+        vscodeApi.postMessage({ command: 'groupDimension', column: column, accumulate: !!accumulate });
+    }
+    function openDimFacet(facetEl, cursorX, cursorY, accumulate) {
+        closeDimWheel();
+        // Shift held on the facet press = ACCUMULATE: only fields not already in
+        // use. No Shift = REPLACE: every available field (current included).
+        const attr = accumulate ? 'data-dimfacet-accumulate' : 'data-dimfacet';
+        let options;
+        try { options = JSON.parse(facetEl.getAttribute(attr)); } catch (_) { return; }
+        if (!options || options.length === 0) { return; }
+        const rect = facetEl.getBoundingClientRect();
+        // Fall back to the facet center if no cursor was supplied (e.g. keyboard).
+        const cy = (typeof cursorY === 'number') ? cursorY : (rect.top + rect.height / 2);
+        // In replace mode, open the wheel ON the current field so it can be changed
+        // in place. In accumulate mode the current field isn't listed; start at top.
+        const current = accumulate ? null : facetEl.getAttribute('data-dimfacet-current');
+        let startIndex = current ? options.indexOf(current) : 0;
+        if (startIndex < 0) { startIndex = 0; }
+        const s = { facetEl: facetEl, options: options, index: startIndex, rect: rect, cursorY: cy, accumulate: !!accumulate, popup: null, list: null };
+        buildDimPopup(s);
+        updateDimWheel(s);
+        // PRIMARY: mouse-wheel scroll moves the wheel; it does NOT auto-apply.
+        // Spin to bring the field you want to the center (under the cursor), then
+        // CLICK to select it (handled in the window pointerup below).
+        s.popup.addEventListener('wheel', function(ev) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            setDimIndex(s, s.index + (ev.deltaY > 0 ? 1 : -1));
+        }, { passive: false });
+        // A pointerdown on the wheel begins either a click (select) or a vertical
+        // drag-scrub (touch). The pointerup resolves which.
+        s.popup.addEventListener('pointerdown', function(ev) {
+            ev.stopPropagation();
+            clearDimCommit();
+            dimDrag = { startY: ev.clientY, startIndex: s.index, dragging: false, shift: ev.shiftKey };
+        });
+        openDim = s;
+    }
+    // Press the facet icon → resolve to an open/close tap on release.
+    app.addEventListener('pointerdown', function(e) {
+        if (!e.target.closest) { return; }
+        // The × on a dim chip removes it via the click handler — never open.
+        if (e.target.closest('.dim-chip-x')) { return; }
+        const fac = e.target.closest('[data-dimfacet]');
+        if (!fac) { return; }
+        e.preventDefault();
+        // Capture Shift NOW: it picks REPLACE vs ACCUMULATE (and which field list)
+        // for the wheel this press opens.
+        dimPress = { el: fac, x: e.clientX, y: e.clientY, shift: e.shiftKey };
+    });
+    window.addEventListener('pointermove', function(e) {
+        if (!dimDrag || !openDim) { return; }
+        const s = openDim;
+        const dy = e.clientY - dimDrag.startY;
+        if (!dimDrag.dragging) {
+            if (Math.abs(dy) < DRAG_THRESHOLD) { return; }
+            dimDrag.dragging = true;
+        }
+        dimDrag.shift = e.shiftKey;
+        // Drag UP advances toward later options (matches the measure dial).
+        setDimIndex(s, dimDrag.startIndex - Math.round(dy * DIM_GAIN / DIM_ROW_H));
+    });
+    window.addEventListener('pointerup', function(e) {
+        // Facet icon tap → toggle the wheel open/closed.
+        if (dimPress) {
+            const moved = Math.abs(e.clientX - dimPress.x) > DRAG_THRESHOLD
+                || Math.abs(e.clientY - dimPress.y) > DRAG_THRESHOLD;
+            const el = dimPress.el;
+            const dimPressShift = dimPress.shift;
+            dimPress = null;
+            // Swallow the trailing click so the facet press never triggers the
+            // bubble's own action (clear grouping / pop to root).
+            suppressClick = true;
+            if (!moved) {
+                if (openDim && openDim.facetEl === el) { closeDimWheel(); }
+                else { openDimFacet(el, e.clientX, e.clientY, dimPressShift); }
+                return;
+            }
+        }
+        // Pointerup on the open wheel: a CLICK selects the field, a DRAG (touch)
+        // releases onto the centered field.
+        if (dimDrag) {
+            const s = openDim;
+            const wasDragging = dimDrag.dragging;
+            dimDrag = null;
+            if (s) {
+                if (!wasDragging) {
+                    // A click — select whichever item was clicked (the centered one
+                    // sits under the cursor; clicking another picks it directly).
+                    const item = e.target.closest && e.target.closest('.dim-dial-item');
+                    if (item) {
+                        const items = s.list.children;
+                        for (let i = 0; i < items.length; i++) {
+                            if (items[i] === item) { setDimIndex(s, i); break; }
+                        }
+                    }
+                }
+                commitDim(s);
+            }
+        }
     });
 
     // Event delegation survives innerHTML swaps.
@@ -1710,8 +1956,8 @@ export class ExplorePanel {
             return;
         }
         const action = el.getAttribute('data-action');
-        if (action === 'toggleExpand') {
-            vscodeApi.postMessage({ command: 'toggleExpand' });
+        if (action === 'removeDimension') {
+            vscodeApi.postMessage({ command: 'removeDimension', column: el.getAttribute('data-col') });
         } else if (action === 'toggleDimension') {
             vscodeApi.postMessage({ command: 'toggleDimension', column: el.getAttribute('data-col') });
         } else if (action === 'toggleMeasure') {
