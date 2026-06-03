@@ -97,6 +97,16 @@ interface ExploreState {
      *  ceiling, the estimated group count (so we show a guidance card instead of a
      *  field and don't query the cloud); null when within the ceiling. */
     tooManyGroups: number | null;
+    /** Record lens: whether the user has opened the top-N raw rows for the current
+     *  (ungrouped) bubble's scope. The affordance is only offered when ungrouped;
+     *  this stays false until the user explicitly toggles it (lazy — no query runs
+     *  until then). */
+    showRecords: boolean;
+    /** The fetched record sample (raw rows of the current scope), or null when not
+     *  loaded. `total` is the full scope row count so we can label it as a sample. */
+    records: { columns: string[]; rows: unknown[][]; total: number | null } | null;
+    /** True while the record sample is being fetched. */
+    recordsLoading: boolean;
     loading: boolean;
     error?: string;
 }
@@ -116,6 +126,11 @@ const LOD_DOT_MAX = 2000;
  * grouping estimated above this is blocked with guidance, not truncated silently,
  * so we never pull a huge result for a high-cardinality dimension. */
 const MAX_GROUP_ROWS = LOD_DOT_MAX;
+
+/** How many raw rows the record lens fetches for a bubble's scope. Records are
+ * always a bounded, ordered SAMPLE (never "all rows"), labeled "N of <total>" so
+ * the user knows it's a slice — same honesty rule as the cardinality guard. */
+const RECORD_LIMIT = 100;
 
 /** The flex footprint each tier's bubble occupies, so a focused (always-full)
  *  bubble can keep its tier-mate's slot size and not open gaps in a dense cloud. */
@@ -213,6 +228,9 @@ export class ExplorePanel {
             focusKey: null,
             viewMode: 'auto',
             tooManyGroups: null,
+            showRecords: false,
+            records: null,
+            recordsLoading: false,
             loading: true,
         };
 
@@ -308,6 +326,19 @@ export class ExplorePanel {
                     // no focused-bubble concept) and just re-renders the same data.
                     this.state.focusKey = null;
                     this.render();
+                }
+                break;
+            case 'toggleRecords':
+                if (this.state) {
+                    // The record lens for the current ungrouped bubble: flip it, and
+                    // on opening fetch the top-N rows of the scope (lazy — no query
+                    // runs until the user asks). Closing keeps nothing pending.
+                    this.state.showRecords = !this.state.showRecords;
+                    if (this.state.showRecords) {
+                        void this.loadRecords();
+                    } else {
+                        this.render();
+                    }
                 }
                 break;
             case 'drillDimension':
@@ -580,6 +611,18 @@ export class ExplorePanel {
 
         // A new cloud is being computed; any focus on the old one is stale.
         this.state.focusKey = null;
+        // The record lens follows the same rule as the cloud: if only the measure
+        // or ordering changed (we're still UNGROUPED — dims empty), keep it showing
+        // and requery, dimming it while the new rows land. It's only stale when the
+        // SCOPE changes (a grouping appears), which hides it anyway.
+        const keepRecords = this.state.showRecords && dims.length === 0;
+        if (keepRecords) {
+            this.state.recordsLoading = true;
+        } else {
+            this.state.showRecords = false;
+            this.state.records = null;
+            this.state.recordsLoading = false;
+        }
 
         if (dims.length === 0 && measures.length === 0) {
             this.state.result = null;
@@ -588,6 +631,7 @@ export class ExplorePanel {
             if (token !== this.renderToken || !this.state) { return; }
             this.state.loading = false;
             this.render();
+            if (keepRecords) { void this.loadRecords(); }
             return;
         }
 
@@ -670,6 +714,10 @@ export class ExplorePanel {
             if (token === this.renderToken && this.state) {
                 this.state.loading = false;
                 this.render();
+                // The record lens (if kept open across a measure/order change)
+                // requeries after the bubble value settles, staying visible and
+                // just dimming until the reordered rows land.
+                if (keepRecords) { void this.loadRecords(); }
             }
         }
     }
@@ -681,6 +729,75 @@ export class ExplorePanel {
         const cell = result?.data?.tables?.[0]?.rows?.[0]?.[0];
         const n = typeof cell === 'number' ? cell : Number(cell);
         return Number.isFinite(n) ? n : null;
+    }
+
+    /**
+     * Fetches the record lens for the current ungrouped bubble: a bounded, ordered
+     * sample of the actual rows in the bubble's scope (the drill-chain `where`).
+     * Column selection follows the design rule — locked drill-chain dimensions are
+     * CONSTANT across the scope, so they're dropped from the projection (lifted to
+     * a scope header instead); dynamic/blob columns are suppressed. Ordering is by
+     * the selected measure (desc), falling back to the time column (newest first),
+     * else an arbitrary take. The full scope count is fetched too so the sample can
+     * be labeled "N of <total>".
+     */
+    private async loadRecords(): Promise<void> {
+        if (!this.state) { return; }
+        const token = ++this.renderToken;
+        const { source, cluster, database } = this.state;
+        this.state.recordsLoading = true;
+        // Keep any existing rows on screen and just dim them (is-refreshing) while
+        // the new sample lands — same no-flash behavior as the cloud. The "Loading
+        // rows…" message only appears on the FIRST open (records still null).
+        this.render();
+
+        const whereClause = this.buildWhereClause();
+
+        // Columns locked to a single value by the drill chain are constant here, so
+        // drop them from the projection (they're shown in the scope header). Dynamic
+        // (JSON/blob) columns aren't scannable in a grid, so suppress them too.
+        const lockedDims = new Set<string>();
+        for (const crumb of this.state.drillChain) {
+            for (const lock of crumb.locks) { lockedDims.add(lock.dimension); }
+        }
+        const projectCols = this.state.columns
+            .filter(c => !lockedDims.has(c.name) && c.type !== 'dynamic' && c.role !== 'other')
+            .map(c => c.name);
+
+        // Order by the selected measure (what makes a row "interesting"), else the
+        // time column (newest first — the log-explorer default), else just take N.
+        const measure = this.state.selectedMeasures[0];
+        const timeCol = this.state.columns.find(c => c.role === 'time');
+        const orderClause = measure
+            ? ` | top ${RECORD_LIMIT} by ${bracket(measure)} desc`
+            : (timeCol ? ` | top ${RECORD_LIMIT} by ${bracket(timeCol.name)} desc` : ` | take ${RECORD_LIMIT}`);
+        const projectClause = projectCols.length > 0
+            ? ` | project ${projectCols.map(bracket).join(', ')}` : '';
+        const query = `${bracket(source)}${whereClause}${orderClause}${projectClause}`;
+
+        try {
+            const result = await this.server.runQuery(query, cluster, database, true, RECORD_LIMIT);
+            if (token !== this.renderToken || !this.state) { return; }
+            if (result?.error) {
+                this.state.error = result.error.message;
+            } else {
+                const table = result?.data?.tables?.[0];
+                const total = await this.runScalarCount(`${bracket(source)}${whereClause} | count`, cluster, database);
+                if (token !== this.renderToken || !this.state) { return; }
+                this.state.records = table
+                    ? { columns: table.columns.map(c => c.name), rows: table.rows, total }
+                    : { columns: [], rows: [], total };
+            }
+        } catch (err) {
+            if (token === this.renderToken && this.state) {
+                this.state.error = err instanceof Error ? err.message : String(err);
+            }
+        } finally {
+            if (token === this.renderToken && this.state) {
+                this.state.recordsLoading = false;
+                this.render();
+            }
+        }
     }
 
     /**
@@ -774,12 +891,19 @@ export class ExplorePanel {
         // chips live on the root only while it owns the grouping (before drilling).
         const rootFacet = drilled ? '' : this.dimFacetHtml(state);
         const rootChips = drilled ? '' : this.dimChipsHtml(state);
+        // The record-lens toggle lives inside the root bubble (beside the facet)
+        // only while the root is the ungrouped bubble you're looking at — i.e. not
+        // drilled (a deeper bubble owns it then) and not grouped (the cloud owns
+        // the "below" slot then).
+        const rootRecords = (!drilled && !hasGroups) ? this.recordsToggleHtml(state) : '';
+        const rootBubbleExtra = `${rootFacet ? ' has-facet' : ''}${rootRecords ? ' has-records' : ''}`;
         const rootHub = `
                 <div class="bubble-hub" style="width:${HUB_SIZE}px;height:${HUB_SIZE}px;">
-                    <div class="${rootBubbleClass}"${rootAction}
+                    <div class="${rootBubbleClass}${rootBubbleExtra}"${rootAction}
                         title="${escapeAttr(rootTitle)}">
                         ${bubbleBody(state.source, rootValue, aggGlyph, measureName, rootDial, rootAggDial)}
                         ${rootFacet}
+                        ${rootRecords}
                     </div>
                     ${rootChips}
                 </div>`;
@@ -794,6 +918,7 @@ export class ExplorePanel {
                     ? `<div class="drop-zone${state.drillChain.length === 0 ? ' drop-zone-root' : ''}" data-dropzone="1"><span class="drop-zone-label">Drop here to drill in</span></div>`
                     : ''}
                 ${hasGroups && !isActiveStacked(state) ? `<div class="value-area${drilled ? ' value-area-drilled' : ''}">${this.valueAreaHtml(state)}</div>` : ''}
+                ${!hasGroups ? this.recordsPanelHtml(state) : ''}
                 ${state.error ? `<div class="error">${escapeHtml(state.error)}</div>` : ''}
             </div>`;
     }
@@ -962,13 +1087,19 @@ export class ExplorePanel {
         const rootCls = followsRoot ? ' bubble-hub-active-root' : '';
         const dial = this.dialAttrs(state, state.selectedMeasures[0] ?? null);
         const aggDial = this.aggDialAttrs(state);
+        // The active stacked bubble is always ungrouped (no dimension yet), so it
+        // owns the record lens — its toggle sits inside, beside the dim facet.
+        const facet = this.dimFacetHtml(state);
+        const records = this.recordsToggleHtml(state);
+        const bubbleExtra = `${facet ? ' has-facet' : ''}${records ? ' has-records' : ''}`;
         return `
             <div class="bubble-hub bubble-hub-active${rootCls}" style="width:${HUB_SIZE}px;height:${HUB_SIZE}px;">
                 ${linkLabel}
-                <div class="bubble bubble-locked bubble-active"
+                <div class="bubble bubble-locked bubble-active${bubbleExtra}"
                     title="${escapeAttr(crumb.display)}">
                     ${bubbleBody(m.label, m.valueText, m.aggGlyph, m.measureName, dial, aggDial)}
-                    ${this.dimFacetHtml(state)}
+                    ${facet}
+                    ${records}
                 </div>
                 ${this.dimChipsHtml(state)}
             </div>`;
@@ -1209,6 +1340,77 @@ export class ExplorePanel {
             </div>`;
     }
 
+    /** The record lens for an UNGROUPED bubble: a quiet toggle that, when on,
+     *  reveals a bounded sample of the actual rows in this bubble's scope below it.
+     *  The aggregate cloud and the record lens are mutually exclusive by state —
+     *  this is only ever rendered when there's no grouping (no cloud). */
+    private recordsToggleHtml(state: ExploreState): string {
+        const open = state.showRecords;
+        const title = open ? 'Hide rows' : 'Show rows';
+        // Lives INSIDE the bubble, at the bottom beside the cloud-bloom dots — the
+        // two "open this bubble" affordances: bloom an aggregate cloud, or reveal
+        // the raw rows. Calm at rest, brightens on hub hover (like the dim facet).
+        return `<button class="records-facet${open ? ' active' : ''}"`
+            + ` data-action="toggleRecords" title="${escapeAttr(title)}"`
+            + ` aria-label="${escapeAttr(title)}" role="switch" aria-checked="${open ? 'true' : 'false'}">\u2630</button>`;
+    }
+
+    /** The record-lens panel (scope header + rows table), rendered BELOW the card.
+     *  Only present while the lens is open; the toggle that opens it lives inside
+     *  the bubble (recordsToggleHtml). */
+    private recordsPanelHtml(state: ExploreState): string {
+        if (!state.showRecords) { return ''; }
+
+        // Scope header: the locked drill-chain values, constant across every row
+        // here, shown once instead of repeated as columns.
+        const scope = state.drillChain.map(c => c.display).join(' · ');
+        const scopeHtml = scope
+            ? `<div class="records-scope">${escapeHtml(scope)}</div>` : '';
+
+        let body: string;
+        if (state.recordsLoading && !state.records) {
+            body = `<div class="records-loading">Loading rows…</div>`;
+        } else if (!state.records || state.records.rows.length === 0) {
+            body = `<div class="hint">No rows in this scope.</div>`;
+        } else {
+            body = this.recordsTableHtml(state.records);
+        }
+        const refreshing = state.recordsLoading ? ' is-refreshing' : '';
+        const drilled = state.drillChain.length > 0 ? ' records-panel-drilled' : '';
+        return `<div class="records-panel${drilled}${refreshing}">${scopeHtml}${body}</div>`;
+    }
+
+    /** Renders the fetched record sample as a scrollable table. Columns that are
+     *  entirely null across the sample are pruned (a wide log table's sparse
+     *  columns add nothing). The sample is labeled "N of <total>" to stay honest
+     *  that it's a slice, not the whole scope. */
+    private recordsTableHtml(records: { columns: string[]; rows: unknown[][]; total: number | null }): string {
+        const { columns, rows, total } = records;
+        // Prune columns that are null/empty for every row in the sample.
+        const keptIdx = columns
+            .map((_c, i) => i)
+            .filter(i => rows.some(r => r[i] !== null && r[i] !== undefined && r[i] !== ''));
+        const cols = keptIdx.length > 0 ? keptIdx : columns.map((_c, i) => i);
+
+        const heads = cols.map(i => `<th>${escapeHtml(columns[i] ?? '')}</th>`).join('');
+        const body = rows.map(r =>
+            `<tr>${cols.map(i => `<td>${escapeHtml(formatCell(r[i]))}</td>`).join('')}</tr>`,
+        ).join('');
+
+        const shown = rows.length.toLocaleString();
+        const label = total !== null && total > rows.length
+            ? `${shown} of ${total.toLocaleString()} rows`
+            : `${shown} ${rows.length === 1 ? 'row' : 'rows'}`;
+        return `
+            <div class="records-count">${escapeHtml(label)}</div>
+            <div class="cloud-table-wrap">
+                <table class="cloud-table">
+                    <thead><tr>${heads}</tr></thead>
+                    <tbody>${body}</tbody>
+                </table>
+            </div>`;
+    }
+
     /** The cloud/table view toggle, anchored top-left of the value area. Shows the
      *  two modes; the active one is highlighted. When the auto tier would itself be
      *  the table (too dense to plot), the "cloud" option is disabled with a hint. */
@@ -1353,7 +1555,7 @@ export class ExplorePanel {
        don't draw one) and keeps the cloud feeling like an object, not a fill. The
        cap is generous so a wide panel gets more room, but it never goes full-bleed:
        min() keeps comfortable side gutters on narrow panels. */
-    .flower.tier-numeric, .flower.tier-dot {
+    .flower.tier-full, .flower.tier-numeric, .flower.tier-dot {
         max-width: min(840px, calc(100% - 64px));
         margin-left: auto; margin-right: auto; padding: 8px 24px;
     }
@@ -1481,6 +1683,60 @@ export class ExplorePanel {
     }
     .cloud-row { cursor: pointer; }
     .cloud-row:hover td { background: color-mix(in srgb, var(--vscode-foreground) 10%, transparent); }
+    /* ── Record lens: a quiet ☰ disclosure that lives INSIDE an ungrouped bubble,
+       at the bottom beside the cloud-bloom dots. The two are the bubble's "open
+       me" affordances — bloom an aggregate cloud, or reveal the raw rows. When
+       both are present they sit as a balanced centered pair; a lone control stays
+       centered. The cloud (table) styles above are reused for the rows table. ── */
+    .records-facet {
+        position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%);
+        display: inline-flex; align-items: center; justify-content: center; z-index: 2;
+        width: 22px; height: 22px; border-radius: 50%; padding: 0;
+        font: inherit; font-size: 0.95em; line-height: 1;
+        color: var(--vscode-foreground); border: none; background: transparent;
+        opacity: 0.55; cursor: pointer; user-select: none;
+        transition: opacity 0.12s ease-out, background 0.12s ease-out, box-shadow 0.12s ease-out;
+    }
+    .bubble-hub:hover .records-facet, .locked-hub:hover .records-facet { opacity: 0.95; }
+    .records-facet:hover {
+        opacity: 1;
+        background: color-mix(in srgb, var(--vscode-foreground) 14%, transparent);
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--vscode-foreground) 32%, transparent);
+    }
+    .records-facet.active {
+        opacity: 1;
+        background: color-mix(in srgb, var(--vscode-foreground) 20%, transparent);
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--vscode-foreground) 42%, transparent);
+    }
+    /* When the bubble carries BOTH controls, nudge each off-center so they read as
+       a pair; alone, each stays centered (the default transform above). */
+    .bubble.has-facet.has-records .dim-facet { transform: translateX(calc(-50% - 14px)); }
+    .bubble.has-facet.has-records .records-facet { transform: translateX(calc(-50% + 14px)); }
+
+    .card .records-panel { align-self: stretch; }
+    /* Both the cloud and the record lens hang off the SAME drilled bubble. But the
+       ungrouped (records) host is the full active hub, whose centered bubble leaves
+       a tall empty lower half in the spine; the grouped (cloud) host is a compact
+       locked bubble with none. So the records panel needs a STRONGER pull-up than
+       the root case to absorb that empty band and sit as close to the bubble as the
+       cloud does. Root: pull up into the hub's empty bloom half. Drilled: pull up
+       further, through the active hub's empty lower half too. */
+    .records-panel { margin-top: 4px; }
+    #app:not(.dragging-bubble) .records-panel:not(.records-panel-drilled) { margin-top: -66px; }
+    .records-panel-drilled { margin-top: -150px; }
+    .records-panel.is-refreshing { opacity: 0.55; transition: opacity 0.12s ease-out; }
+    .records-scope {
+        max-width: min(840px, calc(100% - 16px)); margin: 0 auto;
+        font-size: 0.85em; opacity: 0.8; text-align: center;
+    }
+    .records-count {
+        max-width: min(840px, calc(100% - 16px)); margin: 4px auto 0;
+        font-size: 0.78em; opacity: 0.6;
+    }
+    .records-loading {
+        max-width: min(840px, calc(100% - 16px)); margin: 8px auto 0;
+        font-size: 0.85em; opacity: 0.7; text-align: center;
+    }
     /* The focused bubble is promoted to a sub-root hub with a gold ring + lift. */
     .bubble-focus {
         cursor: pointer; width: 180px; height: 180px; position: relative;
@@ -2316,6 +2572,8 @@ export class ExplorePanel {
             vscodeApi.postMessage({ command: 'popToRoot' });
         } else if (action === 'setViewMode') {
             vscodeApi.postMessage({ command: 'setViewMode', mode: el.getAttribute('data-mode') });
+        } else if (action === 'toggleRecords') {
+            vscodeApi.postMessage({ command: 'toggleRecords' });
         }
     });
 
