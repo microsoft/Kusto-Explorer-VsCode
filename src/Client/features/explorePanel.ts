@@ -38,6 +38,34 @@ export interface ExploreTarget {
     tableInfo: DatabaseTableInfo;
 }
 
+/**
+ * One locked level in the drill chain: the focused bubble's grouping
+ * dimension(s) pinned to its value(s). Each lock contributes a `where`
+ * predicate; `fromDimensions` remembers the grouping that was active at this
+ * level so popping the crumb restores it.
+ */
+interface DrillCrumb {
+    locks: Array<{ dimension: string; value: unknown }>;
+    fromDimensions: string[];
+    display: string;
+    /** Snapshot of the focused bubble's result row, so the locked node can be
+     *  re-rendered as a bubble identical to how it looked when picked. */
+    columns: string[];
+    row: unknown[];
+}
+
+/** A category of nubs (dimension / measure) that blooms its members on hover. */
+interface NubCategory {
+    key: string;
+    title: string;
+    action: string;
+    members: ClassifiedColumn[];
+    selected: string[];
+    /** A static category just shows its chosen name(s) as a lit nub with no
+     *  interactive member bloom (e.g. the root's locked-in grouping once drilled). */
+    static?: boolean;
+}
+
 /** The current exploration state for the single MVP card. */
 interface ExploreState {
     source: string;
@@ -48,8 +76,15 @@ interface ExploreState {
     selectedMeasures: string[];
     collapsed: boolean;
     totalCount: number | null;
+    /** Whole-table sum of the primary selected measure (the root bubble's value),
+     *  or null when no measure is selected / not yet computed. */
+    totalMeasure: number | null;
     /** Result of the current summarize, as a flat table. */
     result: { columns: string[]; rows: unknown[][] } | null;
+    /** Accumulated locked-in ancestor bubbles (the drill breadcrumb spine). */
+    drillChain: DrillCrumb[];
+    /** Row index (as string) of the focused-but-not-committed bubble, or null. */
+    focusKey: string | null;
     loading: boolean;
     error?: string;
 }
@@ -63,12 +98,28 @@ const MAX_DIMENSION_NUBS = 5;
 /** Geometry of the collapsed bubble "hub" (the bubble plus the space its nubs occupy). */
 const HUB_SIZE = 280;
 const HUB_CENTER = HUB_SIZE / 2;
-/** Distance from hub center to a category nub's center (tucked behind the 60px bubble). */
-const NUB_RADIUS = 66;
+/** Radius of the hub bubbles (root/focus are 120px wide → 60px radius). A category
+ *  nub's center sits exactly on this edge. */
+const BUBBLE_RADIUS = 60;
+/** Distance from hub center to a category nub's center — on the bubble edge. */
+const NUB_RADIUS = BUBBLE_RADIUS;
 /** Radius of the circle (centered on the bubble) that bloomed member dots ride. */
 const MEMBER_RADIUS = 104;
-/** Angular span (degrees) a category's member dots fan across, centered on the category. */
-const MEMBER_ARC_SPAN = 70;
+/** Fixed angular gap (degrees) between adjacent member dots along their arc. */
+const MEMBER_ARC_GAP = 22;
+/** Each category kind has a FIXED angle on the bubble so it never moves with count
+ *  (0° = right, 90° = straight down, in screen coords). */
+const CATEGORY_ANGLE: Record<string, number> = { dimension: 130, measure: 50 };
+function categoryAngle(key: string): number { return CATEGORY_ANGLE[key] ?? 90; }
+
+/**
+ * True when the user has drilled (locked at least one bubble) but not yet chosen
+ * a grouping for the slice — the drag-to-stack state. The deepest locked bubble
+ * is then the "active" hub awaiting a grouping choice, and no cloud is shown.
+ */
+function isActiveStacked(state: ExploreState): boolean {
+    return state.drillChain.length > 0 && state.selectedDimensions.length === 0;
+}
 /** Max secondary measure values rendered inside a bubble before an overflow "…". */
 const MAX_BUBBLE_VALUES = 2;
 /** Max characters of a measure column name shown inside a bubble value line. */
@@ -100,7 +151,10 @@ export class ExplorePanel {
             selectedMeasures: [],
             collapsed: true,
             totalCount: null,
+            totalMeasure: null,
             result: null,
+            drillChain: [],
+            focusKey: null,
             loading: true,
         };
 
@@ -143,7 +197,7 @@ export class ExplorePanel {
         );
     }
 
-    private handleMessage(message: { command?: string; column?: string }): void {
+    private handleMessage(message: { command?: string; column?: string; key?: string; index?: string }): void {
         switch (message?.command) {
             case 'ready':
                 this.ready = true;
@@ -163,6 +217,42 @@ export class ExplorePanel {
             case 'toggleMeasure':
                 if (this.state && typeof message.column === 'string') {
                     this.toggleSelection(this.state.selectedMeasures, message.column);
+                }
+                break;
+            case 'focusBubble':
+                if (this.state && typeof message.key === 'string') {
+                    // Toggle focus: clicking the focused bubble again clears it.
+                    this.state.focusKey = this.state.focusKey === message.key ? null : message.key;
+                    this.render();
+                }
+                break;
+            case 'clearFocus':
+                if (this.state) {
+                    this.state.focusKey = null;
+                    this.render();
+                }
+                break;
+            case 'drillDimension':
+                if (this.state && typeof message.column === 'string') {
+                    this.descend(message.column);
+                }
+                break;
+            case 'descendBubble':
+                if (this.state) {
+                    // Drag gesture: stack the dragged bubble with no grouping yet.
+                    // An explicit key (direct drag of a cloud bubble) takes
+                    // precedence over the focused bubble.
+                    this.descend(undefined, typeof message.key === 'string' ? message.key : undefined);
+                }
+                break;
+            case 'popDrill':
+                if (this.state && typeof message.index === 'string') {
+                    this.popDrill(Number(message.index));
+                }
+                break;
+            case 'popToRoot':
+                if (this.state) {
+                    this.popToRoot();
                 }
                 break;
             default:
@@ -213,6 +303,142 @@ export class ExplorePanel {
     }
 
     /**
+     * Descends a level: locks the currently-focused bubble's grouping value(s)
+     * into the drill chain and re-flowers by the newly-picked dimension within
+     * that slice. With no current grouping (the single "All" bubble) it simply
+     * starts grouping by the picked dimension — there's no value to lock.
+     *
+     * Called with no `newDim` (the drag gesture) it stacks the focused bubble but
+     * picks NO grouping yet: the slice becomes a fresh "active" stacked bubble
+     * (like the root started) whose own nubs choose the next grouping.
+     */
+    private descend(newDim?: string, explicitKey?: string): void {
+        if (!this.state) { return; }
+        const key = explicitKey ?? this.state.focusKey;
+        if (key === null || key === undefined) { return; }
+        const rowIdx = Number(key);
+        const result = this.state.result;
+        const row = result?.rows[rowIdx];
+        const fromDimensions = [...this.state.selectedDimensions];
+
+        if (row && fromDimensions.length > 0) {
+            const locks = fromDimensions.map(dim => ({
+                dimension: dim,
+                value: row[result!.columns.indexOf(dim)],
+            }));
+            const display = locks.map(l => formatCell(l.value)).join(' · ');
+            this.state.drillChain.push({
+                locks, fromDimensions, display,
+                columns: [...result!.columns], row: [...row],
+            });
+        }
+
+        this.state.selectedDimensions = newDim ? [newDim] : [];
+        this.state.focusKey = null;
+        void this.runGrouping();
+    }
+
+    /** Returns to the clicked level: keeps that bubble (and all above it) and drops
+     *  everything below, restoring the grouping that was active when it was the
+     *  current/bottom level. */
+    private popDrill(index: number): void {
+        if (!this.state) { return; }
+        const crumb = this.state.drillChain[index];
+        if (!crumb) { return; }
+        // The crumb just below the clicked one captured the grouping that was live
+        // when the clicked bubble was the bottom level; restore that (or the current
+        // grouping if it's already the deepest crumb).
+        const childCrumb = this.state.drillChain[index + 1];
+        this.state.drillChain = this.state.drillChain.slice(0, index + 1);
+        this.state.selectedDimensions = childCrumb
+            ? [...childCrumb.fromDimensions]
+            : [...this.state.selectedDimensions];
+        this.state.focusKey = null;
+        void this.runGrouping();
+    }
+
+    /** Pops all the way back to the root (the original top-level grouping). */
+    private popToRoot(): void {
+        if (!this.state || this.state.drillChain.length === 0) { return; }
+        this.state.selectedDimensions = [...this.state.drillChain[0].fromDimensions];
+        this.state.drillChain = [];
+        this.state.focusKey = null;
+        void this.runGrouping();
+    }
+
+    /** Builds the ` | where ...` clause that scopes the cloud to the drill chain.
+     *  With `limit` it only includes the first `limit` crumbs (used to recompute a
+     *  single locked level's value). */
+    private buildWhereClause(limit?: number): string {
+        if (!this.state || this.state.drillChain.length === 0) { return ''; }
+        const end = limit ?? this.state.drillChain.length;
+        const predicates: string[] = [];
+        for (let i = 0; i < end && i < this.state.drillChain.length; i++) {
+            const crumb = this.state.drillChain[i];
+            if (!crumb) { continue; }
+            for (const lock of crumb.locks) {
+                const col = bracket(lock.dimension);
+                if (lock.value === null || lock.value === undefined) {
+                    predicates.push(`isnull(${col})`);
+                } else {
+                    const type = this.state.columns.find(c => c.name === lock.dimension)?.type;
+                    predicates.push(`${col} == ${kustoLiteral(lock.value, type)}`);
+                }
+            }
+        }
+        return predicates.length > 0 ? ` | where ${predicates.join(' and ')}` : '';
+    }
+
+    /**
+     * Recomputes each locked bubble's snapshot value with the CURRENT measures, so
+     * the displayed value on every related bubble (locked + active) reflects the
+     * selected measure — selecting/clearing a measure adjusts them all, not just
+     * the live cloud. Each crumb is the aggregate of its locked slice.
+     */
+    private async refreshSnapshots(token: number): Promise<void> {
+        if (!this.state) { return; }
+        const measures = [...this.state.selectedMeasures];
+        const { source, cluster, database } = this.state;
+        const aggs = [`${bracket('Count')}=count()`,
+            ...measures.map(m => `${bracket('Sum of ' + m)}=sum(${bracket(m)})`)];
+
+        // The root bubble (whole table) shows the sum of the primary measure too,
+        // so selecting a measure updates the top bubble like all the others.
+        const primary = measures[0];
+        const rootPromise = primary
+            ? (async () => {
+                const query = `${bracket(source)} | summarize ${bracket('Sum of ' + primary)}=sum(${bracket(primary)})`;
+                try {
+                    const result = await this.server.runQuery(query, cluster, database, true, 1);
+                    if (token !== this.renderToken || !this.state) { return; }
+                    const cell = result?.data?.tables?.[0]?.rows?.[0]?.[0];
+                    const n = typeof cell === 'number' ? cell : Number(cell);
+                    this.state.totalMeasure = Number.isFinite(n) ? n : null;
+                } catch { /* keep previous */ }
+            })()
+            : Promise.resolve((() => { if (this.state) { this.state.totalMeasure = null; } })());
+
+        const crumbPromises = this.state.drillChain.map(async (crumb, i) => {
+            const where = this.buildWhereClause(i + 1);
+            const by = crumb.fromDimensions.length > 0
+                ? ` by ${crumb.fromDimensions.map(bracket).join(', ')}` : '';
+            const query = `${bracket(source)}${where} | summarize ${aggs.join(', ')}${by}`;
+            try {
+                const result = await this.server.runQuery(query, cluster, database, true, 1);
+                if (token !== this.renderToken || !this.state) { return; }
+                const table = result?.data?.tables?.[0];
+                if (table && table.rows[0]) {
+                    crumb.columns = table.columns.map(c => c.name);
+                    crumb.row = table.rows[0];
+                }
+            } catch {
+                /* keep the previous snapshot if the refresh query fails */
+            }
+        });
+        await Promise.all([rootPromise, ...crumbPromises]);
+    }
+
+    /**
      * Runs the current summarize given the selected dimensions and measures and
      * renders the flowering of bubbles. When a measure is selected it becomes
      * the PRIMARY metric (sizes the bubbles and shows the big number) and Count
@@ -228,8 +454,14 @@ export class ExplorePanel {
         const measures = [...this.state.selectedMeasures];
         const { source, cluster, database } = this.state;
 
+        // A new cloud is being computed; any focus on the old one is stale.
+        this.state.focusKey = null;
+
         if (dims.length === 0 && measures.length === 0) {
             this.state.result = null;
+            // Snapshots may still need to drop a previously-shown measure.
+            await this.refreshSnapshots(token);
+            if (token !== this.renderToken || !this.state) { return; }
             this.state.loading = false;
             this.render();
             return;
@@ -242,6 +474,10 @@ export class ExplorePanel {
         const aggs = [`${bracket('Count')}=count()`,
             ...measures.map(m => `${bracket('Sum of ' + m)}=sum(${bracket(m)})`)];
         const byClause = dims.length > 0 ? ` by ${dims.map(bracket).join(', ')}` : '';
+        // Drill chain → a `where` that scopes the cloud to the locked-in ancestor
+        // bubble values, so each descend narrows to one slice (bounded) rather
+        // than exploding the grouping (a cartesian product of dimensions).
+        const whereClause = this.buildWhereClause();
         // Position is keyed to the GROUP IDENTITY, not the value: order by the
         // dimension(s) so a given bubble keeps its place when you switch the
         // measure (only its size/heat changes). Size + heat carry magnitude.
@@ -249,7 +485,7 @@ export class ExplorePanel {
         const orderClause = dims.length > 0
             ? ` | order by ${dims.map(d => `${bracket(d)} asc`).join(', ')}`
             : ` | order by ${measures.length > 0 ? bracket('Sum of ' + measures[0]) : bracket('Count')} desc`;
-        const query = `${bracket(source)} | summarize ${aggs.join(', ')}${byClause}${orderClause}`;
+        const query = `${bracket(source)}${whereClause} | summarize ${aggs.join(', ')}${byClause}${orderClause}`;
 
         try {
             const result = await this.server.runQuery(
@@ -266,6 +502,8 @@ export class ExplorePanel {
                     rows: table.rows,
                 };
             }
+            // Keep the locked/active bubble values in sync with the current measure.
+            await this.refreshSnapshots(token);
         } catch (err) {
             if (token === this.renderToken && this.state) {
                 this.state.error = err instanceof Error ? err.message : String(err);
@@ -336,30 +574,60 @@ export class ExplorePanel {
     }
 
     private collapsedHtml(state: ExploreState): string {
+        // Count uses the SAME compact format as every other bubble (locked, active,
+        // cloud) — they're all the same 120px size, so the root must not show a
+        // long localized number where the others show "1.2M".
         const count = state.loading && state.totalCount === null
             ? '…'
-            : formatNumber(state.totalCount);
+            : state.totalCount === null ? '—' : formatCompact(state.totalCount);
 
         const catsHtml = this.categoryNubsHtml(state);
 
-        // The number of columns hidden behind the thumb (everything beyond the rim nubs).
-        const hiddenCount = state.columns.length;
-        const thumbBadge = hiddenCount > 0 ? `<span class="thumb-badge">${hiddenCount}</span>` : '';
+        // When a measure is selected the root bubble shows its whole-table sum as
+        // the primary number (with the row count demoted to a secondary line),
+        // mirroring how every other bubble switches to the measure.
+        const hasMeasure = state.selectedMeasures.length > 0;
+        const rootPrimary = hasMeasure
+            ? (state.totalMeasure === null ? '…' : formatMeasureValue(state.totalMeasure))
+            : count;
+        const rootSecondary = hasMeasure
+            ? `<div class="bubble-value"><span class="bubble-agg">#</span><span class="bubble-value-num">${count}</span></div>`
+            : '';
 
-        const hasSelection = state.selectedDimensions.length > 0 || state.selectedMeasures.length > 0;
-        return `
-            <div class="card collapsed">
+        const drilled = state.drillChain.length > 0;
+        // The cloud (and its drop zone) only makes sense once a DIMENSION groups
+        // the data into bubbles. With only a measure selected there's a single
+        // "All" group that just duplicates the root bubble, so suppress it.
+        const hasGroups = state.selectedDimensions.length > 0;
+        // When drilled, the root bubble is a "previous" bubble: clicking it unlocks
+        // the whole chain and returns to the root level (its grouping shows as a
+        // cloud again). When not drilled there's nothing below it to unlock.
+        const rootAction = drilled ? ` data-action="popToRoot"` : '';
+        const rootBubbleClass = drilled ? 'bubble bubble-root clickable' : 'bubble bubble-root';
+        const rootHub = `
                 <div class="bubble-hub" style="width:${HUB_SIZE}px;height:${HUB_SIZE}px;">
-                    <div class="bubble bubble-root">
+                    <div class="${rootBubbleClass}"${rootAction}
+                        title="${drilled ? 'Back to ' + escapeAttr(state.source) : escapeAttr(state.source)}">
                         <div class="bubble-label">${escapeHtml(state.source)}</div>
-                        <div class="bubble-primary"><span class="bubble-primary-num">${count}</span></div>
+                        <div class="bubble-primary"><span class="bubble-primary-num">${rootPrimary}</span></div>
+                        ${rootSecondary}
                         <button class="thumb" data-action="toggleExpand" title="Open card (show all columns)">
-                            <span class="thumb-grip"></span>${thumbBadge}
+                            <span class="thumb-grip"></span>
                         </button>
                     </div>
                     ${catsHtml}
-                </div>
-                ${hasSelection ? `<div class="value-area">${this.valueAreaHtml(state)}</div>` : ''}
+                </div>`;
+        // The drop zone is rendered whenever there are cloud bubbles to drag (a
+        // dimension grouping exists), not only when one is focused — CSS keeps it
+        // hidden until a drag is in flight. This lets you press-and-drag a bubble
+        // directly without a focus click first.
+        return `
+            <div class="card collapsed">
+                ${this.drillSpineHtml(state, rootHub)}
+                ${hasGroups && !isActiveStacked(state)
+                    ? `<div class="drop-zone${state.drillChain.length === 0 ? ' drop-zone-root' : ''}" data-dropzone="1"><span class="drop-zone-label">Drop here to drill in</span></div>`
+                    : ''}
+                ${hasGroups && !isActiveStacked(state) ? `<div class="value-area${drilled ? ' value-area-drilled' : ''}">${this.valueAreaHtml(state)}</div>` : ''}
                 ${state.error ? `<div class="error">${escapeHtml(state.error)}</div>` : ''}
             </div>`;
     }
@@ -370,11 +638,12 @@ export class ExplorePanel {
      * on hover; a category with active selections stays lit at rest with a count.
      */
     private categoryNubsHtml(state: ExploreState): string {
-        const categories: Array<{
-            key: string; title: string; action: string;
-            members: ClassifiedColumn[]; selected: string[];
-        }> = [];
+        // Once drilled, the root is an ancestor in the stack: it shows no nubs (only
+        // the deepest/bottom bubble does). Its grouping appears on the first
+        // connector line instead.
+        if (state.drillChain.length > 0) { return ''; }
 
+        const categories: NubCategory[] = [];
         const dimNubs = selectDimensionNubs(state.columns, MAX_DIMENSION_NUBS);
         if (dimNubs.length > 0) {
             categories.push({ key: 'dimension', title: 'Group by', action: 'toggleDimension', members: dimNubs, selected: state.selectedDimensions });
@@ -383,15 +652,33 @@ export class ExplorePanel {
         if (measureNubs.length > 0) {
             categories.push({ key: 'measure', title: 'Measure', action: 'toggleMeasure', members: measureNubs, selected: state.selectedMeasures });
         }
+        return this.renderCategoryNubs(categories);
+    }
+
+    /** Lays out a set of category nubs at their fixed per-kind angles on the bubble
+     *  edge. `hubCenter` is the center of the container the nubs ride (default the
+     *  280px hub; compact bubbles pass their own half-size). */
+    private renderCategoryNubs(categories: NubCategory[], hubCenter: number = HUB_CENTER): string {
         if (categories.length === 0) { return ''; }
 
-        // Category nubs sit on the bottom arc, tucked behind the bubble.
-        const catAngles = computeArcAngles(categories.length, 130, 50);
-        const catPositions = catAngles.map(a => anglePoint(HUB_CENTER, NUB_RADIUS, a));
+        return categories.map((cat) => {
+            // Each kind has a FIXED angle so a nub never moves when the number of
+            // categories changes; its center rides the bubble edge.
+            const catAngle = categoryAngle(cat.key);
+            const cp = anglePoint(hubCenter, NUB_RADIUS, catAngle);
 
-        return categories.map((cat, ci) => {
-            const cp = catPositions[ci];
-            const catAngle = catAngles[ci];
+            // A static category (the root's locked-in grouping after you've drilled)
+            // just shows the chosen name(s) as a lit nub — no interactive bloom.
+            if (cat.static) {
+                const names = cat.selected;
+                const sp = names.length === 1
+                    ? `<span class="cat-pinned">${escapeHtml(names[0])}</span>`
+                    : names.length > 1 ? `<span class="cat-badge">${names.length}</span>` : '';
+                return `<div class="cat-nub cat-${cat.key} has-selection locked-cat"
+                    style="left:${cp.x}px;top:${cp.y}px;"
+                    title="${escapeAttr(names.join(', '))}">${sp}</div>`;
+            }
+
             const selectedMembers = cat.members.filter(m => cat.selected.includes(m.name));
             const selectedCount = selectedMembers.length;
             // Exactly one pick → show its name below the hub; many → a count badge.
@@ -400,13 +687,13 @@ export class ExplorePanel {
                 : selectedCount > 1 ? `<span class="cat-badge">${selectedCount}</span>` : '';
 
             // Members are small dots riding a larger circle centered on the BUBBLE,
-            // fanned in an arc around the category's own angle. They live inside
-            // .cat-bloom (anchored at the category nub) so the hover-reveal works,
+            // spaced a FIXED angular gap apart and centered on the category's radial
+            // direction. They live inside .cat-bloom (anchored at the category nub),
             // so each member is offset by the category nub's hub position.
-            const memberAngles = computeArcAngles(
-                cat.members.length, catAngle + MEMBER_ARC_SPAN / 2, catAngle - MEMBER_ARC_SPAN / 2);
+            const n = cat.members.length;
             const membersHtml = cat.members.map((m, mi) => {
-                const hub = anglePoint(HUB_CENTER, MEMBER_RADIUS, memberAngles[mi]);
+                const angle = catAngle + (mi - (n - 1) / 2) * MEMBER_ARC_GAP;
+                const hub = anglePoint(hubCenter, MEMBER_RADIUS, angle);
                 const x = hub.x - cp.x;
                 const y = hub.y - cp.y;
                 const sel = cat.selected.includes(m.name);
@@ -417,13 +704,151 @@ export class ExplorePanel {
                     ><span class="member-label">${escapeHtml(m.name)}</span></button>`;
             }).join('');
 
+            // An invisible disc centered on the bubble that, only while the category
+            // is open, captures pointer events across the whole bloom region — so
+            // the bloom stays sticky even over a hub that's otherwise click-through
+            // (the focused aggregate overlay). It sits below the member dots.
+            const catchX = hubCenter - cp.x;
+            const catchY = hubCenter - cp.y;
+            const bloomCatch = `<div class="bloom-catch" style="left:${catchX}px;top:${catchY}px;"></div>`;
+
             return `<div class="cat-nub cat-${cat.key}${selectedCount > 0 ? ' has-selection' : ''}"
                 style="left:${cp.x}px;top:${cp.y}px;"
                 tabindex="0" title="${escapeAttr(cat.title)}">
                 ${pinned}
-                <div class="cat-bloom">${membersHtml}</div>
+                <div class="cat-bloom">${bloomCatch}${membersHtml}</div>
             </div>`;
         }).join('');
+    }
+
+    /**
+     * The drill spine: each locked ancestor bubble rendered as a real bubble in
+     * a vertical, centered column (with connector lines), so the path you drilled
+     * stays visible. Clicking a locked bubble pops back to that level. The caller
+     * supplies the root hub html as the first node (collapsed view); the expanded
+     * view passes none and just shows the locked bubbles.
+     */
+    private drillSpineHtml(state: ExploreState, rootHub?: string): string {
+        if (!rootHub && state.drillChain.length === 0) { return ''; }
+        const nodes: string[] = [];
+        if (rootHub) { nodes.push(`<div class="spine-node">${rootHub}</div>`); }
+        const active = isActiveStacked(state);
+        state.drillChain.forEach((crumb, i) => {
+            const isActiveNode = active && i === state.drillChain.length - 1;
+            // The link right after the root hub must reach across the hub's reserved
+            // lower nub space; links between locked bubbles are the short default.
+            // The active node draws its OWN connector (a pseudo-element) and pulls
+            // itself up under the preceding bubble, so it gets no separate link.
+            // Each connector carries the name of the dimension(s) locked in to reach
+            // the bubble it leads into (the bubbles themselves no longer show that
+            // as a nub — only the deepest/bottom bubble has nubs now).
+            if (nodes.length > 0 && !isActiveNode) {
+                const linkClass = (rootHub && i === 0) ? 'spine-link spine-link-root' : 'spine-link';
+                nodes.push(`<div class="${linkClass}">${this.linkLabelHtml(crumb)}</div>`);
+            }
+            // When stacked with no grouping yet (drag gesture), the DEEPEST node is
+            // the "active" bubble: a full interactive hub like the root, awaiting a
+            // grouping choice. Shallower nodes stay compact and static.
+            if (isActiveNode) {
+                // The active node following the root hub must clear the root's larger
+                // (80px) bloom reserve, not a locked bubble's 10px margin.
+                const followsRoot = i === 0;
+                nodes.push(`<div class="spine-node">${this.activeBubbleHtml(state, crumb, followsRoot)}</div>`);
+            } else {
+                const isDeepest = i === state.drillChain.length - 1;
+                nodes.push(`<div class="spine-node">${this.lockedBubbleHtml(state, crumb, i, isDeepest)}</div>`);
+            }
+        });
+        return `<div class="drill-spine">${nodes.join('')}</div>`;
+    }
+
+    /** The label shown on the connector leading into a bubble: the dimension
+     *  column name(s) that were locked in to reach that bubble. */
+    private linkLabelHtml(crumb: DrillCrumb): string {
+        if (crumb.fromDimensions.length === 0) { return ''; }
+        const text = crumb.fromDimensions.join(' · ');
+        return `<span class="spine-link-label" title="${escapeAttr(text)}">${escapeHtml(text)}</span>`;
+    }
+
+    /**
+     * The deepest stacked bubble after a drag gesture: rendered as a full 280px
+     * hub (like the root) whose dimension nubs pick the next grouping (toggleDimension,
+     * not a further descent — this bubble is already locked). It is the bottom of
+     * the stack — the level you're currently on — so clicking its body does nothing.
+     * Already-locked dimensions are excluded.
+     */
+    private activeBubbleHtml(state: ExploreState, crumb: DrillCrumb, followsRoot: boolean): string {
+        const m = extractBubbleMetric(crumb.columns, crumb.row);
+        const secondary = m.hasMeasure
+            ? `<div class="bubble-value"><span class="bubble-agg">#</span><span class="bubble-value-num">${escapeHtml(m.countText)}</span></div>`
+            : '';
+        const linkLabel = crumb.fromDimensions.length > 0
+            ? `<span class="spine-link-label active-link-label" title="${escapeAttr(crumb.fromDimensions.join(' · '))}">${escapeHtml(crumb.fromDimensions.join(' · '))}</span>`
+            : '';
+        const rootCls = followsRoot ? ' bubble-hub-active-root' : '';
+        return `
+            <div class="bubble-hub bubble-hub-active${rootCls}" style="width:${HUB_SIZE}px;height:${HUB_SIZE}px;">
+                ${linkLabel}
+                <div class="bubble bubble-locked bubble-active"
+                    title="${escapeAttr(crumb.display)}">
+                    <div class="bubble-label">${escapeHtml(m.label)}</div>
+                    <div class="bubble-primary"><span class="bubble-primary-num">${escapeHtml(m.primaryText)}</span></div>
+                    ${secondary}
+                </div>
+                ${this.activeStackedNubsHtml(state)}
+            </div>`;
+    }
+
+    /**
+     * Nubs for the deepest (bottom) stacked bubble — like the root's: the dimension
+     * category picks the grouping (toggleDimension, NOT a descent — already locked),
+     * excluding dimensions already locked up the chain; the measure category toggles
+     * measures. Shared by the active hub and the deepest compact locked bubble.
+     */
+    private stackNubCategories(state: ExploreState): NubCategory[] {
+        const used = new Set<string>();
+        for (const crumb of state.drillChain) {
+            for (const lock of crumb.locks) { used.add(lock.dimension); }
+        }
+        const categories: NubCategory[] = [];
+        const dimNubs = selectDimensionNubs(state.columns, MAX_DIMENSION_NUBS).filter(m => !used.has(m.name));
+        if (dimNubs.length > 0) {
+            categories.push({ key: 'dimension', title: 'Group by', action: 'toggleDimension', members: dimNubs, selected: state.selectedDimensions });
+        }
+        const measureNubs = selectMeasureNubs(state.columns, MAX_MEASURE_NUBS);
+        if (measureNubs.length > 0) {
+            categories.push({ key: 'measure', title: 'Measure', action: 'toggleMeasure', members: measureNubs, selected: state.selectedMeasures });
+        }
+        return categories;
+    }
+
+    private activeStackedNubsHtml(state: ExploreState): string {
+        return this.renderCategoryNubs(this.stackNubCategories(state));
+    }
+
+    /**
+     * Renders a locked drill node as a bubble (from the snapshot captured when it
+     * was picked), clickable to pop back to that level. Only the deepest (bottom)
+     * bubble carries nubs — ancestors are bare, their locked dimension shown on the
+     * connector line above them instead.
+     */
+    private lockedBubbleHtml(state: ExploreState, crumb: DrillCrumb, index: number, isDeepest: boolean): string {
+        const m = extractBubbleMetric(crumb.columns, crumb.row);
+        const secondary = m.hasMeasure
+            ? `<div class="bubble-value"><span class="bubble-agg">#</span><span class="bubble-value-num">${escapeHtml(m.countText)}</span></div>`
+            : '';
+        // Compact bubbles are 120px → their center/edge radius is 60px.
+        const nubs = isDeepest ? this.renderCategoryNubs(this.stackNubCategories(state), BUBBLE_RADIUS) : '';
+        return `
+            <div class="locked-hub">
+                <div class="bubble bubble-locked clickable" data-action="popDrill" data-index="${index}"
+                    title="Back to ${escapeAttr(crumb.display)}">
+                    <div class="bubble-label">${escapeHtml(m.label)}</div>
+                    <div class="bubble-primary"><span class="bubble-primary-num">${escapeHtml(m.primaryText)}</span></div>
+                    ${secondary}
+                </div>
+                ${nubs}
+            </div>`;
     }
 
     private expandedHtml(state: ExploreState): string {
@@ -436,6 +861,7 @@ export class ExplorePanel {
                     <span class="card-total">${formatNumber(state.totalCount)} rows</span>
                 </div>
                 <div class="columns">${columnsHtml}</div>
+                ${this.drillSpineHtml(state)}
                 <div class="value-area">${this.valueAreaHtml(state)}</div>
                 ${state.error ? `<div class="error">${escapeHtml(state.error)}</div>` : ''}
             </div>`;
@@ -460,12 +886,13 @@ export class ExplorePanel {
             return `<div class="hint">Loading…</div>`;
         }
         if (state.selectedDimensions.length === 0 && state.selectedMeasures.length === 0) {
-            // No grouping yet: a single total bubble.
+            // No grouping yet: a single total bubble. Same compact format as the
+            // grouped cloud bubbles it sits among.
             return `
                 <div class="flower">
                     <div class="bubble">
                         <div class="bubble-label">All</div>
-                        <div class="bubble-primary"><span class="bubble-primary-num">${formatNumber(state.totalCount)}</span></div>
+                        <div class="bubble-primary"><span class="bubble-primary-num">${state.totalCount === null ? '—' : formatCompact(state.totalCount)}</span></div>
                     </div>
                 </div>
                 <div class="hint">Pick a dimension to flower into groups, or a measure to add values.</div>`;
@@ -486,7 +913,7 @@ export class ExplorePanel {
             .map(c => c.i);
 
         // Picking a measure promotes it to the PRIMARY metric: it drives the big
-        // number and the bubble size, and Count is demoted to a secondary line.
+        // number and the heat color, and Count is demoted to a secondary line.
         // With no measure selected, Count stays primary.
         const primaryMeasure = measureCols[0];
         const secondaryMeasures = measureCols.slice(1);
@@ -495,13 +922,12 @@ export class ExplorePanel {
         const metricOf = (row: unknown[]): number => primaryMeasure
             ? Number(row[primaryMeasure.i]) || 0
             : Number(row[countIdx]) || 0;
-        const maxMetric = Math.max(1, ...result.rows.map(r => Math.max(0, metricOf(r))));
 
-        // Heat: a redundant magnitude channel on the primary metric so the large
-        // values pop even when sizes are close. Normalized by VALUE (log scale)
-        // so the spread reflects real magnitude, not item count, and the minimum
-        // (usually 0) maps to the cold end. Position stays keyed to category, so
-        // heat/size are the only things that move on a measure switch.
+        // Heat is the SOLE magnitude channel (we deliberately keep every bubble
+        // the SAME SIZE so focusing/ghosting doesn't reflow the layout — size
+        // variation perturbed spacing on every select). Normalized by VALUE (log
+        // scale) so the spread reflects real magnitude, not item count, and the
+        // minimum (usually 0) maps to the cold end.
         const heatRank = computeHeatValues(result.rows.map(r => metricOf(r)));
 
         const bubbles = result.rows.map((row, rowIdx) => {
@@ -509,7 +935,6 @@ export class ExplorePanel {
             const label = dimIdxs.length > 0
                 ? dimIdxs.map(i => formatCell(row[i])).join(' · ')
                 : 'All';
-            const size = bubbleSize(Math.max(0, metricOf(row)), maxMetric);
 
             // Primary: the promoted measure if any, else the count.
             let primaryHtml: string;
@@ -549,15 +974,32 @@ export class ExplorePanel {
             const overflow = secondaryMeasures.length > MAX_BUBBLE_VALUES ? `<div class="bubble-more">…</div>` : '';
 
             const heat = heatColor(heatRank[rowIdx] ?? 0);
-            const heatStyle = `width:${size}px;height:${size}px;`
-                + `border-color:${heat};`
+            const heatStyle = `border-color:${heat};`
                 + `background:color-mix(in srgb, ${heat} 16%, var(--vscode-editorWidget-background));`;
 
+            const key = String(rowIdx);
+            const inner = `<div class="bubble-label">${escapeHtml(label)}</div>${primaryHtml}${secondary.join('')}${overflow}`;
+
+            // The focused bubble is enlarged (object permanence: its peers stay
+            // visible but fade). It carries NO drill nubs — to descend you must
+            // DRAG it onto the drop zone below the stack (an intentional "link"
+            // gesture); dropping elsewhere deselects it.
+            if (state.focusKey === key) {
+                // The focus slot keeps the SAME 96px footprint in the flex flow so
+                // peers don't shift; the enlarged hub is an overlay drawn on top of
+                // the (already faded) neighbours.
+                return `
+                    <div class="focus-slot">
+                        <div class="bubble-hub bubble-hub-focus" style="width:${HUB_SIZE}px;height:${HUB_SIZE}px;">
+                            <div class="bubble bubble-focus" data-action="clearFocus" style="${heatStyle}" title="Drag down to drill in, or click to unfocus">${inner}</div>
+                        </div>
+                    </div>`;
+            }
+
+            const faded = state.focusKey !== null ? ' faded' : '';
             return `
-                <div class="bubble" style="${heatStyle}">
-                    <div class="bubble-label">${escapeHtml(label)}</div>
-                    ${primaryHtml}
-                    ${secondary.join('')}${overflow}
+                <div class="bubble clickable${faded}" style="${heatStyle}" data-action="focusBubble" data-key="${key}" title="Click to focus, or drag down to drill in">
+                    ${inner}
                 </div>`;
         }).join('');
 
@@ -586,6 +1028,9 @@ export class ExplorePanel {
         /* The source/entity hub bubble — purple, distinct from the teal measure
            and the blue selection accent. */
         --root-accent: #a371f7;
+        /* A focused (drilled-into) bubble — gold, distinct from the purple root
+           so a sub-root reads as "you are here", not "the table". */
+        --focus-accent: #e5c07b;
     }
     #app { display: flex; flex-direction: column; gap: 12px; }
     .card { display: flex; flex-direction: column; gap: 10px; }
@@ -624,13 +1069,19 @@ export class ExplorePanel {
     .chip.role-other { border-left: 3px solid var(--role-other); }
     .chip-dc { opacity: 0.6; font-size: 0.85em; }
     .value-area { margin-top: 4px; }
+    /* When drilled, the cloud follows a compact 120px locked bubble that (unlike
+       the 280px root hub) reserves no bloom space below it, so the cloud lands far
+       too close. Add the missing reserve (~70px) so the gap matches the original
+       root-bubble → cloud distance. */
+    .value-area-drilled { margin-top: 74px; }
     .flower { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
     .bubble {
         display: flex; flex-direction: column; align-items: center; justify-content: center;
-        min-width: 64px; min-height: 64px; padding: 8px; border-radius: 50%;
+        width: 96px; height: 96px; flex: 0 0 auto; box-sizing: border-box;
+        padding: 8px; border-radius: 50%;
         background: var(--vscode-editorWidget-background);
         border: 2px solid var(--role-other);
-        text-align: center; overflow: hidden;
+        text-align: center; overflow: hidden; user-select: none;
     }
     /* The root/source bubble is the ENTITY hub the groups flower from — give it a
        solid accent ring, a faint accent-tinted fill and a lift so it reads as the
@@ -641,6 +1092,118 @@ export class ExplorePanel {
         background:
             color-mix(in srgb, var(--root-accent) 14%, var(--vscode-editorWidget-background));
         box-shadow: 0 1px 6px rgba(0, 0, 0, 0.35);
+    }
+    /* Aggregate bubbles are clickable to focus; focusing one fades its peers
+       (object permanence — they're still computed, just receded). */
+    .bubble.clickable { cursor: pointer; transition: opacity 0.12s; }
+    .bubble.clickable:hover { opacity: 1; }
+    .bubble.faded { opacity: 0.22; filter: saturate(0.6); }
+    .bubble.faded:hover { opacity: 0.6; }
+    /* The focused bubble is promoted to a sub-root hub with a gold ring + lift. */
+    .bubble-focus {
+        cursor: pointer; width: 120px; height: 120px; position: relative;
+        border-width: 3px; box-shadow: 0 1px 8px rgba(0, 0, 0, 0.45);
+        outline: 2px solid var(--focus-accent); outline-offset: 2px;
+    }
+    /* While dragging the focused bubble (the stack gesture), hint with a grab
+       cursor and a touch more lift so the gesture feels physical. */
+    #app.dragging-bubble .bubble-focus { cursor: grabbing; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5); }
+
+    /* Drop zone: the attach target that appears just below the stack only while
+       a focused bubble is being dragged. Dropping on it links (drills in). It's
+       drawn as a dashed CIRCLE the size of a locked bubble (the shape it will
+       become once attached), centered in the column. Its top sits at the SAME 26px
+       gap a real bubble would have once attached. Following a compact locked bubble
+       (10px margin) needs +16px; the root hub reserves ~80px of empty bloom space
+       below its bubble, so the root-following zone is pulled up to that same gap.
+       The actual accepted drop area is larger (see overDropZone in script). */
+    .drop-zone { display: none; }
+    #app.dragging-bubble .drop-zone {
+        display: flex; align-items: center; justify-content: center;
+        width: 120px; height: 120px; margin: 16px 0 6px;
+        border: 2px dashed color-mix(in srgb, var(--root-accent) 60%, transparent);
+        border-radius: 50%;
+        background: color-mix(in srgb, var(--root-accent) 6%, transparent);
+        transition: background 0.1s, border-color 0.1s;
+    }
+    #app.dragging-bubble .drop-zone.drop-zone-root { margin-top: -54px; }
+    #app.dragging-bubble.over-dropzone .drop-zone {
+        border-color: var(--root-accent);
+        background: color-mix(in srgb, var(--root-accent) 18%, transparent);
+    }
+    .drop-zone-label { font-size: 0.8em; opacity: 0.75; pointer-events: none; }
+    #app.over-dropzone .drop-zone-label { opacity: 1; }
+
+    /* Cursor-following ghost shown during the drag, so the bubble visibly moves
+       toward the drop zone. */
+    .drag-ghost {
+        position: fixed; z-index: 1000; left: 0; top: 0;
+        transform: translate(-50%, -50%);
+        min-width: 64px; max-width: 120px; padding: 8px 10px;
+        border-radius: 50%; aspect-ratio: 1;
+        display: flex; align-items: center; justify-content: center; text-align: center;
+        font-size: 0.78em; overflow: hidden;
+        border: 2px solid var(--focus-accent);
+        background: color-mix(in srgb, var(--focus-accent) 18%, var(--vscode-editorWidget-background));
+        box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
+        pointer-events: none; opacity: 0.92;
+    }
+    .bubble-hub-focus .bubble-focus {
+        position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+        z-index: 1;
+    }
+    /* The focused bubble occupies a normal 96px slot in the flow so its peers
+       stay put; the larger hub + drill nubs are overlaid on top (and only the
+       interactive children capture clicks, so faded peers behind stay clickable). */
+    .focus-slot { width: 96px; height: 96px; flex: 0 0 auto; position: relative; }
+    .bubble-hub-focus {
+        position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+        z-index: 5; pointer-events: none;
+    }
+    .bubble-hub-focus .bubble-focus,
+    .bubble-hub-focus .cat-nub,
+    .bubble-hub-focus .cat-bloom,
+    .bubble-hub-focus .member { pointer-events: auto; }
+    /* Drill spine: the locked ancestor bubbles stacked vertically, centered,
+       with a connector line between them — the path you've drilled stays on
+       screen as real bubbles (click one to pop back to that level). Locked
+       bubbles match the root's purple — they ARE sub-roots of the lineage — and
+       carry no heat color (heat belongs to the live cloud you're comparing). */
+    .drill-spine { display: flex; flex-direction: column; align-items: center; }
+    .spine-node { display: flex; justify-content: center; }
+    .spine-link { position: relative; width: 2px; height: 16px; background: color-mix(in srgb, var(--root-accent) 50%, transparent); }
+    /* The dimension(s) locked in to reach the bubble below, shown beside the
+       connector line (the bubbles no longer carry this as a nub). */
+    .spine-link-label {
+        position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
+        white-space: nowrap; max-width: 160px; overflow: hidden; text-overflow: ellipsis;
+        font-size: 0.7em; color: var(--role-dimension); pointer-events: none;
+    }
+    .active-link-label {
+        top: 67px; left: calc(50% + 10px);
+    }
+    /* The hub reserves ~80px below its centered bubble for the nub bloom space.
+       Pull the first locked node up into that zone (negative margin) so it sits
+       the SAME short distance under the hub as locked bubbles sit from each other:
+       gap = 80 + margin-top + height = 80 - 72 + 18 = 26px. */
+    .spine-link-root { height: 18px; margin-top: -72px; }
+    .bubble-locked {
+        width: 120px; height: 120px;
+        border: 3px solid var(--root-accent);
+        background: color-mix(in srgb, var(--root-accent) 14%, var(--vscode-editorWidget-background));
+    }
+    .bubble-locked:hover { box-shadow: 0 1px 6px rgba(0, 0, 0, 0.35); }
+    /* A locked spine node: the 120px bubble with its category nubs on the rim. The
+       bubble sits ABOVE its nubs (z-index) so each nub is tucked behind it (only
+       its outer half peeks out), matching the root/cloud bubbles. The bottom margin
+       (10px) + the following spine-link (16px) = a 26px gap to the next bubble,
+       matching the root→first gap so every bubble is evenly spaced. */
+    .locked-hub { position: relative; width: 120px; height: 120px; margin-bottom: 10px; }
+    .locked-hub .bubble-locked { position: relative; z-index: 1; }
+    .locked-cat { cursor: default; }
+    /* Locked bubbles reveal their interactive nubs on hover, like the big hubs. */
+    .locked-hub:hover .cat-nub, .locked-hub .cat-nub.has-selection, .locked-hub .cat-nub:focus {
+        opacity: 1; pointer-events: auto; outline: none;
     }
     .bubble-label { font-size: 0.85em; opacity: 0.85; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .bubble-primary { display: flex; flex-direction: column; align-items: center; line-height: 1.1; }
@@ -657,6 +1220,28 @@ export class ExplorePanel {
     .bubble-hub .bubble-root {
         position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
         z-index: 1; /* covers the inner half of the nubs tucked behind it */
+    }
+    /* The active stacked bubble (deepest node after a drag) is centered in its
+       hub just like the root, so its interactive nubs lay out around it. */
+    .bubble-hub .bubble-active {
+        position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+        z-index: 1;
+    }
+    /* The active hub is a full 280px hub but its bubble is centered, so 80px of
+       empty space sits above it (140px hub center − 60px bubble radius). Pull the
+       hub up under the preceding bubble so the active bubble lands a 26px gap below
+       it (preceding margin-bottom 10 + margin-top + 80 = 26 → margin-top -64), trim
+       the empty bottom, then draw the connector ourselves (the preceding link is
+       omitted) so the line spans that gap. */
+    .bubble-hub-active { margin-top: -64px; margin-bottom: -40px; }
+    /* When the active hub follows the ROOT hub (just dropped, nothing locked yet),
+       the predecessor reserves 80px of bloom space below its bubble instead of a
+       10px margin, so pull up further: 26 − 80 − 80 = -134. */
+    .bubble-hub-active-root { margin-top: -134px; }
+    .bubble-hub-active::before {
+        content: ''; position: absolute; left: 50%; top: 54px;
+        transform: translateX(-50%); width: 2px; height: 26px;
+        background: var(--root-accent); opacity: 0.5; pointer-events: none;
     }
 
     /* Category nub: a stable colored dot that blooms its members on hover. */
@@ -698,6 +1283,16 @@ export class ExplorePanel {
        the shell script) — once open they stay until another category or the
        hub is left, so you can cross empty space to reach a member. */
     .cat-bloom { position: absolute; left: 50%; top: 50%; width: 0; height: 0; }
+    /* Invisible disc centered on the bubble that, only while the category is open,
+       catches pointer events across the whole bloom region so the bloom stays
+       sticky even over a click-through hub (the focused aggregate overlay). It
+       sits below the member dots so they remain hoverable/clickable. */
+    .bloom-catch {
+        position: absolute; transform: translate(-50%, -50%);
+        width: 260px; height: 260px; border-radius: 50%;
+        z-index: 0; pointer-events: none;
+    }
+    .cat-nub.open .bloom-catch { pointer-events: auto; }
     .member {
         position: absolute; transform: translate(-50%, -50%);
         width: 16px; height: 16px; padding: 0; border-radius: 50%;
@@ -707,7 +1302,9 @@ export class ExplorePanel {
         opacity: 0; pointer-events: none; transition: opacity 0.1s, width 0.1s, height 0.1s;
     }
     .cat-nub.open .member { opacity: 1; pointer-events: auto; }
-    .member:hover, .member:focus { width: 20px; height: 20px; z-index: 5; outline: none; border-color: var(--vscode-focusBorder); }
+    /* Hover enlarges and adds a soft ring but PRESERVES the member's role color
+       (don't recolor the border to focusBorder — that read as the wrong/teal hue). */
+    .member:hover, .member:focus { width: 20px; height: 20px; z-index: 5; outline: none; box-shadow: 0 0 0 2px var(--vscode-focusBorder); }
     .m-dimension { border-color: var(--role-dimension); }
     .m-measure { border-color: var(--role-measure); }
     .m-dimension.selected { background: var(--role-dimension); }
@@ -738,11 +1335,6 @@ export class ExplorePanel {
             linear-gradient(currentColor, currentColor) 0 7px/100% 2px no-repeat;
         color: var(--vscode-foreground);
     }
-    .thumb-badge {
-        font-size: 0.7em; opacity: 0.8; line-height: 1;
-        padding: 1px 4px; border-radius: 8px;
-        background: var(--vscode-badge-background); color: var(--vscode-badge-foreground);
-    }
 
     .hint { opacity: 0.6; font-size: 0.85em; margin-top: 8px; }
     .error { color: var(--vscode-errorForeground); font-size: 0.85em; white-space: pre-wrap; }
@@ -756,10 +1348,97 @@ export class ExplorePanel {
     if (!vscodeApi) { return; }
     const app = document.getElementById('app');
 
+    // Drag-and-drop-to-link gesture: press the focused aggregate bubble and drag
+    // it onto the drop zone that appears just below the stack to ATTACH it (drill
+    // in). A cursor-following ghost makes the link feel deliberate. Dropping
+    // anywhere other than the zone simply deselects (clears focus). The trailing
+    // click is suppressed so a drag release doesn't also clear focus.
+    let dragState = null;      // { x, y, dragging, ghost }
+    let suppressClick = false;
+    const DRAG_THRESHOLD = 6;
+    function dropZoneRect() {
+        const zone = app.querySelector('[data-dropzone]');
+        return zone ? zone.getBoundingClientRect() : null;
+    }
+    function overDropZone(x, y) {
+        const r = dropZoneRect();
+        if (!r) { return false; }
+        // Count it as long as the dragged object (the ghost circle) intersects the
+        // drop zone — not just the cursor point. The ghost is centered on the
+        // cursor, so derive its box from the ghost element (fallback to a 120px
+        // circle around the cursor if it isn't up yet).
+        let g = dragState && dragState.ghost ? dragState.ghost.getBoundingClientRect() : null;
+        if (!g) {
+            const half = 60;
+            g = { left: x - half, right: x + half, top: y - half, bottom: y + half };
+        }
+        return g.left <= r.right && g.right >= r.left
+            && g.top <= r.bottom && g.bottom >= r.top;
+    }
+    app.addEventListener('pointerdown', function(e) {
+        if (!e.target.closest) { return; }
+        // Either the already-focused aggregate (legacy gesture) OR any cloud
+        // bubble directly — press and drag without a focus click first. The cloud
+        // bubble carries its row key so the drop can drill straight into it.
+        const focus = e.target.closest('.bubble-focus');
+        const cloud = e.target.closest('.bubble[data-action="focusBubble"]');
+        const target = focus || cloud;
+        if (target) {
+            // Stop the browser from starting a text selection on the bubble's
+            // label/numbers as the pointer drags.
+            e.preventDefault();
+            dragState = { x: e.clientX, y: e.clientY, dragging: false, ghost: null, label: '',
+                key: cloud ? cloud.getAttribute('data-key') : null };
+            const lbl = target.querySelector('.bubble-label');
+            dragState.label = lbl ? lbl.textContent : '';
+        }
+    });
+    window.addEventListener('pointermove', function(e) {
+        if (!dragState) { return; }
+        const dx = e.clientX - dragState.x;
+        const dy = e.clientY - dragState.y;
+        if (!dragState.dragging) {
+            if (dx * dx + dy * dy < DRAG_THRESHOLD * DRAG_THRESHOLD) { return; }
+            dragState.dragging = true;
+            app.classList.add('dragging-bubble');
+            const g = document.createElement('div');
+            g.className = 'drag-ghost';
+            g.textContent = dragState.label;
+            document.body.appendChild(g);
+            dragState.ghost = g;
+        }
+        if (dragState.ghost) {
+            dragState.ghost.style.left = e.clientX + 'px';
+            dragState.ghost.style.top = e.clientY + 'px';
+        }
+        app.classList.toggle('over-dropzone', overDropZone(e.clientX, e.clientY));
+    });
+    window.addEventListener('pointerup', function(e) {
+        if (dragState && dragState.dragging) {
+            const onZone = overDropZone(e.clientX, e.clientY);
+            if (dragState.ghost) { dragState.ghost.remove(); }
+            app.classList.remove('dragging-bubble', 'over-dropzone');
+            suppressClick = true;
+            // Dropped on the zone → link (drill in), carrying the dragged bubble's
+            // key (null = the already-focused bubble). Dropped elsewhere → deselect.
+            vscodeApi.postMessage(onZone
+                ? { command: 'descendBubble', key: dragState.key }
+                : { command: 'clearFocus' });
+        }
+        dragState = null;
+    });
+
     // Event delegation survives innerHTML swaps.
     app.addEventListener('click', function(e) {
+        if (suppressClick) { suppressClick = false; return; }
         const el = e.target.closest ? e.target.closest('[data-action]') : null;
-        if (!el) { return; }
+        if (!el) {
+            // A click that hit no actionable element = clicking "nothing":
+            // clear any current focus (so you can deselect without re-clicking
+            // the exact bubble). The extension ignores this when nothing's focused.
+            vscodeApi.postMessage({ command: 'clearFocus' });
+            return;
+        }
         const action = el.getAttribute('data-action');
         if (action === 'toggleExpand') {
             vscodeApi.postMessage({ command: 'toggleExpand' });
@@ -767,6 +1446,16 @@ export class ExplorePanel {
             vscodeApi.postMessage({ command: 'toggleDimension', column: el.getAttribute('data-col') });
         } else if (action === 'toggleMeasure') {
             vscodeApi.postMessage({ command: 'toggleMeasure', column: el.getAttribute('data-col') });
+        } else if (action === 'focusBubble') {
+            vscodeApi.postMessage({ command: 'focusBubble', key: el.getAttribute('data-key') });
+        } else if (action === 'clearFocus') {
+            vscodeApi.postMessage({ command: 'clearFocus' });
+        } else if (action === 'drillDimension') {
+            vscodeApi.postMessage({ command: 'drillDimension', column: el.getAttribute('data-col') });
+        } else if (action === 'popDrill') {
+            vscodeApi.postMessage({ command: 'popDrill', index: el.getAttribute('data-index') });
+        } else if (action === 'popToRoot') {
+            vscodeApi.postMessage({ command: 'popToRoot' });
         }
     });
 
@@ -786,7 +1475,7 @@ export class ExplorePanel {
         // Hovering anything outside the open category, but still inside its hub,
         // keeps it open; leaving the hub entirely closes it.
         if (openCat) {
-            const hub = e.target.closest ? e.target.closest('.bubble-hub') : null;
+            const hub = e.target.closest ? e.target.closest('.bubble-hub, .locked-hub') : null;
             if (!hub) { closeBloom(); }
         }
     });
@@ -817,6 +1506,25 @@ function bracket(name: string): string {
 }
 
 /**
+ * Renders a drill-lock value as a Kusto literal for a `==` predicate. Numbers
+ * and booleans pass through; everything else is emitted as a quoted string
+ * literal (the dimensions we drill on are string/bool/low-cardinality, never
+ * datetime — those carry the 'time' role and aren't offered as drill nubs).
+ */
+function kustoLiteral(value: unknown, type?: string): string {
+    if (typeof value === 'number') { return Number.isFinite(value) ? String(value) : '0'; }
+    if (typeof value === 'boolean') { return value ? 'true' : 'false'; }
+    const s = String(value);
+    const t = (type ?? '').toLowerCase();
+    if (/(int|long|real|double|decimal)/.test(t)) {
+        const n = Number(s);
+        if (Number.isFinite(n)) { return String(n); }
+    }
+    if (/bool/.test(t) && (s === 'true' || s === 'false')) { return s; }
+    return `'${s.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
+}
+
+/**
  * Parses a measure result-column header like "Sum of Revenue" into its
  * aggregate glyph, the underlying column name, and whether the aggregate is the
  * implicit default (sum). Falls back to Σ/the raw header for anything unrecognized.
@@ -839,11 +1547,37 @@ function truncateLabel(text: string, max: number): string {
     return text.length > max ? text.slice(0, max - 1) + '…' : text;
 }
 
-function bubbleSize(count: number, maxCount: number): number {
-    const min = 64;
-    const max = 140;
-    const ratio = Math.sqrt(count / maxCount);
-    return Math.round(min + (max - min) * ratio);
+/**
+ * Extracts the bits needed to render a result row as a (locked) bubble: its
+ * dimension-value label and primary metric, mirroring valueAreaHtml's rule that
+ * a selected measure is primary (big number) with Count demoted to a '#' line.
+ */
+function extractBubbleMetric(
+    columns: string[], row: unknown[],
+): { label: string; primaryText: string; countText: string; hasMeasure: boolean } {
+    const countIdx = columns.indexOf('Count');
+    const measureCols = columns
+        .map((name, i) => ({ name, i }))
+        .filter(c => c.name.startsWith('Sum of '));
+    const dimIdxs = columns
+        .map((name, i) => ({ name, i }))
+        .filter(c => c.name !== 'Count' && !c.name.startsWith('Sum of '))
+        .map(c => c.i);
+
+    const count = Number(row[countIdx]) || 0;
+    const label = dimIdxs.length > 0
+        ? dimIdxs.map(i => formatCell(row[i])).join(' · ')
+        : 'All';
+    const primaryMeasure = measureCols[0];
+    if (primaryMeasure) {
+        return {
+            label,
+            primaryText: formatMeasureValue(row[primaryMeasure.i]),
+            countText: formatCompact(count),
+            hasMeasure: true,
+        };
+    }
+    return { label, primaryText: formatCompact(count), countText: '', hasMeasure: false };
 }
 
 /**
@@ -866,7 +1600,9 @@ function computeHeatValues(values: number[]): number[] {
         }
     }
     if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min) {
-        return values.map(() => 1);
+        // All values equal (or none finite): there's no spread to rank, so show
+        // them all at the neutral middle of the ramp (green) rather than "hot".
+        return values.map(() => 0.5);
     }
     // log1p over the value's offset from the minimum: gives small/mid values more
     // of the ramp, so a few large groups don't crush everyone else to "cold".
@@ -887,19 +1623,6 @@ function heatColor(t: number): string {
     // Hue 210° (blue, cold) → 0° (red, hot).
     const hue = Math.round(210 * (1 - clamped));
     return `hsl(${hue}, 70%, 55%)`;
-}
-
-/**
- * Evenly-spaced angles (degrees) along an arc from startDeg to endDeg.
- * A single item sits at the arc's midpoint.
- */
-function computeArcAngles(count: number, startDeg: number, endDeg: number): number[] {
-    const angles: number[] = [];
-    for (let i = 0; i < count; i++) {
-        const t = count === 1 ? 0.5 : i / (count - 1);
-        angles.push(startDeg + t * (endDeg - startDeg));
-    }
-    return angles;
 }
 
 /**
