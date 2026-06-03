@@ -218,6 +218,11 @@
         "icon": "$(go-to-file)"
       },
       {
+        "command": "msKustoExplorer.exploreTable",
+        "title": "Explore",
+        "icon": "$(graph-scatter)"
+      },
+      {
         "command": "msKustoExplorer.copyChart",
         "title": "Copy Chart",
         "icon": "$(file-media)"
@@ -486,6 +491,11 @@
         {
           "command": "msKustoExplorer.viewEntityDefinition",
           "when": "view == msKustoExplorer_connections && viewItem =~ /^(table|externalTable|materializedView|function|entityGroup|graphModel)$/",
+          "group": "navigation"
+        },
+        {
+          "command": "msKustoExplorer.exploreTable",
+          "when": "view == msKustoExplorer_connections && viewItem =~ /^(table|externalTable)$/",
           "group": "navigation"
         },
         {

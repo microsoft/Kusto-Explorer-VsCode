@@ -23,6 +23,7 @@ import { HistoryPanel } from './features/historyPanel'
 import { Importer } from './features/importer'
 import { ImportManager } from './features/importManager'
 import { EntityDefinitionProvider, ENTITY_DEFINITION_SCHEME } from './features/entityDefinitionProvider'
+import { ExplorePanel } from './features/explorePanel'
 import { Server, NullServer } from './features/server'
 import type { IServer } from './features/server'
 import
@@ -197,6 +198,12 @@ export async function activate(context: ExtensionContext)
         vscode.commands.registerCommand('msKustoExplorer.copyEntityAsCommand', (item) => connectionsPanel.copyEntityAsCommand(item)),
         vscode.commands.registerCommand('msKustoExplorer.copyEntityAsExpression', (item) => connectionsPanel.copyEntityAsExpression(item)),
         vscode.commands.registerCommand('msKustoExplorer.viewEntityDefinition', (item) => connectionsPanel.viewEntityDefinition(item)),
+    );
+
+    // activate the Explore panel (spatial table exploration)
+    const explorePanel = new ExplorePanel(context, server);
+    context.subscriptions.push(
+        vscode.commands.registerCommand('msKustoExplorer.exploreTable', (item) => explorePanel.exploreTable(item)),
     );
 
     // Create status bar item showing the active document's cluster and database connection.
