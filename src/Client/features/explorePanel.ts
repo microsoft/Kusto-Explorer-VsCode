@@ -168,16 +168,10 @@ function aggLabelFromGlyph(glyph: string): string {
 /** Max dimension nubs offered in the dimension category bloom. */
 const MAX_DIMENSION_NUBS = 5;
 
-/** Geometry of the collapsed bubble "hub" (the bubble plus the space its nubs occupy). */
-const HUB_SIZE = 420;
-const HUB_CENTER = HUB_SIZE / 2;
-/** Radius of the hub bubbles (root/focus are 180px wide → 90px radius). A category
- *  nub's center sits exactly on this edge. */
+/** Radius of the hub bubbles (root/focus are 180px wide → 90px radius). */
 const BUBBLE_RADIUS = 90;
 /** Distance from hub center to a category nub's center — on the bubble edge. */
 const NUB_RADIUS = BUBBLE_RADIUS;
-/** Radius of the circle (centered on the bubble) that bloomed member dots ride. */
-const MEMBER_RADIUS = 156;
 /** Fixed angular gap (degrees) between adjacent member dots along their arc. */
 const MEMBER_ARC_GAP = 22;
 /** Each category kind has a FIXED angle on the bubble so it never moves with count
@@ -359,6 +353,11 @@ export class ExplorePanel {
                     this.popDrill(Number(message.index));
                 }
                 break;
+            case 'reopenCloud':
+                if (this.state && typeof message.index === 'string') {
+                    this.reopenCloud(Number(message.index));
+                }
+                break;
             case 'popToRoot':
                 if (this.state) {
                     this.popToRoot();
@@ -494,6 +493,21 @@ export class ExplorePanel {
         // dimension selection is cleared so you re-pick how to explore from there.
         this.state.drillChain = this.state.drillChain.slice(0, index + 1);
         this.state.selectedDimensions = [];
+        this.state.focusKey = null;
+        void this.runGrouping();
+    }
+
+    /** Re-opens the cloud a locked bubble was picked FROM: drops that bubble (and
+     *  everything below it) and restores the grouping that produced it, landing
+     *  you back on the field of sibling bubbles you chose it from. This is the
+     *  inverse of a descend — the connector label naming the locked dimension is
+     *  the affordance for it. */
+    private reopenCloud(index: number): void {
+        if (!this.state) { return; }
+        const crumb = this.state.drillChain[index];
+        if (!crumb || crumb.fromDimensions.length === 0) { return; }
+        this.state.drillChain = this.state.drillChain.slice(0, index);
+        this.state.selectedDimensions = [...crumb.fromDimensions];
         this.state.focusKey = null;
         void this.runGrouping();
     }
@@ -898,7 +912,7 @@ export class ExplorePanel {
         const rootRecords = (!drilled && !hasGroups) ? this.recordsToggleHtml(state) : '';
         const rootBubbleExtra = `${rootFacet ? ' has-facet' : ''}${rootRecords ? ' has-records' : ''}`;
         const rootHub = `
-                <div class="bubble-hub" style="width:${HUB_SIZE}px;height:${HUB_SIZE}px;">
+                <div class="bubble-hub">
                     <div class="${rootBubbleClass}${rootBubbleExtra}"${rootAction}
                         title="${escapeAttr(rootTitle)}">
                         ${bubbleBody(state.source, rootValue, aggGlyph, measureName, rootDial, rootAggDial)}
@@ -915,9 +929,9 @@ export class ExplorePanel {
             <div class="card">
                 ${this.drillSpineHtml(state, rootHub)}
                 ${hasGroups && !isActiveStacked(state)
-                    ? `<div class="drop-zone${state.drillChain.length === 0 ? ' drop-zone-root' : ''}" data-dropzone="1"><span class="drop-zone-label">Drop here to drill in</span></div>`
+                    ? `<div class="drop-zone" data-dropzone="1"><span class="drop-zone-label">Drop here to drill in</span></div>`
                     : ''}
-                ${hasGroups && !isActiveStacked(state) ? `<div class="value-area${drilled ? ' value-area-drilled' : ''}">${this.valueAreaHtml(state)}</div>` : ''}
+                ${hasGroups && !isActiveStacked(state) ? `<div class="value-area">${this.valueAreaHtml(state)}</div>` : ''}
                 ${!hasGroups ? this.recordsPanelHtml(state) : ''}
                 ${state.error ? `<div class="error">${escapeHtml(state.error)}</div>` : ''}
             </div>`;
@@ -1037,25 +1051,20 @@ export class ExplorePanel {
         const active = isActiveStacked(state);
         state.drillChain.forEach((crumb, i) => {
             const isActiveNode = active && i === state.drillChain.length - 1;
-            // The link right after the root hub must reach across the hub's reserved
-            // lower nub space; links between locked bubbles are the short default.
-            // The active node draws its OWN connector (a pseudo-element) and pulls
-            // itself up under the preceding bubble, so it gets no separate link.
-            // Each connector carries the name of the dimension(s) locked in to reach
-            // the bubble it leads into (the bubbles themselves no longer show that
-            // as a nub — only the deepest/bottom bubble has nubs now).
-            if (nodes.length > 0 && !isActiveNode) {
+            // A connector precedes every node that has a predecessor — including the
+            // active (deepest, drag-stacked) node, now that hubs are collapsed to fit
+            // their bubble and reserve no space to span. Each connector carries the
+            // dimension(s) locked in to reach the bubble it leads into, which doubles
+            // as the "back to that cloud" button.
+            if (nodes.length > 0) {
                 const linkClass = (rootHub && i === 0) ? 'spine-link spine-link-root' : 'spine-link';
-                nodes.push(`<div class="${linkClass}">${this.linkLabelHtml(crumb)}</div>`);
+                nodes.push(`<div class="${linkClass}">${this.linkLabelHtml(crumb, i)}</div>`);
             }
             // When stacked with no grouping yet (drag gesture), the DEEPEST node is
             // the "active" bubble: a full interactive hub like the root, awaiting a
             // grouping choice. Shallower nodes stay compact and static.
             if (isActiveNode) {
-                // The active node following the root hub must clear the root's larger
-                // (120px) bloom reserve, not a locked bubble's 10px margin.
-                const followsRoot = i === 0;
-                nodes.push(`<div class="spine-node">${this.activeBubbleHtml(state, crumb, followsRoot)}</div>`);
+                nodes.push(`<div class="spine-node">${this.activeBubbleHtml(state, crumb)}</div>`);
             } else {
                 const isDeepest = i === state.drillChain.length - 1;
                 nodes.push(`<div class="spine-node">${this.lockedBubbleHtml(state, crumb, i, isDeepest)}</div>`);
@@ -1065,26 +1074,28 @@ export class ExplorePanel {
     }
 
     /** The label shown on the connector leading into a bubble: the dimension
-     *  column name(s) that were locked in to reach that bubble. */
-    private linkLabelHtml(crumb: DrillCrumb): string {
+     *  column name(s) that were locked in to reach that bubble. It doubles as a
+     *  "back to that cloud" button — clicking it drops this bubble and re-opens the
+     *  field of siblings it was picked from (reopenCloud). */
+    private linkLabelHtml(crumb: DrillCrumb, index: number): string {
         if (crumb.fromDimensions.length === 0) { return ''; }
         const text = crumb.fromDimensions.join(' · ');
-        return `<span class="spine-link-label" title="${escapeAttr(text)}">${escapeHtml(text)}</span>`;
+        const tip = `Back to ${text} groups`;
+        return `<span class="spine-link-label clickable" data-action="reopenCloud" data-index="${index}"`
+            + ` role="button" tabindex="0" title="${escapeAttr(tip)}">${escapeHtml(text)}</span>`;
     }
 
     /**
-     * The deepest stacked bubble after a drag gesture: rendered as a full 420px
-     * hub (like the root) whose bottom dimension facet picks the next grouping
+     * The deepest stacked bubble after a drag gesture: rendered as a collapsed hub
+     * (like the root) whose bottom dimension facet picks the next grouping
      * (groupDimension, not a further descent — this bubble is already locked). It
      * is the bottom of the stack — the level you're currently on — so clicking its
-     * body does nothing. Already-locked dimensions are excluded from the facet.
+     * body does nothing. Already-locked dimensions are excluded from the facet. Its
+     * incoming connector (with the "back to that cloud" label) is drawn by the spine
+     * like every other node.
      */
-    private activeBubbleHtml(state: ExploreState, crumb: DrillCrumb, followsRoot: boolean): string {
+    private activeBubbleHtml(state: ExploreState, crumb: DrillCrumb): string {
         const m = extractBubbleMetric(crumb.columns, crumb.row);
-        const linkLabel = crumb.fromDimensions.length > 0
-            ? `<span class="spine-link-label active-link-label" title="${escapeAttr(crumb.fromDimensions.join(' · '))}">${escapeHtml(crumb.fromDimensions.join(' · '))}</span>`
-            : '';
-        const rootCls = followsRoot ? ' bubble-hub-active-root' : '';
         const dial = this.dialAttrs(state, state.selectedMeasures[0] ?? null);
         const aggDial = this.aggDialAttrs(state);
         // The active stacked bubble is always ungrouped (no dimension yet), so it
@@ -1093,8 +1104,7 @@ export class ExplorePanel {
         const records = this.recordsToggleHtml(state);
         const bubbleExtra = `${facet ? ' has-facet' : ''}${records ? ' has-records' : ''}`;
         return `
-            <div class="bubble-hub bubble-hub-active${rootCls}" style="width:${HUB_SIZE}px;height:${HUB_SIZE}px;">
-                ${linkLabel}
+            <div class="bubble-hub bubble-hub-active">
                 <div class="bubble bubble-locked bubble-active${bubbleExtra}"
                     title="${escapeAttr(crumb.display)}">
                     ${bubbleBody(m.label, m.valueText, m.aggGlyph, m.measureName, dial, aggDial)}
@@ -1285,7 +1295,7 @@ export class ExplorePanel {
                 const slot = LOD_SLOT_PX[tier];
                 return `
                     <div class="focus-slot" style="width:${slot}px;height:${slot}px;">
-                        <div class="bubble-hub bubble-hub-focus" style="width:${HUB_SIZE}px;height:${HUB_SIZE}px;">
+                        <div class="bubble-hub bubble-hub-focus">
                             <div class="bubble bubble-focus" data-action="clearFocus" style="${focusStyle}" title="Drag down to drill in, or click to unfocus">${inner}</div>
                         </div>
                     </div>`;
@@ -1376,8 +1386,7 @@ export class ExplorePanel {
             body = this.recordsTableHtml(state.records);
         }
         const refreshing = state.recordsLoading ? ' is-refreshing' : '';
-        const drilled = state.drillChain.length > 0 ? ' records-panel-drilled' : '';
-        return `<div class="records-panel${drilled}${refreshing}">${scopeHtml}${body}</div>`;
+        return `<div class="records-panel${refreshing}">${scopeHtml}${body}</div>`;
     }
 
     /** Renders the fetched record sample as a scrollable table. Columns that are
@@ -1535,19 +1544,9 @@ export class ExplorePanel {
     .chip.role-id { border-left: 3px solid var(--role-id); }
     .chip.role-other { border-left: 3px solid var(--role-other); }
     .chip-dc { opacity: 0.6; font-size: 0.85em; }
-    .value-area { margin-top: 4px; }
-    /* When drilled, the cloud follows a compact 180px locked bubble that (unlike
-       the 420px root hub) reserves no bloom space below it, so the cloud lands far
-       too close. Add the missing reserve (~110px) so the gap matches the original
-       root-bubble → cloud distance. These values are the DURING-DRAG layout — they
-       leave room for the drop zone to appear without shoving the cloud. */
-    .value-area-drilled { margin-top: 114px; }
-    /* At REST (no drag in flight) the drop zone is hidden, so the full reserve is
-       just dead space — and starting a drag expands the gap anyway, so reserving it
-       up front buys no stability. Halve it while idle: pull the root cloud up into
-       the hub's empty bloom half, and cut the drilled reserve to ~half. */
-    #app:not(.dragging-bubble) .value-area:not(.value-area-drilled) { margin-top: -66px; }
-    #app:not(.dragging-bubble) .value-area-drilled { margin-top: 57px; }
+    /* The cloud sits below the spine at the card's normal gap — the hub no longer
+       reserves empty bloom space, so no negative-margin pull-up is needed. */
+    .value-area { margin-top: 0; }
     .flower { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: center; }
     /* The compact tiers degrade into a dense heat-field; left edge-to-edge they
        read as a wall of text/dots. Constraining them to a centered column with
@@ -1703,10 +1702,17 @@ export class ExplorePanel {
         background: color-mix(in srgb, var(--vscode-foreground) 14%, transparent);
         box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--vscode-foreground) 32%, transparent);
     }
+    /* ON state: a solid, inverted disc (filled foreground, glyph punched out in the
+       editor background) so it reads unmistakably as a pressed/active toggle — not
+       the translucent wash that hover gives. Click again to toggle off. */
     .records-facet.active {
         opacity: 1;
-        background: color-mix(in srgb, var(--vscode-foreground) 20%, transparent);
-        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--vscode-foreground) 42%, transparent);
+        color: var(--vscode-editorWidget-background);
+        background: var(--vscode-foreground);
+        box-shadow: none;
+    }
+    .records-facet.active:hover {
+        background: color-mix(in srgb, var(--vscode-foreground) 88%, transparent);
     }
     /* When the bubble carries BOTH controls, nudge each off-center so they read as
        a pair; alone, each stays centered (the default transform above). */
@@ -1714,16 +1720,11 @@ export class ExplorePanel {
     .bubble.has-facet.has-records .records-facet { transform: translateX(calc(-50% + 14px)); }
 
     .card .records-panel { align-self: stretch; }
-    /* Both the cloud and the record lens hang off the SAME drilled bubble. But the
-       ungrouped (records) host is the full active hub, whose centered bubble leaves
-       a tall empty lower half in the spine; the grouped (cloud) host is a compact
-       locked bubble with none. So the records panel needs a STRONGER pull-up than
-       the root case to absorb that empty band and sit as close to the bubble as the
-       cloud does. Root: pull up into the hub's empty bloom half. Drilled: pull up
-       further, through the active hub's empty lower half too. */
-    .records-panel { margin-top: 4px; }
-    #app:not(.dragging-bubble) .records-panel:not(.records-panel-drilled) { margin-top: -66px; }
-    .records-panel-drilled { margin-top: -150px; }
+    /* The record lens sits below the spine at the same card gap as the cloud — both
+       are card children with no special margin, so they land identically whether or
+       not you've drilled. (The old per-host negative margins are gone with the hub's
+       reserved space.) */
+    .records-panel { margin-top: 0; }
     .records-panel.is-refreshing { opacity: 0.55; transition: opacity 0.12s ease-out; }
     .records-scope {
         max-width: min(840px, calc(100% - 16px)); margin: 0 auto;
@@ -1765,7 +1766,6 @@ export class ExplorePanel {
         background: color-mix(in srgb, var(--root-accent) 6%, transparent);
         transition: background 0.1s, border-color 0.1s;
     }
-    #app.dragging-bubble .drop-zone.drop-zone-root { margin-top: -94px; }
     #app.dragging-bubble.over-dropzone .drop-zone {
         border-color: var(--root-accent);
         background: color-mix(in srgb, var(--root-accent) 18%, transparent);
@@ -1787,22 +1787,14 @@ export class ExplorePanel {
         box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
         pointer-events: none; opacity: 0.92;
     }
-    .bubble-hub-focus .bubble-focus {
-        position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
-        z-index: 1;
-    }
-    /* The focused bubble occupies a normal 96px slot in the flow so its peers
-       stay put; the larger hub + drill nubs are overlaid on top (and only the
-       interactive children capture clicks, so faded peers behind stay clickable). */
+    /* The focused bubble occupies a normal 96px slot in the flow so its peers stay
+       put; the enlarged 180px hub is overlaid on top, centered on the slot. */
     .focus-slot { width: 96px; height: 96px; flex: 0 0 auto; position: relative; }
     .bubble-hub-focus {
         position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
         z-index: 5; pointer-events: none;
     }
-    .bubble-hub-focus .bubble-focus,
-    .bubble-hub-focus .cat-nub,
-    .bubble-hub-focus .cat-bloom,
-    .bubble-hub-focus .member { pointer-events: auto; }
+    .bubble-hub-focus .bubble-focus { pointer-events: auto; }
     /* Drill spine: the locked ancestor bubbles stacked vertically, centered,
        with a connector line between them — the path you've drilled stays on
        screen as real bubbles (click one to pop back to that level). Locked
@@ -1818,15 +1810,23 @@ export class ExplorePanel {
         white-space: nowrap; max-width: 160px; overflow: hidden; text-overflow: ellipsis;
         font-size: 0.7em; color: var(--role-dimension); pointer-events: none;
     }
-    .active-link-label {
-        top: 107px; left: calc(50% + 10px);
+    /* The connector label doubles as a "return to that cloud" button. Quiet at
+       rest (it reads as a caption), it lights up and underlines on hover so the
+       affordance is discoverable without shouting. */
+    .spine-link-label.clickable {
+        pointer-events: auto; cursor: pointer;
+        border-bottom: 1px dashed transparent; transition: color 0.12s, border-color 0.12s;
     }
-    /* The hub reserves ~120px below its centered bubble for the nub bloom space.
-       Pull the first locked node up into that zone (negative margin) so it sits
-       the SAME short distance under the hub as locked bubbles sit from each other:
-       gap = 120 + margin-top + height = 120 - 112 + 18 = 26px. */
-    .spine-link-root { height: 18px; margin-top: -112px; }
+    .spine-link-label.clickable:hover, .spine-link-label.clickable:focus {
+        color: var(--vscode-foreground); border-bottom-color: currentColor; outline: none;
+    }
+    /* The connector after the root hub is the same visible length as the gap
+       between locked bubbles (locked-hub margin-bottom 10 + spine-link 16 = 26), so
+       every bubble in the spine is evenly spaced. No negative margin — the root hub
+       no longer reserves space below its bubble. */
+    .spine-link-root { height: 26px; }
     .bubble-locked {
+        position: relative;
         width: 180px; height: 180px;
         font-size: 1.35em;
         border: 3px solid var(--root-accent);
@@ -1962,9 +1962,9 @@ export class ExplorePanel {
        space). The × prunes one dimension at a time so accumulated (combined)
        groupings can be trimmed without losing the rest. */
     .dim-chips {
-        position: absolute; left: 50%; top: calc(50% + 96px); transform: translateX(-50%);
+        margin-top: 8px;
         display: flex; flex-wrap: wrap; gap: 4px; justify-content: center;
-        max-width: 260px; z-index: 3;
+        max-width: 260px;
     }
     .dim-chip {
         display: inline-flex; align-items: center; gap: 2px;
@@ -1984,32 +1984,13 @@ export class ExplorePanel {
     .dim-chip-x:hover { opacity: 1; background: color-mix(in srgb, var(--role-dimension) 30%, transparent); }
 
     /* Collapsed bubble "hub": the bubble centered, with category nubs around it. */
-    .bubble-hub { position: relative; }
-    .bubble-hub .bubble-root {
-        position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
-        z-index: 1; /* covers the inner half of the nubs tucked behind it */
-    }
-    /* The active stacked bubble (deepest node after a drag) is centered in its
-       hub just like the root, so its interactive nubs lay out around it. */
-    .bubble-hub .bubble-active {
-        position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
-        z-index: 1;
-    }
-    /* The active hub is a full 420px hub but its bubble is centered, so 120px of
-       empty space sits above it (210px hub center − 90px bubble radius). Pull the
-       hub up under the preceding bubble so the active bubble lands a 26px gap below
-       it (preceding margin-bottom 10 + margin-top + 120 = 26 → margin-top -104), trim
-       the empty bottom, then draw the connector ourselves (the preceding link is
-       omitted) so the line spans that gap. */
-    .bubble-hub-active { margin-top: -104px; margin-bottom: -60px; }
-    /* When the active hub follows the ROOT hub (just dropped, nothing locked yet),
-       the predecessor reserves 120px of bloom space below its bubble instead of a
-       10px margin, so pull up further: 26 − 120 − 120 = -214. */
-    .bubble-hub-active-root { margin-top: -214px; }
-    .bubble-hub-active::before {
-        content: ''; position: absolute; left: 50%; top: 94px;
-        transform: translateX(-50%); width: 2px; height: 26px;
-        background: var(--root-accent); opacity: 0.5; pointer-events: none;
+    /* The hub fits its content: the bubble flows at the top, the active-grouping
+       chips flow directly beneath it. No oversized box, so nothing below needs a
+       negative-margin pull-up. (The old 420px hub existed only to reserve room for
+       the member-dot bloom, which no longer exists.) */
+    .bubble-hub {
+        position: relative;
+        display: flex; flex-direction: column; align-items: center;
     }
 
     /* Category nub: a stable colored dot that blooms its members on hover. */
@@ -2568,6 +2549,8 @@ export class ExplorePanel {
             vscodeApi.postMessage({ command: 'drillDimension', column: el.getAttribute('data-col') });
         } else if (action === 'popDrill') {
             vscodeApi.postMessage({ command: 'popDrill', index: el.getAttribute('data-index') });
+        } else if (action === 'reopenCloud') {
+            vscodeApi.postMessage({ command: 'reopenCloud', index: el.getAttribute('data-index') });
         } else if (action === 'popToRoot') {
             vscodeApi.postMessage({ command: 'popToRoot' });
         } else if (action === 'setViewMode') {
