@@ -90,12 +90,36 @@ interface ExploreState {
     drillChain: DrillCrumb[];
     /** Row index (as string) of the focused-but-not-committed bubble, or null. */
     focusKey: string | null;
+    /** Cloud presentation: 'auto' picks the LOD tier from the row count (and falls
+     *  back to the table when too dense); 'table' forces the table regardless. */
+    viewMode: 'auto' | 'table';
+    /** When the current grouping has more distinct combinations than the explorer
+     *  ceiling, the estimated group count (so we show a guidance card instead of a
+     *  field and don't query the cloud); null when within the ceiling. */
+    tooManyGroups: number | null;
     loading: boolean;
     error?: string;
 }
 
-/** Cap on rows rendered as bubbles (render-limit, not a query semantics limit). */
-const MAX_FLOWER_ROWS = 200;
+/** Row-count thresholds for the view. At/below FULL we draw the full three-line
+ * bubbles; up to NUMERIC, compact value-only heat circles; up to DOT, bare heat
+ * dots. The DOT ceiling is also the EXPLORER CEILING: a grouping with more than
+ * this many distinct combinations can't be shown as a readable field at all, so we
+ * refuse to query the cloud and show a guidance card instead (see runGrouping's
+ * cardinality probe). The table view is just an alternative rendering of the SAME
+ * ≤ceiling rows — never a way to see more. */
+const LOD_FULL_MAX = 60;
+const LOD_NUMERIC_MAX = 500;
+const LOD_DOT_MAX = 2000;
+
+/** The most groups we'll ever fetch/show — equals the heat-map (dot) ceiling. A
+ * grouping estimated above this is blocked with guidance, not truncated silently,
+ * so we never pull a huge result for a high-cardinality dimension. */
+const MAX_GROUP_ROWS = LOD_DOT_MAX;
+
+/** The flex footprint each tier's bubble occupies, so a focused (always-full)
+ *  bubble can keep its tier-mate's slot size and not open gaps in a dense cloud. */
+const LOD_SLOT_PX: Record<'full' | 'numeric' | 'dot', number> = { full: 96, numeric: 46, dot: 18 };
 
 /** The aggregate functions a numeric measure can be summarized with. The dial on
  *  the caption glyph scrubs through these in order. Each maps to its Kusto function,
@@ -187,6 +211,8 @@ export class ExplorePanel {
             result: null,
             drillChain: [],
             focusKey: null,
+            viewMode: 'auto',
+            tooManyGroups: null,
             loading: true,
         };
 
@@ -229,7 +255,7 @@ export class ExplorePanel {
         );
     }
 
-    private handleMessage(message: { command?: string; column?: string; key?: string; index?: string; agg?: string; accumulate?: boolean }): void {
+    private handleMessage(message: { command?: string; column?: string; key?: string; index?: string; agg?: string; accumulate?: boolean; mode?: string }): void {
         switch (message?.command) {
             case 'ready':
                 this.ready = true;
@@ -271,6 +297,15 @@ export class ExplorePanel {
                 break;
             case 'clearFocus':
                 if (this.state) {
+                    this.state.focusKey = null;
+                    this.render();
+                }
+                break;
+            case 'setViewMode':
+                if (this.state && (message.mode === 'auto' || message.mode === 'table')) {
+                    this.state.viewMode = message.mode;
+                    // Switching presentation drops any pending focus (a table has
+                    // no focused-bubble concept) and just re-renders the same data.
                     this.state.focusKey = null;
                     this.render();
                 }
@@ -558,27 +593,60 @@ export class ExplorePanel {
 
         this.state.loading = true;
         this.state.error = undefined;
+        this.state.tooManyGroups = null;
         this.render();
 
-        const aggs = [`${bracket('Count')}=count()`,
-            ...measures.map(m => this.measureExpr(m))];
-        const byClause = dims.length > 0 ? ` by ${dims.map(bracket).join(', ')}` : '';
         // Drill chain → a `where` that scopes the cloud to the locked-in ancestor
         // bubble values, so each descend narrows to one slice (bounded) rather
         // than exploding the grouping (a cartesian product of dimensions).
         const whereClause = this.buildWhereClause();
-        // Position is keyed to the GROUP IDENTITY, not the value: order by the
-        // dimension(s) so a given bubble keeps its place when you switch the
-        // measure (only its size/heat changes). Size + heat carry magnitude.
-        // With no dimension it's a single bubble, so order by the metric.
+
+        // CARDINALITY GUARD: before pulling the cloud, cheaply estimate how many
+        // distinct groups the dimension(s) produce in this scope. A high-cardinality
+        // dimension (e.g. an id) can't be shown as a readable field — neither as a
+        // cloud nor as an equivalent table — so we refuse to query it and surface a
+        // guidance card instead of silently truncating. dcount is an HLL estimate,
+        // so it stays cheap even for pathological columns.
+        if (dims.length > 0) {
+            const dcountExpr = dims.length === 1
+                ? `dcount(${bracket(dims[0]!)})`
+                : `dcount(strcat(${dims.map(d => `tostring(${bracket(d)})`).join(`, " ~|~ ", `)}))`;
+            const cardQuery = `${bracket(source)}${whereClause} | summarize Groups = ${dcountExpr}`;
+            let groupCount: number | null = null;
+            try {
+                groupCount = await this.runScalarCount(cardQuery, cluster, database);
+            } catch { /* fall through and let the grouping query surface any error */ }
+            if (token !== this.renderToken || !this.state) { return; }
+            if (groupCount !== null && groupCount > MAX_GROUP_ROWS) {
+                this.state.tooManyGroups = groupCount;
+                this.state.result = null;
+                this.state.focusKey = null;
+                await this.refreshSnapshots(token);
+                if (token !== this.renderToken || !this.state) { return; }
+                this.state.loading = false;
+                this.render();
+                return;
+            }
+        }
+
+        const aggs = [`${bracket('Count')}=count()`,
+            ...measures.map(m => this.measureExpr(m))];
+        const byClause = dims.length > 0 ? ` by ${dims.map(bracket).join(', ')}` : '';
+        // Fetch up to the ceiling, ordered by the metric so any boundary truncation
+        // keeps the most significant groups. The VIEW (cloud tier or table) is
+        // chosen from the actual row count in valueAreaHtml; cloud tiers re-sort by
+        // identity client-side so a bubble keeps its place when only the measure
+        // changes. With no dimension it's a single bubble.
+        const metricCol = measures.length > 0
+            ? bracket(this.measureHeader(measures[0]!)) : bracket('Count');
         const orderClause = dims.length > 0
-            ? ` | order by ${dims.map(d => `${bracket(d)} asc`).join(', ')}`
-            : ` | order by ${measures.length > 0 ? bracket(this.measureHeader(measures[0]!)) : bracket('Count')} desc`;
+            ? ` | top ${MAX_GROUP_ROWS} by ${metricCol} desc`
+            : ` | order by ${metricCol} desc`;
         const query = `${bracket(source)}${whereClause} | summarize ${aggs.join(', ')}${byClause}${orderClause}`;
 
         try {
             const result = await this.server.runQuery(
-                query, cluster, database, true, MAX_FLOWER_ROWS,
+                query, cluster, database, true, MAX_GROUP_ROWS,
             );
             if (token !== this.renderToken || !this.state) { return; }
             const table = result?.data?.tables?.[0];
@@ -959,6 +1027,12 @@ export class ExplorePanel {
                 <div class="hint">Pick a dimension to flower into groups, or a measure to add values.</div>`;
         }
 
+        // CARDINALITY GUARD: the grouping has more distinct combinations than the
+        // explorer can render as a field. We didn't query the cloud; show guidance.
+        if (state.tooManyGroups !== null) {
+            return this.tooManyGroupsHtml(state);
+        }
+
         const result = state.result;
         if (!result || result.rows.length === 0) {
             return `<div class="hint">No groups.</div>`;
@@ -989,7 +1063,45 @@ export class ExplorePanel {
         // minimum (usually 0) maps to the cold end.
         const heatRank = computeHeatValues(result.rows.map(r => metricOf(r)));
 
-        const bubbles = result.rows.map((row, rowIdx) => {
+        // Level-of-detail by cardinality: as the cloud grows we degrade from full
+        // three-line bubbles → compact value-only heat circles → bare heat dots,
+        // and BEYOND that fall back to the catch-all table (the cloud is no longer a
+        // readable field). Focus/click/drag are identical across the cloud tiers.
+        const autoTier = result.rows.length <= LOD_FULL_MAX ? 'full'
+            : (result.rows.length <= LOD_NUMERIC_MAX ? 'numeric'
+                : (result.rows.length <= LOD_DOT_MAX ? 'dot' : 'table'));
+        // The view-mode toggle can FORCE the table; 'auto' honours the LOD tier.
+        const tier = state.viewMode === 'table' ? 'table' : autoTier;
+
+        // A small toggle sits at the top-left of the cloud: cloud (auto) ↔ table.
+        // It's only useful once the data is grouped (it is, here).
+        const toggle = this.viewToggleHtml(state, autoTier);
+
+        // Too dense to visualize, or table forced → the table catch-all.
+        if (tier === 'table') {
+            return toggle + this.cloudTableHtml(state, result, dimIdxs, primaryMeasure, countIdx, metricOf);
+        }
+
+        // Cloud layout is keyed to GROUP IDENTITY, not value, so a bubble keeps its
+        // place when only the measure changes (size/heat carry magnitude). The query
+        // returns rows by metric desc (so a safety-cap truncation keeps the most
+        // significant), so we re-sort indices alphabetically for layout here. Keys
+        // stay the ORIGINAL result-row index (descend/focus index back into it).
+        const order = result.rows.map((_r, i) => i);
+        if (dimIdxs.length > 0) {
+            order.sort((a, b) => {
+                for (const di of dimIdxs) {
+                    const av = formatCell(result.rows[a]![di]);
+                    const bv = formatCell(result.rows[b]![di]);
+                    if (av < bv) { return -1; }
+                    if (av > bv) { return 1; }
+                }
+                return 0;
+            });
+        }
+
+        const bubbles = order.map((rowIdx) => {
+            const row = result.rows[rowIdx]!;
             const count = Number(row[countIdx]) || 0;
             const label = dimIdxs.length > 0
                 ? dimIdxs.map(i => formatCell(row[i])).join(' · ')
@@ -1010,40 +1122,155 @@ export class ExplorePanel {
                 measureName = 'rows';
             }
 
+            // Heat is the magnitude channel. The compact tiers lean on it harder:
+            // the dot is a pure heat puck, the numeric circle a strong tint. The
+            // soft 16% wash is the "full bubble" look — also reused by the focused
+            // bubble so a promoted dot/number reads identically to a full bubble.
             const heat = heatColor(heatRank[rowIdx] ?? 0);
-            const heatStyle = `border-color:${heat};`
-                + `background:color-mix(in srgb, ${heat} 16%, var(--vscode-editorWidget-background));`;
+            const fullFill = `background:color-mix(in srgb, ${heat} 16%, var(--vscode-editorWidget-background));`;
+            const fill = tier === 'dot'
+                ? `background:${heat};`
+                : (tier === 'numeric'
+                    ? `background:color-mix(in srgb, ${heat} 38%, var(--vscode-editorWidget-background));`
+                    : fullFill);
+            const heatStyle = `border-color:${heat};` + fill;
 
             const key = String(rowIdx);
-            const inner = bubbleBody(label, valueText, aggGlyph, measureName);
 
             // The focused bubble is enlarged (object permanence: its peers stay
-            // visible but fade). It carries NO drill nubs — to descend you must
-            // DRAG it onto the drop zone below the stack (an intentional "link"
+            // visible but fade). It ALWAYS renders the full three-line hub, even in
+            // the compact tiers — focusing is how you read a dense field — so it also
+            // wears the SAME soft 16% fill a full bubble would have, not the solid/
+            // strong heat of its compact tier. It carries NO drill nubs — to descend
+            // you DRAG it onto the drop zone below the stack (an intentional "link"
             // gesture); dropping elsewhere deselects it.
             if (state.focusKey === key) {
-                // The focus slot keeps the SAME 96px footprint in the flex flow so
-                // peers don't shift; the enlarged hub is an overlay drawn on top of
-                // the (already faded) neighbours.
+                const inner = bubbleBody(label, valueText, aggGlyph, measureName);
+                const focusStyle = `border-color:${heat};` + fullFill;
+                // The focus slot keeps the SAME footprint as the bubble it replaced
+                // (tier-sized) so peers don't shift and no gaps open in a dense
+                // cloud; the enlarged hub is an overlay drawn on top of the
+                // (already faded) neighbours.
+                const slot = LOD_SLOT_PX[tier];
                 return `
-                    <div class="focus-slot">
+                    <div class="focus-slot" style="width:${slot}px;height:${slot}px;">
                         <div class="bubble-hub bubble-hub-focus" style="width:${HUB_SIZE}px;height:${HUB_SIZE}px;">
-                            <div class="bubble bubble-focus" data-action="clearFocus" style="${heatStyle}" title="Drag down to drill in, or click to unfocus">${inner}</div>
+                            <div class="bubble bubble-focus" data-action="clearFocus" style="${focusStyle}" title="Drag down to drill in, or click to unfocus">${inner}</div>
                         </div>
                     </div>`;
             }
 
             const faded = state.focusKey !== null ? ' faded' : '';
-            return `
-                <div class="bubble clickable${faded}" style="${heatStyle}" data-action="focusBubble" data-key="${key}" title="Click to focus, or drag down to drill in">
-                    ${inner}
-                </div>`;
+
+            if (tier === 'full') {
+                const inner = bubbleBody(label, valueText, aggGlyph, measureName);
+                return `
+                    <div class="bubble clickable${faded}" style="${heatStyle}" data-action="focusBubble" data-key="${key}" title="Click to focus, or drag down to drill in">
+                        ${inner}
+                    </div>`;
+            }
+
+            // Compact tiers: a heat circle. The numeric tier shows the DIMENSION
+            // LABEL (the value is already encoded by the heat color, and the name is
+            // what you need to choose which group to drill into); the dot tier shows
+            // nothing and relies on hover. Hover surfaces the full label + value in
+            // both; click still focuses, drag still drills.
+            const hover = `${label} — ${aggGlyph} ${measureName}: ${valueText}`;
+            const body = tier === 'numeric'
+                ? `<span class="bubble-mini-num">${escapeHtml(label)}</span>` : '';
+            return `<div class="bubble bubble-${tier} clickable${faded}" style="${heatStyle}" data-action="focusBubble" data-key="${key}" title="${escapeAttr(hover)}">${body}</div>`;
         }).join('');
 
-        const capped = result.rows.length >= MAX_FLOWER_ROWS
-            ? `<div class="hint">Showing top ${MAX_FLOWER_ROWS} groups.</div>` : '';
         const refreshing = state.loading ? ' is-refreshing' : '';
-        return `<div class="flower${refreshing}">${bubbles}</div>${capped}`;
+        return toggle + `<div class="flower tier-${tier}${refreshing}">${bubbles}</div>`;
+    }
+
+    /** Guidance card shown when the current grouping has too many distinct
+     *  combinations to render as a field (cloud or its equivalent table). We don't
+     *  query the cloud at all in this state — the dimension is too high-cardinality
+     *  to be useful here, so we point at the ways to make it tractable. */
+    private tooManyGroupsHtml(state: ExploreState): string {
+        const count = state.tooManyGroups ?? 0;
+        const dims = state.selectedDimensions.map(escapeHtml).join(' · ') || '(none)';
+        return `
+            <div class="too-many">
+                <div class="too-many-figure">≈${escapeHtml(count.toLocaleString())}</div>
+                <div class="too-many-title">Too many groups to explore</div>
+                <div class="too-many-body">
+                    Grouping by <strong>${dims}</strong> makes about
+                    ${escapeHtml(count.toLocaleString())} distinct combinations — more than the
+                    ${MAX_GROUP_ROWS.toLocaleString()} this view can show. To make it tractable:
+                </div>
+                <ul class="too-many-tips">
+                    <li>Pick a <strong>coarser dimension</strong> (fewer distinct values).</li>
+                    <li><strong>Drill into a slice</strong> first to narrow the scope.</li>
+                    <li>Add a <strong>filter</strong> to the query before exploring.</li>
+                </ul>
+            </div>`;
+    }
+
+    /** The cloud/table view toggle, anchored top-left of the value area. Shows the
+     *  two modes; the active one is highlighted. When the auto tier would itself be
+     *  the table (too dense to plot), the "cloud" option is disabled with a hint. */
+    private viewToggleHtml(state: ExploreState, autoTier: string): string {
+        const tableActive = state.viewMode === 'table' || autoTier === 'table';
+        // Toggling back to 'auto' restores the default (bubble) view.
+        const nextMode = tableActive ? 'auto' : 'table';
+        const title = tableActive ? 'Switch back to the bubble view' : 'Show as a table';
+        return `
+            <div class="view-toggle">
+                <button class="view-toggle-btn${tableActive ? ' active' : ''}"
+                    data-action="setViewMode" data-mode="${nextMode}" title="${escapeAttr(title)}"
+                    aria-label="${escapeAttr(title)}" role="switch" aria-checked="${tableActive ? 'true' : 'false'}">▤</button>
+            </div>`;
+    }
+
+    /** The catch-all view for a grouping with too many distinct combinations to
+     *  read as a cloud (even as dots): a scrollable table listing every group,
+     *  most-significant first (the query already returns metric desc). Each row
+     *  carries the same key/heat as a bubble would; clicking a row focuses it and
+     *  drilling works via the focused row's "drill in" affordance — but at this
+     *  density the table's job is to FIND a group, so a row click drills straight
+     *  in (the efficient navigation move for thousands of groups). */
+    private cloudTableHtml(
+        state: ExploreState,
+        result: { columns: string[]; rows: unknown[][] },
+        dimIdxs: number[],
+        primaryMeasure: { name: string; i: number } | undefined,
+        countIdx: number,
+        metricOf: (row: unknown[]) => number,
+    ): string {
+        const heatRank = computeHeatValues(result.rows.map(r => metricOf(r)));
+        const measureLabel = primaryMeasure
+            ? (() => { const pm = parseMeasureHeader(primaryMeasure.name); return `${pm.glyph} ${pm.column}`; })()
+            : '# rows';
+        const dimHeads = dimIdxs.map(i => `<th>${escapeHtml(result.columns[i] ?? '')}</th>`).join('');
+
+        const rows = result.rows.map((row, rowIdx) => {
+            const heat = heatColor(heatRank[rowIdx] ?? 0);
+            const valueText = primaryMeasure
+                ? formatMeasureValue(row[primaryMeasure.i])
+                : formatCompact(Number(row[countIdx]) || 0);
+            const cells = dimIdxs.map(i => `<td>${escapeHtml(formatCell(row[i]))}</td>`).join('');
+            return `<tr class="cloud-row" data-action="descendBubble" data-key="${rowIdx}" title="Drill in">
+                ${cells}
+                <td class="cloud-row-metric"><span class="cloud-row-heat" style="background:${heat};"></span>${escapeHtml(valueText)}</td>
+            </tr>`;
+        }).join('');
+
+        // The cardinality guard blocks anything over the ceiling, so the table
+        // always holds the COMPLETE set of groups here — never truncated. Order is
+        // metric-desc (most significant first); click a row to drill in.
+        const hint = `<div class="hint">${result.rows.length.toLocaleString()} groups, ordered by ${escapeHtml(measureLabel)}. Click a row to drill in.</div>`;
+        const refreshing = state.loading ? ' is-refreshing' : '';
+        return `
+            <div class="cloud-table-wrap${refreshing}">
+                <table class="cloud-table">
+                    <thead><tr>${dimHeads}<th class="cloud-row-metric">${escapeHtml(measureLabel)}</th></tr></thead>
+                    <tbody>${rows}</tbody>
+                </table>
+            </div>
+            ${hint}`;
     }
 
     // ─── Static shell ───────────────────────────────────────────────────
@@ -1110,9 +1337,26 @@ export class ExplorePanel {
     /* When drilled, the cloud follows a compact 180px locked bubble that (unlike
        the 420px root hub) reserves no bloom space below it, so the cloud lands far
        too close. Add the missing reserve (~110px) so the gap matches the original
-       root-bubble → cloud distance. */
+       root-bubble → cloud distance. These values are the DURING-DRAG layout — they
+       leave room for the drop zone to appear without shoving the cloud. */
     .value-area-drilled { margin-top: 114px; }
-    .flower { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+    /* At REST (no drag in flight) the drop zone is hidden, so the full reserve is
+       just dead space — and starting a drag expands the gap anyway, so reserving it
+       up front buys no stability. Halve it while idle: pull the root cloud up into
+       the hub's empty bloom half, and cut the drilled reserve to ~half. */
+    #app:not(.dragging-bubble) .value-area:not(.value-area-drilled) { margin-top: -66px; }
+    #app:not(.dragging-bubble) .value-area-drilled { margin-top: 57px; }
+    .flower { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: center; }
+    /* The compact tiers degrade into a dense heat-field; left edge-to-edge they
+       read as a wall of text/dots. Constraining them to a centered column with
+       generous side margins implies a "canvas" the field sits on (even though we
+       don't draw one) and keeps the cloud feeling like an object, not a fill. The
+       cap is generous so a wide panel gets more room, but it never goes full-bleed:
+       min() keeps comfortable side gutters on narrow panels. */
+    .flower.tier-numeric, .flower.tier-dot {
+        max-width: min(840px, calc(100% - 64px));
+        margin-left: auto; margin-right: auto; padding: 8px 24px;
+    }
     /* A re-running query (e.g. a measure change) keeps the current cloud on screen
        and just dims it while the new values land — avoids the off/on flash. */
     .flower.is-refreshing { opacity: 0.55; transition: opacity 0.12s ease-out; }
@@ -1141,6 +1385,102 @@ export class ExplorePanel {
     .bubble.clickable:hover { opacity: 1; }
     .bubble.faded { opacity: 0.22; filter: saturate(0.6); }
     .bubble.faded:hover { opacity: 0.6; }
+    /* ── Level-of-detail tiers for a dense cloud ──
+       As cardinality climbs the flower packs tighter and the bubbles shrink:
+       NUMERIC = a compact heat circle labelled with the DIMENSION VALUE (its
+       magnitude is the heat color; the name is what you drill on); DOT = a bare
+       heat puck. Both stay clickable (focus) and draggable (drill); hover reveals
+       the full label + value. */
+    .flower.tier-numeric { gap: 8px; }
+    .flower.tier-dot { gap: 4px; }
+    .bubble-numeric {
+        width: 46px; height: 46px; padding: 3px; border-width: 1px;
+        font-size: 0.62em; overflow: hidden;
+    }
+    /* The label wraps inside the circle for up to three lines, then crops; the
+       full value lives in the hover title. */
+    .bubble-mini-num {
+        font-weight: 600; line-height: 1.05; text-align: center;
+        overflow: hidden; word-break: break-word; overflow-wrap: anywhere;
+        display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+    }
+    .bubble-dot {
+        width: 18px; height: 18px; padding: 0; border-width: 1px;
+    }
+    .bubble-dot:hover { transform: scale(1.25); }
+    /* ── Table view toggle: a small icon-only button pinned to the top-RIGHT
+       corner of the value-area canvas. Right alignment (rather than left) keeps it
+       at a consistent, intentional-looking position whether the centered cloud or
+       the full-width table is shown — it lines up with the table's right edge and
+       reads as a corner control over the cloud. ── */
+    .view-toggle {
+        display: flex; justify-content: flex-end; width: min(840px, calc(100% - 16px));
+        margin: 0 auto 6px; padding: 0 2px;
+    }
+    .view-toggle-btn {
+        font: inherit; font-size: 0.9em; line-height: 1; cursor: pointer;
+        width: 24px; height: 22px; display: flex; align-items: center; justify-content: center;
+        border-radius: 6px;
+        color: var(--vscode-foreground);
+        border: 1px solid var(--vscode-widget-border, rgba(128,128,128,0.35));
+        background: var(--vscode-editorWidget-background);
+        opacity: 0.55;
+    }
+    .view-toggle-btn:hover:not(:disabled) { opacity: 1; border-color: var(--vscode-focusBorder); }
+    .view-toggle-btn.active {
+        opacity: 1;
+        background: var(--vscode-button-secondaryBackground, var(--vscode-button-background));
+        color: var(--vscode-button-secondaryForeground, var(--vscode-button-foreground));
+        border-color: transparent;
+    }
+    .view-toggle-btn:disabled { opacity: 0.35; cursor: default; }
+    /* ── Cardinality guard card: shown instead of a field when the grouping has
+       more distinct combinations than the explorer ceiling. ── */
+    .too-many {
+        max-width: min(560px, calc(100% - 32px)); margin: 12px auto 0;
+        padding: 20px 24px; text-align: center;
+        border: 1px dashed var(--vscode-widget-border, rgba(128,128,128,0.4));
+        border-radius: 12px;
+        background: color-mix(in srgb, var(--vscode-foreground) 4%, transparent);
+    }
+    .too-many-figure {
+        font-size: 2.2em; font-weight: 700; line-height: 1;
+        color: var(--role-other); opacity: 0.85;
+    }
+    .too-many-title { font-size: 1.05em; font-weight: 600; margin-top: 8px; }
+    .too-many-body { font-size: 0.9em; opacity: 0.85; margin-top: 8px; }
+    .too-many-tips {
+        text-align: left; font-size: 0.88em; opacity: 0.9;
+        margin: 10px auto 0; max-width: 420px; padding-left: 20px;
+    }
+    .too-many-tips li { margin: 3px 0; }
+    /* ── Table tier: the catch-all when a grouping has too many distinct
+       combinations to read as a cloud. A scrollable list of every group,
+       most-significant first; click a row to drill in. ── */
+    .cloud-table-wrap {
+        max-width: min(840px, calc(100% - 16px)); margin: 4px auto 0;
+        max-height: 60vh; overflow: auto;
+        border: 1px solid var(--vscode-widget-border, rgba(128,128,128,0.3));
+        border-radius: 8px;
+    }
+    .cloud-table-wrap.is-refreshing { opacity: 0.55; transition: opacity 0.12s ease-out; }
+    .cloud-table { border-collapse: collapse; width: 100%; font-size: 0.85em; }
+    .cloud-table th, .cloud-table td {
+        text-align: left; padding: 5px 12px; white-space: nowrap;
+        border-bottom: 1px solid var(--vscode-widget-border, rgba(128,128,128,0.18));
+    }
+    .cloud-table thead th {
+        position: sticky; top: 0; z-index: 1;
+        background: var(--vscode-editorWidget-background);
+        font-weight: 600; opacity: 0.85;
+    }
+    .cloud-table .cloud-row-metric { text-align: right; font-variant-numeric: tabular-nums; }
+    .cloud-row-heat {
+        display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+        margin-right: 7px; vertical-align: baseline;
+    }
+    .cloud-row { cursor: pointer; }
+    .cloud-row:hover td { background: color-mix(in srgb, var(--vscode-foreground) 10%, transparent); }
     /* The focused bubble is promoted to a sub-root hub with a gold ring + lift. */
     .bubble-focus {
         cursor: pointer; width: 180px; height: 180px; position: relative;
@@ -1964,6 +2304,8 @@ export class ExplorePanel {
             vscodeApi.postMessage({ command: 'toggleMeasure', column: el.getAttribute('data-col') });
         } else if (action === 'focusBubble') {
             vscodeApi.postMessage({ command: 'focusBubble', key: el.getAttribute('data-key') });
+        } else if (action === 'descendBubble') {
+            vscodeApi.postMessage({ command: 'descendBubble', key: el.getAttribute('data-key') });
         } else if (action === 'clearFocus') {
             vscodeApi.postMessage({ command: 'clearFocus' });
         } else if (action === 'drillDimension') {
@@ -1972,6 +2314,8 @@ export class ExplorePanel {
             vscodeApi.postMessage({ command: 'popDrill', index: el.getAttribute('data-index') });
         } else if (action === 'popToRoot') {
             vscodeApi.postMessage({ command: 'popToRoot' });
+        } else if (action === 'setViewMode') {
+            vscodeApi.postMessage({ command: 'setViewMode', mode: el.getAttribute('data-mode') });
         }
     });
 
