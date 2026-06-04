@@ -49,7 +49,7 @@ export interface ExploreTarget {
  * level so popping the crumb restores it.
  */
 interface DrillCrumb {
-    locks: Array<{ dimension: string; value: unknown; binSize?: string }>;
+    locks: Array<{ dimension: string; value: unknown; binSize?: string; values?: unknown[] }>;
     fromDimensions: string[];
     /** Bin sizes for any of `fromDimensions` that were BINNED keys (col → size
      *  token), so reopening this cloud restores the binning, not just the column. */
@@ -99,6 +99,15 @@ interface ExploreState {
     drillChain: DrillCrumb[];
     /** Row index (as string) of the focused-but-not-committed bubble, or null. */
     focusKey: string | null;
+    /** Shift multi-select: the set of selected cloud bubbles (row indices as
+     *  strings). Empty = no selection. When non-empty the cloud is in SELECTION
+     *  mode (flat band highlight, no enlargement); a plain click clears it. For an
+     *  ORDERED (binned) dimension this is always a contiguous run by bin order; for
+     *  a DISCRETE dimension it's an arbitrary set toggled one at a time. */
+    selectionKeys: string[];
+    /** The anchor the binned contiguous run extends FROM (the first selected
+     *  bubble), so successive shift-clicks re-extend from it. */
+    selectionAnchor: string | null;
     /** Cloud presentation: 'auto' picks the LOD tier from the row count (and falls
      *  back to the table when too dense); 'table' forces the table regardless. */
     viewMode: 'auto' | 'table';
@@ -230,6 +239,8 @@ export class ExplorePanel {
             result: null,
             drillChain: [],
             focusKey: null,
+            selectionKeys: [],
+            selectionAnchor: null,
             viewMode: 'auto',
             tooManyGroups: null,
             showRecords: false,
@@ -277,7 +288,7 @@ export class ExplorePanel {
         );
     }
 
-    private handleMessage(message: { command?: string; column?: string; key?: string; index?: string; agg?: string; accumulate?: boolean; mode?: string; size?: string }): void {
+    private handleMessage(message: { command?: string; column?: string; key?: string; index?: string; agg?: string; accumulate?: boolean; mode?: string; size?: string; shift?: boolean }): void {
         switch (message?.command) {
             case 'ready':
                 this.ready = true;
@@ -312,14 +323,26 @@ export class ExplorePanel {
                 break;
             case 'focusBubble':
                 if (this.state && typeof message.key === 'string') {
-                    // Toggle focus: clicking the focused bubble again clears it.
-                    this.state.focusKey = this.state.focusKey === message.key ? null : message.key;
+                    if (message.shift) {
+                        // Shift-click: enter/extend SELECTION mode (no enlargement).
+                        // Ordered (binned) dimension → contiguous run; discrete →
+                        // toggle membership.
+                        this.selectBubble(message.key);
+                    } else {
+                        // Plain click: single-inspect focus. Clears any selection.
+                        this.state.selectionKeys = [];
+                        this.state.selectionAnchor = null;
+                        // Toggle focus: clicking the focused bubble again clears it.
+                        this.state.focusKey = this.state.focusKey === message.key ? null : message.key;
+                    }
                     this.render();
                 }
                 break;
             case 'clearFocus':
                 if (this.state) {
                     this.state.focusKey = null;
+                    this.state.selectionKeys = [];
+                    this.state.selectionAnchor = null;
                     this.render();
                 }
                 break;
@@ -480,19 +503,31 @@ export class ExplorePanel {
         const row = result?.rows[rowIdx];
         const fromDimensions = [...this.state.selectedDimensions];
 
+        // If the dragged bubble is part of an active multi-selection, lock the
+        // WHOLE set as one crumb (a range for an ordered/binned axis, an `in (...)`
+        // set for a discrete one). Otherwise it's the single dragged/focused bubble.
+        const sel = this.state.selectionKeys;
+        const isMulti = sel.length > 1 && sel.includes(key) && fromDimensions.length === 1;
+
         if (row && fromDimensions.length > 0) {
             const locks = fromDimensions.map(dim => {
-                const lock: { dimension: string; value: unknown; binSize?: string } = {
+                const colIdx = result!.columns.indexOf(dim);
+                const lock: { dimension: string; value: unknown; binSize?: string; values?: unknown[] } = {
                     dimension: dim,
-                    value: row[result!.columns.indexOf(dim)],
+                    value: row[colIdx],
                 };
                 // A binned key locks as a RANGE (bucket start + size), not a point.
                 if (this.state!.binKeys[dim]) { lock.binSize = this.state!.binKeys[dim]; }
+                // Multi-select: capture every selected bubble's value for this dim.
+                if (isMulti) {
+                    lock.values = sel
+                        .map(k => result!.rows[Number(k)])
+                        .filter((r): r is unknown[] => !!r)
+                        .map(r => r[colIdx]);
+                }
                 return lock;
             });
-            const display = locks.map(l => l.binSize
-                ? binRangeLabel(l.value, l.binSize, this.state!.columns.find(c => c.name === l.dimension)?.type)
-                : formatCell(l.value)).join(' · ');
+            const display = locks.map(l => this.lockDisplay(l)).join(' · ');
             this.state.drillChain.push({
                 locks, fromDimensions,
                 fromBinKeys: { ...this.state.binKeys },
@@ -504,7 +539,66 @@ export class ExplorePanel {
         this.state.selectedDimensions = newDim ? [newDim] : [];
         this.state.binKeys = {};
         this.state.focusKey = null;
+        this.state.selectionKeys = [];
+        this.state.selectionAnchor = null;
         void this.runGrouping();
+    }
+
+    /** The compact label for a single lock: a binned range (start–end), a discrete
+     *  set ("a, b +N"), or a single value. Used for the crumb body display. */
+    private lockDisplay(l: { dimension: string; value: unknown; binSize?: string; values?: unknown[] }): string {
+        const type = this.state?.columns.find(c => c.name === l.dimension)?.type;
+        if (l.values && l.values.length > 1) {
+            if (l.binSize) {
+                // Ordered range: first bucket start – last bucket end.
+                const { lo, hi } = orderedBounds(l.values, type);
+                return `${binRangeLabel(lo, l.binSize, type)} – ${binRangeEndLabel(hi, l.binSize, type)}`;
+            }
+            // Discrete set: first few values, then "+N".
+            const shown = l.values.slice(0, 2).map(v => formatCell(v));
+            const extra = l.values.length - shown.length;
+            return extra > 0 ? `${shown.join(', ')} +${extra}` : shown.join(', ');
+        }
+        return l.binSize
+            ? binRangeLabel(l.value, l.binSize, type)
+            : formatCell(l.value);
+    }
+
+    /** Updates the shift multi-selection for a clicked bubble. For an ORDERED
+     *  (single binned dimension) cloud the selection is the contiguous run between
+     *  the anchor and the clicked bubble in bin order; for a DISCRETE cloud it
+     *  toggles the clicked bubble in/out of an arbitrary set. Seeds from the
+     *  current focus so plain-click-then-shift-click grows a selection naturally. */
+    private selectBubble(key: string): void {
+        if (!this.state) { return; }
+        // Selection mode supersedes single-inspect: the anchor is whatever was
+        // focused/anchored before, falling back to the clicked bubble.
+        const anchor = this.state.selectionAnchor ?? this.state.focusKey ?? key;
+        this.state.focusKey = null;
+
+        const ordered = this.state.selectedDimensions.length === 1
+            && !!this.state.binKeys[this.state.selectedDimensions[0]!];
+
+        if (ordered) {
+            // Contiguous run between anchor and key in the laid-out bin order.
+            const order = this.orderedRowIndices(this.state).map(String);
+            const ai = order.indexOf(anchor);
+            const ki = order.indexOf(key);
+            if (ai < 0 || ki < 0) { this.state.selectionKeys = [key]; }
+            else {
+                const [a, b] = ai <= ki ? [ai, ki] : [ki, ai];
+                this.state.selectionKeys = order.slice(a, b + 1);
+            }
+        } else {
+            // Discrete: toggle membership, seeding with the anchor.
+            const set = this.state.selectionKeys.length
+                ? [...this.state.selectionKeys]
+                : (anchor !== key ? [anchor] : []);
+            const idx = set.indexOf(key);
+            if (idx >= 0) { set.splice(idx, 1); } else { set.push(key); }
+            this.state.selectionKeys = set;
+        }
+        this.state.selectionAnchor = this.state.selectionKeys.length ? anchor : null;
     }
 
     /** Returns to the clicked level: keeps that bubble (and all above it) and drops
@@ -575,10 +669,25 @@ export class ExplorePanel {
             if (!crumb) { continue; }
             for (const lock of crumb.locks) {
                 const col = bracket(lock.dimension);
+                const type = this.state.columns.find(c => c.name === lock.dimension)?.type;
+                // Multi-select lock: an ordered RANGE (binned) or a discrete SET.
+                if (lock.values && lock.values.length > 1) {
+                    if (lock.binSize) {
+                        // The selected buckets are contiguous; scope from the first
+                        // bucket's start to the last bucket's END (start + size).
+                        const { lo, hi } = orderedBounds(lock.values, type);
+                        const loLit = kustoLiteral(lo, type);
+                        const hiLit = kustoLiteral(hi, type);
+                        predicates.push(`${col} >= ${loLit} and ${col} < ${hiLit} + ${lock.binSize}`);
+                    } else {
+                        const lits = lock.values.map(v => kustoLiteral(v, type)).join(', ');
+                        predicates.push(`${col} in (${lits})`);
+                    }
+                    continue;
+                }
                 if (lock.value === null || lock.value === undefined) {
                     predicates.push(`isnull(${col})`);
                 } else {
-                    const type = this.state.columns.find(c => c.name === lock.dimension)?.type;
                     const lo = kustoLiteral(lock.value, type);
                     if (lock.binSize) {
                         // A binned lock scopes to the whole bucket: [lo, lo + size).
@@ -712,7 +821,11 @@ export class ExplorePanel {
             // must re-bin (bin(col,size)) so the scoped slice collapses to its one
             // bucket. Plain bracket() here would re-split a binned range into every
             // raw value and snapshot only the first — the wrong (tiny) aggregate.
-            const by = crumb.fromDimensions.length > 0
+            // A MULTI-SELECT crumb (range / set) spans MANY buckets, so we omit the
+            // `by` entirely: the where clause already scopes to the whole selection,
+            // and we want its combined aggregate as the single locked-bubble value.
+            const isMultiCrumb = crumb.locks.some(l => l.values && l.values.length > 1);
+            const by = (!isMultiCrumb && crumb.fromDimensions.length > 0)
                 ? ` by ${crumb.fromDimensions.map(d => {
                     const size = crumb.fromBinKeys[d];
                     return size ? `bin(${bracket(d)}, ${size})` : bracket(d);
@@ -751,6 +864,10 @@ export class ExplorePanel {
 
         // A new cloud is being computed; any focus on the old one is stale.
         this.state.focusKey = null;
+        // Likewise any shift-selection belonged to the OLD cloud's row indices —
+        // carrying it over would pre-select an unrelated bubble in the new field.
+        this.state.selectionKeys = [];
+        this.state.selectionAnchor = null;
         // The record lens follows the same rule as the cloud: if only the measure
         // or ordering changed (we're still UNGROUPED — dims empty), keep it showing
         // and requery, dimming it while the new rows land. It's only stale when the
@@ -1255,14 +1372,62 @@ export class ExplorePanel {
      * incoming connector (with the "back to that cloud" label) is drawn by the spine
      * like every other node.
      */
+    /** The cloud layout order (row indices into `state.result.rows`): binned/
+     *  continuous dimensions sort by bucket value (numeric/chronological), discrete
+     *  dimensions sort alphabetically. Shared by the cloud render and the shift-
+     *  select contiguous-run math so "between" always matches what's on screen. */
+    private orderedRowIndices(state: ExploreState): number[] {
+        const result = state.result;
+        if (!result) { return []; }
+        const dimIdxs = result.columns
+            .map((name, i) => ({ name, i }))
+            .filter(c => c.name !== 'Count' && !isMeasureHeader(c.name))
+            .map(c => c.i);
+        const order = result.rows.map((_r, i) => i);
+        if (dimIdxs.length === 0) { return order; }
+        const binnedIdx = new Set(dimIdxs.filter(i => state.binKeys[result.columns[i] ?? '']));
+        order.sort((a, b) => {
+            for (const di of dimIdxs) {
+                const ra = result.rows[a]![di];
+                const rb = result.rows[b]![di];
+                if (binnedIdx.has(di)) {
+                    const na = Number(ra); const nb = Number(rb);
+                    if (Number.isFinite(na) && Number.isFinite(nb)) {
+                        if (na !== nb) { return na - nb; }
+                        continue;
+                    }
+                    const ta = Date.parse(String(ra)); const tb = Date.parse(String(rb));
+                    if (Number.isFinite(ta) && Number.isFinite(tb)) {
+                        if (ta !== tb) { return ta - tb; }
+                        continue;
+                    }
+                }
+                const av = formatCell(ra);
+                const bv = formatCell(rb);
+                if (av < bv) { return -1; }
+                if (av > bv) { return 1; }
+            }
+            return 0;
+        });
+        return order;
+    }
+
     /** The FULL display for a locked crumb's value(s): for a binned key the whole
      *  bucket range (start – end), otherwise the plain value. Used for the hover
      *  title so the complete window is available even though the bubble body shows
      *  the compact start. */
     private crumbFullDisplay(crumb: DrillCrumb): string {
-        return crumb.locks.map(l => l.binSize
-            ? binRangeFull(l.value, l.binSize, this.state?.columns.find(c => c.name === l.dimension)?.type)
-            : formatCell(l.value)).join(' · ');
+        return crumb.locks.map(l => {
+            const type = this.state?.columns.find(c => c.name === l.dimension)?.type;
+            if (l.values && l.values.length > 1) {
+                if (l.binSize) {
+                    const { lo, hi } = orderedBounds(l.values, type);
+                    return `${binRangeLabel(lo, l.binSize, type)} – ${binRangeEndLabel(hi, l.binSize, type)}`;
+                }
+                return l.values.map(v => formatCell(v)).join(', ');
+            }
+            return l.binSize ? binRangeFull(l.value, l.binSize, type) : formatCell(l.value);
+        }).join(' · ');
     }
 
     private activeBubbleHtml(state: ExploreState, crumb: DrillCrumb): string {
@@ -1395,40 +1560,16 @@ export class ExplorePanel {
         }
 
         // Cloud layout is keyed to GROUP IDENTITY, not value, so a bubble keeps its
-        // place when only the measure changes (size/heat carry magnitude). The query
-        // returns rows by metric desc (so a safety-cap truncation keeps the most
-        // significant), so we re-sort indices alphabetically for layout here. Keys
-        // stay the ORIGINAL result-row index (descend/focus index back into it).
-        const order = result.rows.map((_r, i) => i);
-        if (dimIdxs.length > 0) {
-            // Binned keys are a continuous axis: sort them by bucket value (numeric/
-            // chronological), not lexically, so the strip reads in order. Discrete
-            // dimensions keep the stable alphabetical layout.
-            const binnedIdx = new Set(dimIdxs.filter(i => state.binKeys[result.columns[i] ?? '']));
-            order.sort((a, b) => {
-                for (const di of dimIdxs) {
-                    const ra = result.rows[a]![di];
-                    const rb = result.rows[b]![di];
-                    if (binnedIdx.has(di)) {
-                        const na = Number(ra); const nb = Number(rb);
-                        if (Number.isFinite(na) && Number.isFinite(nb)) {
-                            if (na !== nb) { return na - nb; }
-                            continue;
-                        }
-                        const ta = Date.parse(String(ra)); const tb = Date.parse(String(rb));
-                        if (Number.isFinite(ta) && Number.isFinite(tb)) {
-                            if (ta !== tb) { return ta - tb; }
-                            continue;
-                        }
-                    }
-                    const av = formatCell(ra);
-                    const bv = formatCell(rb);
-                    if (av < bv) { return -1; }
-                    if (av > bv) { return 1; }
-                }
-                return 0;
-            });
-        }
+        // place when only the measure changes (size/heat carry magnitude). Order is
+        // computed once (shared with the shift-select contiguous-run math) so the
+        // "between" run always matches the visible layout.
+        const order = this.orderedRowIndices(state);
+
+        // SELECTION MODE: a shift-select is in progress (one or more bubbles picked
+        // as a range/set). We suppress the focus enlarge (selectBubble clears
+        // focusKey) and instead paint selected bubbles at full strength with a flat
+        // band highlight while dimming the rest — a calm "these are chosen" read.
+        const selecting = state.selectionKeys.length > 0;
 
         const bubbles = order.map((rowIdx) => {
             const row = result.rows[rowIdx]!;
@@ -1496,12 +1637,21 @@ export class ExplorePanel {
                     </div>`;
             }
 
-            const faded = state.focusKey !== null ? ' faded' : '';
+            // In SELECTION mode the unselected bubbles get a GENTLE fade (not the deep
+            // single-focus dim): the selected ones already stand out via the filled tile
+            // + full color, but a light de-emphasis of the rest helps them pop in denser
+            // views — while a set/range is a comparison among ALL of them, so we keep the
+            // others clearly legible. (Single-focus still fades peers hard — there one
+            // bubble is the whole point.)
+            const isSelected = selecting && state.selectionKeys.includes(key);
+            const faded = !selecting && state.focusKey !== null ? ' faded'
+                : selecting && !isSelected ? ' faded-soft' : '';
+            const selectedCls = isSelected ? ' selected' : '';
 
             if (tier === 'full') {
                 const inner = bubbleBody(label, valueText, aggGlyph, measureName, '', '', false);
                 return `
-                    <div class="bubble clickable${faded}" style="${heatStyle}" data-action="focusBubble" data-key="${key}" title="${escapeAttr(label)}">
+                    <div class="bubble clickable${faded}${selectedCls}" style="${heatStyle}" data-action="focusBubble" data-key="${key}" title="${escapeAttr(label)}">
                         ${inner}
                     </div>`;
             }
@@ -1514,7 +1664,7 @@ export class ExplorePanel {
             const hover = `${label} — ${aggGlyph} ${measureName}: ${valueText}`;
             const body = tier === 'numeric'
                 ? `<span class="bubble-mini-num">${escapeHtml(label)}</span>` : '';
-            return `<div class="bubble bubble-${tier} clickable${faded}" style="${heatStyle}" data-action="focusBubble" data-key="${key}" title="${escapeAttr(hover)}">${body}</div>`;
+            return `<div class="bubble bubble-${tier} clickable${faded}${selectedCls}" style="${heatStyle}" data-action="focusBubble" data-key="${key}" title="${escapeAttr(hover)}">${body}</div>`;
         }).join('');
 
         const refreshing = state.loading ? ' is-refreshing' : '';
@@ -1781,6 +1931,22 @@ export class ExplorePanel {
     .bubble.clickable:hover { opacity: 1; }
     .bubble.faded { opacity: 0.22; filter: saturate(0.6); }
     .bubble.faded:hover { opacity: 0.6; }
+    .bubble.faded-soft { opacity: 0.62; filter: saturate(0.85); }
+    .bubble.faded-soft:hover { opacity: 0.9; }
+    /* A shift-selected bubble (part of a range/set): the SQUARE CELL the circle
+       sits in is filled with the selection color (a backing tile behind the heat
+       circle, its corners showing around the circle). In a dense heat-field the
+       circles are already saturated, so a ring alone disappears — a filled tile
+       reads clearly. NO enlargement, so the field stays steady while you sweep. */
+    .bubble.selected {
+        opacity: 1; position: relative; overflow: visible;
+    }
+    .bubble.selected::before {
+        content: ''; position: absolute; inset: -2px; z-index: -1;
+        border-radius: 7px; pointer-events: none;
+        background: color-mix(in srgb, var(--vscode-focusBorder) 42%, transparent);
+        box-shadow: 0 0 0 1.5px var(--vscode-focusBorder);
+    }
     /* ── Level-of-detail tiers for a dense cloud ──
        As cardinality climbs the flower packs tighter and the bubbles shrink:
        NUMERIC = a compact heat circle labelled with the DIMENSION VALUE (its
@@ -2757,7 +2923,7 @@ export class ExplorePanel {
         } else if (action === 'toggleMeasure') {
             vscodeApi.postMessage({ command: 'toggleMeasure', column: el.getAttribute('data-col') });
         } else if (action === 'focusBubble') {
-            vscodeApi.postMessage({ command: 'focusBubble', key: el.getAttribute('data-key') });
+            vscodeApi.postMessage({ command: 'focusBubble', key: el.getAttribute('data-key'), shift: e.shiftKey });
         } else if (action === 'descendBubble') {
             vscodeApi.postMessage({ command: 'descendBubble', key: el.getAttribute('data-key') });
         } else if (action === 'clearFocus') {
@@ -2973,6 +3139,46 @@ function binRangeFull(value: unknown, size: string, type?: string): string {
         return `${formatCell(lo)}–${formatCell(lo + step)}`;
     }
     return formatCell(value);
+}
+
+/** The min and max bucket START among a set of selected bucket values, ordered
+ *  by chronological/numeric value (datetime parsed by Date.parse, numbers by
+ *  Number). Used to scope a multi-select RANGE lock to [lo, hi + size). */
+function orderedBounds(values: unknown[], type?: string): { lo: unknown; hi: unknown } {
+    const t = (type ?? '').toLowerCase();
+    const isTime = /datetime|date/.test(t);
+    const keyed = values.map(v => ({
+        v,
+        n: isTime ? Date.parse(String(v)) : Number(v),
+    })).filter(k => Number.isFinite(k.n));
+    if (keyed.length === 0) { return { lo: values[0], hi: values[values.length - 1] }; }
+    let lo = keyed[0]!; let hi = keyed[0]!;
+    for (const k of keyed) {
+        if (k.n < lo.n) { lo = k; }
+        if (k.n > hi.n) { hi = k; }
+    }
+    return { lo: lo.v, hi: hi.v };
+}
+
+/** The END of the last bucket in a multi-select range (its start + size),
+ *  formatted compactly. For datetimes the end is the next bucket's start; for
+ *  numbers it's start + step. Used for the "start – end" range label. */
+function binRangeEndLabel(hiBucketStart: unknown, size: string, type?: string): string {
+    const t = (type ?? '').toLowerCase();
+    if (/datetime|date/.test(t)) {
+        const p = parseIsoParts(hiBucketStart);
+        const ms = timespanToMs(size);
+        if (!p || ms === null) { return binRangeLabel(hiBucketStart, size, type); }
+        const startMs = Date.UTC(Number(p.y), Number(p.mo) - 1, Number(p.d), Number(p.h), Number(p.mi), Number(p.s), p.ms);
+        const endIso = new Date(startMs + ms).toISOString();
+        return compactDateTime(endIso, size);
+    }
+    const lo = Number(hiBucketStart);
+    const step = Number(size);
+    if (Number.isFinite(lo) && Number.isFinite(step)) {
+        return formatCell(lo + step);
+    }
+    return binRangeLabel(hiBucketStart, size, type);
 }
 
 /** Splits an ISO-ish datetime string into zero-padded text parts without any
