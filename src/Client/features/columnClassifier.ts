@@ -257,3 +257,32 @@ export function selectMeasureNubs(columns: ClassifiedColumn[], max = MAX_MEASURE
     return candidates.slice(0, Math.max(0, max));
 }
 
+// ─── Binnable (continuous) group-key selection ───────────────────────────────
+
+/**
+ * Whether a column can serve as a BINNED group key (a continuous axis bucketed
+ * into ranges), and of which flavor:
+ *  - 'time'    → a datetime/date column (bucket by a timespan, e.g. bin(ts, 1h));
+ *  - 'numeric' → a numeric MEASURE column (bucket by a number, e.g. bin(x, 100)).
+ * Returns null for anything that should be grouped DISCRETELY instead (a
+ * dimension — even a low-cardinality numeric code), or that can't bin at all
+ * (ids, strings, timespans, dynamic). A binned column is the continuous twin of
+ * a dimension: both are `summarize <measure> by <key>`, the bin just buckets a
+ * continuous key so it can be a group axis.
+ */
+export function binKindForColumn(col: ClassifiedColumn): 'time' | 'numeric' | null {
+    const t = normalizeType(col.type);
+    if (col.role === 'time' && (t === 'datetime' || t === 'date')) { return 'time'; }
+    if (col.role === 'measure' && isNumericType(t)) { return 'numeric'; }
+    return null;
+}
+
+/**
+ * The continuous columns offered as BIN group keys in the field wheel, alongside
+ * the discrete dimensions. Schema order is preserved (meaningful to authors).
+ */
+export function selectBinnableColumns(columns: ClassifiedColumn[]): ClassifiedColumn[] {
+    return columns.filter(c => binKindForColumn(c) !== null);
+}
+
+

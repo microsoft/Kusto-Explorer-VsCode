@@ -28,6 +28,8 @@ import {
     refineClassification,
     selectDimensionNubs,
     selectMeasureNubs,
+    selectBinnableColumns,
+    binKindForColumn,
     MAX_MEASURE_NUBS,
     type ClassifiedColumn,
     type ProfileStats,
@@ -47,8 +49,11 @@ export interface ExploreTarget {
  * level so popping the crumb restores it.
  */
 interface DrillCrumb {
-    locks: Array<{ dimension: string; value: unknown }>;
+    locks: Array<{ dimension: string; value: unknown; binSize?: string }>;
     fromDimensions: string[];
+    /** Bin sizes for any of `fromDimensions` that were BINNED keys (col → size
+     *  token), so reopening this cloud restores the binning, not just the column. */
+    fromBinKeys: Record<string, string>;
     display: string;
     /** Snapshot of the focused bubble's result row, so the locked node can be
      *  re-rendered as a bubble identical to how it looked when picked. */
@@ -75,6 +80,10 @@ interface ExploreState {
     database: string;
     columns: ClassifiedColumn[];
     selectedDimensions: string[];
+    /** For any selected group key that is a BINNED continuous column, its bin size
+     *  token (col name → e.g. '1h', '100'). A selected dimension absent from this
+     *  map is a plain discrete grouping; present means `summarize by bin(col,size)`. */
+    binKeys: Record<string, string>;
     selectedMeasures: string[];
     /** How the selected numeric measure is aggregated (sum/avg/min/max). Ignored
      *  while measuring rows (count); preserved so switching back to a column
@@ -213,6 +222,7 @@ export class ExplorePanel {
             database: target.databaseName,
             columns: classifyColumns(columns),
             selectedDimensions: [],
+            binKeys: {},
             selectedMeasures: [],
             selectedAggregate: 'sum',
             totalCount: null,
@@ -267,7 +277,7 @@ export class ExplorePanel {
         );
     }
 
-    private handleMessage(message: { command?: string; column?: string; key?: string; index?: string; agg?: string; accumulate?: boolean; mode?: string }): void {
+    private handleMessage(message: { command?: string; column?: string; key?: string; index?: string; agg?: string; accumulate?: boolean; mode?: string; size?: string }): void {
         switch (message?.command) {
             case 'ready':
                 this.ready = true;
@@ -322,6 +332,16 @@ export class ExplorePanel {
                     this.render();
                 }
                 break;
+            case 'setBinSize':
+                if (this.state && typeof message.column === 'string' && typeof message.size === 'string'
+                    && this.state.binKeys[message.column]) {
+                    // The binned chip's dial picked a new bucket size: re-bin that
+                    // key and re-run the grouping (cloud re-blooms at the new factor).
+                    this.state.binKeys[message.column] = message.size;
+                    this.state.focusKey = null;
+                    void this.runGrouping();
+                }
+                break;
             case 'toggleRecords':
                 if (this.state) {
                     // The record lens for the current ungrouped bubble: flip it, and
@@ -369,6 +389,7 @@ export class ExplorePanel {
                     // dimension selection: the cloud collapses and the level falls
                     // back to a single ungrouped bubble.
                     this.state.selectedDimensions = [];
+                    this.state.binKeys = {};
                     this.state.focusKey = null;
                     void this.runGrouping();
                 }
@@ -378,15 +399,8 @@ export class ExplorePanel {
                     // The bottom dimension facet flung a column down onto the drop
                     // zone. Plain fling REPLACES the grouping; Shift+fling ACCUMULATES
                     // (adds another grouping dimension), preserving combined grouping.
-                    if (message.accumulate) {
-                        if (!this.state.selectedDimensions.includes(message.column)) {
-                            this.state.selectedDimensions.push(message.column);
-                        }
-                    } else {
-                        this.state.selectedDimensions = [message.column];
-                    }
-                    this.state.focusKey = null;
-                    void this.runGrouping();
+                    // A binnable column auto-bins; a dimension groups discretely.
+                    void this.applyGroupKey(message.column, !!message.accumulate);
                 }
                 break;
             case 'removeDimension':
@@ -395,6 +409,7 @@ export class ExplorePanel {
                     // dim chip). Collapses to ungrouped when the last one goes.
                     const i = this.state.selectedDimensions.indexOf(message.column);
                     if (i >= 0) { this.state.selectedDimensions.splice(i, 1); }
+                    delete this.state.binKeys[message.column];
                     this.state.focusKey = null;
                     void this.runGrouping();
                 }
@@ -466,18 +481,28 @@ export class ExplorePanel {
         const fromDimensions = [...this.state.selectedDimensions];
 
         if (row && fromDimensions.length > 0) {
-            const locks = fromDimensions.map(dim => ({
-                dimension: dim,
-                value: row[result!.columns.indexOf(dim)],
-            }));
-            const display = locks.map(l => formatCell(l.value)).join(' · ');
+            const locks = fromDimensions.map(dim => {
+                const lock: { dimension: string; value: unknown; binSize?: string } = {
+                    dimension: dim,
+                    value: row[result!.columns.indexOf(dim)],
+                };
+                // A binned key locks as a RANGE (bucket start + size), not a point.
+                if (this.state!.binKeys[dim]) { lock.binSize = this.state!.binKeys[dim]; }
+                return lock;
+            });
+            const display = locks.map(l => l.binSize
+                ? binRangeLabel(l.value, l.binSize, this.state!.columns.find(c => c.name === l.dimension)?.type)
+                : formatCell(l.value)).join(' · ');
             this.state.drillChain.push({
-                locks, fromDimensions, display,
+                locks, fromDimensions,
+                fromBinKeys: { ...this.state.binKeys },
+                display,
                 columns: [...result!.columns], row: [...row],
             });
         }
 
         this.state.selectedDimensions = newDim ? [newDim] : [];
+        this.state.binKeys = {};
         this.state.focusKey = null;
         void this.runGrouping();
     }
@@ -491,9 +516,12 @@ export class ExplorePanel {
         if (!crumb) { return; }
         // Returning to a previous level lands it ungrouped (cloud closed): the
         // dimension selection is cleared so you re-pick how to explore from there.
+        // The record table also closes — it belonged to the deeper scope.
         this.state.drillChain = this.state.drillChain.slice(0, index + 1);
         this.state.selectedDimensions = [];
+        this.state.binKeys = {};
         this.state.focusKey = null;
+        this.closeRecords();
         void this.runGrouping();
     }
 
@@ -508,7 +536,9 @@ export class ExplorePanel {
         if (!crumb || crumb.fromDimensions.length === 0) { return; }
         this.state.drillChain = this.state.drillChain.slice(0, index);
         this.state.selectedDimensions = [...crumb.fromDimensions];
+        this.state.binKeys = { ...crumb.fromBinKeys };
         this.state.focusKey = null;
+        this.closeRecords();
         void this.runGrouping();
     }
 
@@ -517,9 +547,20 @@ export class ExplorePanel {
     private popToRoot(): void {
         if (!this.state || this.state.drillChain.length === 0) { return; }
         this.state.selectedDimensions = [];
+        this.state.binKeys = {};
         this.state.drillChain = [];
         this.state.focusKey = null;
+        this.closeRecords();
         void this.runGrouping();
+    }
+
+    /** Closes the record lens, discarding any loaded rows. Used when navigating
+     *  back to a prior bubble — the table belonged to the deeper scope. */
+    private closeRecords(): void {
+        if (!this.state) { return; }
+        this.state.showRecords = false;
+        this.state.records = null;
+        this.state.recordsLoading = false;
     }
 
     /** Builds the ` | where ...` clause that scopes the cloud to the drill chain.
@@ -538,11 +579,89 @@ export class ExplorePanel {
                     predicates.push(`isnull(${col})`);
                 } else {
                     const type = this.state.columns.find(c => c.name === lock.dimension)?.type;
-                    predicates.push(`${col} == ${kustoLiteral(lock.value, type)}`);
+                    const lo = kustoLiteral(lock.value, type);
+                    if (lock.binSize) {
+                        // A binned lock scopes to the whole bucket: [lo, lo + size).
+                        // The size token (e.g. 1h / 100) adds directly to a datetime
+                        // or number, so `col >= lo and col < lo + size`.
+                        predicates.push(`${col} >= ${lo} and ${col} < ${lo} + ${lock.binSize}`);
+                    } else {
+                        predicates.push(`${col} == ${lo}`);
+                    }
                 }
             }
         }
         return predicates.length > 0 ? ` | where ${predicates.join(' and ')}` : '';
+    }
+
+    /** The summarize group expression for a selected key: a plain bracketed column
+     *  for a discrete dimension, or `bin(col, size)` for a binned continuous key.
+     *  bin() keeps the original column name, so result-column handling is unchanged. */
+    private groupExpr(dim: string): string {
+        const size = this.state?.binKeys[dim];
+        return size ? `bin(${bracket(dim)}, ${size})` : bracket(dim);
+    }
+
+    /** Picks a group key from the wheel. A discrete dimension groups as-is; a
+     *  binnable continuous column (time or numeric measure) gets an auto bin size
+     *  probed from the data's range in the current scope, then groups via bin().
+     *  Plain pick REPLACES the grouping; accumulate ADDS another key. */
+    private async applyGroupKey(column: string, accumulate: boolean): Promise<void> {
+        if (!this.state) { return; }
+        const col = this.state.columns.find(c => c.name === column);
+        const kind = col ? binKindForColumn(col) : null;
+
+        if (kind) {
+            // Probe min/max over the current drill scope to size the buckets.
+            const size = await this.computeBinSize(column, kind);
+            if (!this.state) { return; }
+            this.state.binKeys[column] = size;
+        } else {
+            delete this.state.binKeys[column];
+        }
+
+        if (accumulate) {
+            if (!this.state.selectedDimensions.includes(column)) {
+                this.state.selectedDimensions.push(column);
+            }
+        } else {
+            this.state.selectedDimensions = [column];
+            // Replacing the grouping drops any bin sizes for keys no longer selected.
+            for (const k of Object.keys(this.state.binKeys)) {
+                if (k !== column) { delete this.state.binKeys[k]; }
+            }
+        }
+        this.state.focusKey = null;
+        void this.runGrouping();
+    }
+
+    /** Probes the data range of a binnable column in the current scope and snaps a
+     *  bin size to a "nice" step targeting ~24-40 buckets. Time columns snap to a
+     *  timespan ladder (1m…365d); numeric columns to a 1-2-5×10ⁿ ladder. Falls back
+     *  to a sane default if the probe fails or the range is degenerate. */
+    private async computeBinSize(column: string, kind: 'time' | 'numeric'): Promise<string> {
+        const fallback = kind === 'time' ? '1h' : '1';
+        if (!this.state) { return fallback; }
+        const { source, cluster, database } = this.state;
+        const where = this.buildWhereClause();
+        const q = `${bracket(source)}${where} | summarize mn=min(${bracket(column)}), mx=max(${bracket(column)})`;
+        try {
+            const res = await this.server.runQuery(q, cluster, database, true, 1);
+            const row = res?.data?.tables?.[0]?.rows?.[0];
+            if (!row || row[0] === null || row[1] === null) { return fallback; }
+            if (kind === 'time') {
+                const lo = Date.parse(String(row[0]));
+                const hi = Date.parse(String(row[1]));
+                if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi <= lo) { return fallback; }
+                return pickTimeBin(hi - lo);
+            }
+            const lo = Number(row[0]);
+            const hi = Number(row[1]);
+            if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi <= lo) { return fallback; }
+            return pickNumericBin(hi - lo);
+        } catch {
+            return fallback;
+        }
     }
 
     /** The result-column header for an aggregated measure, e.g. "Avg of price".
@@ -589,8 +708,15 @@ export class ExplorePanel {
 
         const crumbPromises = this.state.drillChain.map(async (crumb, i) => {
             const where = this.buildWhereClause(i + 1);
+            // Group by the SAME expression that produced this bucket: a binned key
+            // must re-bin (bin(col,size)) so the scoped slice collapses to its one
+            // bucket. Plain bracket() here would re-split a binned range into every
+            // raw value and snapshot only the first — the wrong (tiny) aggregate.
             const by = crumb.fromDimensions.length > 0
-                ? ` by ${crumb.fromDimensions.map(bracket).join(', ')}` : '';
+                ? ` by ${crumb.fromDimensions.map(d => {
+                    const size = crumb.fromBinKeys[d];
+                    return size ? `bin(${bracket(d)}, ${size})` : bracket(d);
+                }).join(', ')}` : '';
             const query = `${bracket(source)}${where} | summarize ${aggs.join(', ')}${by}`;
             try {
                 const result = await this.server.runQuery(query, cluster, database, true, 1);
@@ -667,8 +793,8 @@ export class ExplorePanel {
         // so it stays cheap even for pathological columns.
         if (dims.length > 0) {
             const dcountExpr = dims.length === 1
-                ? `dcount(${bracket(dims[0]!)})`
-                : `dcount(strcat(${dims.map(d => `tostring(${bracket(d)})`).join(`, " ~|~ ", `)}))`;
+                ? `dcount(${this.groupExpr(dims[0]!)})`
+                : `dcount(strcat(${dims.map(d => `tostring(${this.groupExpr(d)})`).join(`, " ~|~ ", `)}))`;
             const cardQuery = `${bracket(source)}${whereClause} | summarize Groups = ${dcountExpr}`;
             let groupCount: number | null = null;
             try {
@@ -689,7 +815,7 @@ export class ExplorePanel {
 
         const aggs = [`${bracket('Count')}=count()`,
             ...measures.map(m => this.measureExpr(m))];
-        const byClause = dims.length > 0 ? ` by ${dims.map(bracket).join(', ')}` : '';
+        const byClause = dims.length > 0 ? ` by ${dims.map(d => this.groupExpr(d)).join(', ')}` : '';
         // Fetch up to the ceiling, ordered by the metric so any boundary truncation
         // keeps the most significant groups. The VIEW (cloud tier or table) is
         // chosen from the actual row count in valueAreaHtml; cloud tiers re-sort by
@@ -697,8 +823,13 @@ export class ExplorePanel {
         // changes. With no dimension it's a single bubble.
         const metricCol = measures.length > 0
             ? bracket(this.measureHeader(measures[0]!)) : bracket('Count');
+        // A single binned key reads as an axis: order by the bucket (chronological /
+        // ascending) so the cloud lays out as a continuous strip, not by magnitude.
+        const binnedAxis = dims.length === 1 && this.state.binKeys[dims[0]!];
         const orderClause = dims.length > 0
-            ? ` | top ${MAX_GROUP_ROWS} by ${metricCol} desc`
+            ? (binnedAxis
+                ? ` | top ${MAX_GROUP_ROWS} by ${metricCol} desc | order by ${this.groupExpr(dims[0]!)} asc`
+                : ` | top ${MAX_GROUP_ROWS} by ${metricCol} desc`)
             : ` | order by ${metricCol} desc`;
         const query = `${bracket(source)}${whereClause} | summarize ${aggs.join(', ')}${byClause}${orderClause}`;
 
@@ -896,7 +1027,7 @@ export class ExplorePanel {
         const rootBubbleClass = rootClickable ? 'bubble bubble-root clickable' : 'bubble bubble-root';
         const rootTitle = drilled
             ? 'Back to ' + state.source
-            : (hasGroups ? 'Clear grouping' : state.source);
+            : state.source;
         // The root carries the measure dial only while it owns the measure choice
         // (i.e. before drilling — once drilled, the deepest bubble owns it).
         const rootDial = drilled ? '' : this.dialAttrs(state, hasMeasure ? measureName : null);
@@ -991,9 +1122,19 @@ export class ExplorePanel {
         }
         const selected = state.selectedDimensions;
         const current = selected.length > 0 ? selected[selected.length - 1] : null;
-        const allDims = selectDimensionNubs(state.columns, state.columns.length)
+        // The wheel offers BOTH discrete dimensions and binnable continuous columns
+        // (time + numeric measures). The tool decides what to DO on pick from the
+        // column's known role: a dimension groups discretely; a binnable column
+        // auto-bins (see applyGroupKey). Binnable names are passed separately so the
+        // client can mark them in the wheel.
+        const binnable = selectBinnableColumns(state.columns)
             .map(c => c.name)
             .filter(n => !used.has(n));
+        const binnableSet = new Set(binnable);
+        const discrete = selectDimensionNubs(state.columns, state.columns.length)
+            .map(c => c.name)
+            .filter(n => !used.has(n) && !binnableSet.has(n));
+        const allDims = [...discrete, ...binnable];
         // Two lists drive the wheel depending on intent at open time:
         //  • REPLACEMENT (no Shift): every available field — the current one stays
         //    in so it can be changed in place; the pick replaces the whole grouping.
@@ -1004,9 +1145,7 @@ export class ExplorePanel {
         const accumulateOptions = allDims.filter(n => !selectedSet.has(n));
         if (replaceOptions.length === 0) { return ''; }
         const accumulating = selected.length > 0;
-        const tip = accumulating
-            ? 'Change the breakdown: click, scroll to a field (hold Shift to add another)'
-            : 'Break down by a field: click, then scroll to choose';
+        const tip = 'Break down';
         // A 2x2 cluster of tiny heat-tinted dots — a glyph for the bubble cloud
         // this control blooms (cold→hot across the grid).
         const dots = `<svg class="dim-facet-mark" viewBox="0 0 16 16" aria-hidden="true">`
@@ -1017,6 +1156,7 @@ export class ExplorePanel {
         return `<div class="dim-facet${accumulating ? ' is-accumulating' : ''}"`
             + ` data-dimfacet="${escapeAttr(JSON.stringify(replaceOptions))}"`
             + ` data-dimfacet-accumulate="${escapeAttr(JSON.stringify(accumulateOptions))}"`
+            + ` data-dimfacet-bins="${escapeAttr(JSON.stringify(binnable))}"`
             + (current ? ` data-dimfacet-current="${escapeAttr(current)}"` : '')
             + ` title="${escapeAttr(tip)}">`
             + `${dots}</div>`;
@@ -1029,11 +1169,32 @@ export class ExplorePanel {
      */
     private dimChipsHtml(state: ExploreState): string {
         if (state.selectedDimensions.length === 0) { return ''; }
-        const chips = state.selectedDimensions.map(d =>
-            `<span class="dim-chip" title="${escapeAttr(d)}">`
-            + `<span class="dim-chip-label">${escapeHtml(truncateLabel(d, 14))}</span>`
-            + `<button class="dim-chip-x" data-action="removeDimension" data-col="${escapeAttr(d)}"`
-            + ` title="Remove ${escapeAttr(d)}">\u00d7</button></span>`).join('');
+        const chips = state.selectedDimensions.map(d => {
+            const size = state.binKeys[d];
+            // A binned key shows a ruler glyph + its bucket size so it reads as a
+            // continuous axis, not a discrete dimension.
+            const label = size ? `${truncateLabel(d, 12)} \u00b7 ${size}` : truncateLabel(d, 14);
+            const cls = size ? 'dim-chip is-bin' : 'dim-chip';
+            // For a binned chip the label doubles as a bin-size dial: click it to
+            // bring up the same scroll-wheel the measure/aggregate dials use, scrub
+            // to a different bucket size, and the cloud re-bins. Options are the
+            // type's bin ladder (timespans for time, a 1-2-5 ladder for numbers).
+            let labelAttrs = '';
+            let labelTip = '';
+            if (size) {
+                const type = state.columns.find(c => c.name === d)?.type;
+                const options = binSizeOptions(type, size);
+                labelAttrs = ` data-dial="${escapeAttr(JSON.stringify(options))}"`
+                    + ` data-dial-current="${escapeAttr(size)}" data-dial-kind="bin"`
+                    + ` data-dial-col="${escapeAttr(d)}"`;
+                labelTip = ` title="${escapeAttr(`${d} — binned by ${size} (click to change)`)}"`;
+            }
+            const tip = size ? '' : ` title="${escapeAttr(d)}"`;
+            return `<span class="${cls}"${tip}>`
+                + `<span class="dim-chip-label${size ? ' is-dial' : ''}"${labelAttrs}${labelTip}>${escapeHtml(label)}</span>`
+                + `<button class="dim-chip-x" data-action="removeDimension" data-col="${escapeAttr(d)}"`
+                + ` title="Remove ${escapeAttr(d)}">\u00d7</button></span>`;
+        }).join('');
         return `<div class="dim-chips">${chips}</div>`;
     }
 
@@ -1094,6 +1255,16 @@ export class ExplorePanel {
      * incoming connector (with the "back to that cloud" label) is drawn by the spine
      * like every other node.
      */
+    /** The FULL display for a locked crumb's value(s): for a binned key the whole
+     *  bucket range (start – end), otherwise the plain value. Used for the hover
+     *  title so the complete window is available even though the bubble body shows
+     *  the compact start. */
+    private crumbFullDisplay(crumb: DrillCrumb): string {
+        return crumb.locks.map(l => l.binSize
+            ? binRangeFull(l.value, l.binSize, this.state?.columns.find(c => c.name === l.dimension)?.type)
+            : formatCell(l.value)).join(' · ');
+    }
+
     private activeBubbleHtml(state: ExploreState, crumb: DrillCrumb): string {
         const m = extractBubbleMetric(crumb.columns, crumb.row);
         const dial = this.dialAttrs(state, state.selectedMeasures[0] ?? null);
@@ -1106,8 +1277,8 @@ export class ExplorePanel {
         return `
             <div class="bubble-hub bubble-hub-active">
                 <div class="bubble bubble-locked bubble-active${bubbleExtra}"
-                    title="${escapeAttr(crumb.display)}">
-                    ${bubbleBody(m.label, m.valueText, m.aggGlyph, m.measureName, dial, aggDial)}
+                    title="${escapeAttr(this.crumbFullDisplay(crumb))}">
+                    ${bubbleBody(crumb.display, m.valueText, m.aggGlyph, m.measureName, dial, aggDial)}
                     ${facet}
                     ${records}
                 </div>
@@ -1137,12 +1308,12 @@ export class ExplorePanel {
         const action = isDeepest
             ? ` data-action="clearGrouping"`
             : ` data-action="popDrill" data-index="${index}"`;
-        const title = isDeepest ? 'Clear grouping' : 'Back to ' + crumb.display;
+        const title = isDeepest ? this.crumbFullDisplay(crumb) : 'Back to ' + this.crumbFullDisplay(crumb);
         return `
             <div class="locked-hub">
                 <div class="bubble bubble-locked clickable"${action}
                     title="${escapeAttr(title)}">
-                    ${bubbleBody(m.label, m.valueText, m.aggGlyph, m.measureName, dial, aggDial)}
+                    ${bubbleBody(crumb.display, m.valueText, m.aggGlyph, m.measureName, dial, aggDial)}
                     ${facet}
                 </div>
                 ${chips}
@@ -1230,10 +1401,28 @@ export class ExplorePanel {
         // stay the ORIGINAL result-row index (descend/focus index back into it).
         const order = result.rows.map((_r, i) => i);
         if (dimIdxs.length > 0) {
+            // Binned keys are a continuous axis: sort them by bucket value (numeric/
+            // chronological), not lexically, so the strip reads in order. Discrete
+            // dimensions keep the stable alphabetical layout.
+            const binnedIdx = new Set(dimIdxs.filter(i => state.binKeys[result.columns[i] ?? '']));
             order.sort((a, b) => {
                 for (const di of dimIdxs) {
-                    const av = formatCell(result.rows[a]![di]);
-                    const bv = formatCell(result.rows[b]![di]);
+                    const ra = result.rows[a]![di];
+                    const rb = result.rows[b]![di];
+                    if (binnedIdx.has(di)) {
+                        const na = Number(ra); const nb = Number(rb);
+                        if (Number.isFinite(na) && Number.isFinite(nb)) {
+                            if (na !== nb) { return na - nb; }
+                            continue;
+                        }
+                        const ta = Date.parse(String(ra)); const tb = Date.parse(String(rb));
+                        if (Number.isFinite(ta) && Number.isFinite(tb)) {
+                            if (ta !== tb) { return ta - tb; }
+                            continue;
+                        }
+                    }
+                    const av = formatCell(ra);
+                    const bv = formatCell(rb);
                     if (av < bv) { return -1; }
                     if (av > bv) { return 1; }
                 }
@@ -1245,7 +1434,13 @@ export class ExplorePanel {
             const row = result.rows[rowIdx]!;
             const count = Number(row[countIdx]) || 0;
             const label = dimIdxs.length > 0
-                ? dimIdxs.map(i => formatCell(row[i])).join(' · ')
+                ? dimIdxs.map(i => {
+                    const name = result.columns[i] ?? '';
+                    const size = state.binKeys[name];
+                    return size
+                        ? binRangeLabel(row[i], size, state.columns.find(c => c.name === name)?.type)
+                        : formatCell(row[i]);
+                }).join(' · ')
                 : 'All';
 
             // The three-line body: big value + "glyph column" caption (or "# rows").
@@ -1286,7 +1481,7 @@ export class ExplorePanel {
             // you DRAG it onto the drop zone below the stack (an intentional "link"
             // gesture); dropping elsewhere deselects it.
             if (state.focusKey === key) {
-                const inner = bubbleBody(label, valueText, aggGlyph, measureName);
+                const inner = bubbleBody(label, valueText, aggGlyph, measureName, '', '', false);
                 const focusStyle = `border-color:${heat};` + fullFill;
                 // The focus slot keeps the SAME footprint as the bubble it replaced
                 // (tier-sized) so peers don't shift and no gaps open in a dense
@@ -1296,7 +1491,7 @@ export class ExplorePanel {
                 return `
                     <div class="focus-slot" style="width:${slot}px;height:${slot}px;">
                         <div class="bubble-hub bubble-hub-focus">
-                            <div class="bubble bubble-focus" data-action="clearFocus" style="${focusStyle}" title="Drag down to drill in, or click to unfocus">${inner}</div>
+                            <div class="bubble bubble-focus" data-action="clearFocus" style="${focusStyle}" title="${escapeAttr(label)}">${inner}</div>
                         </div>
                     </div>`;
             }
@@ -1304,9 +1499,9 @@ export class ExplorePanel {
             const faded = state.focusKey !== null ? ' faded' : '';
 
             if (tier === 'full') {
-                const inner = bubbleBody(label, valueText, aggGlyph, measureName);
+                const inner = bubbleBody(label, valueText, aggGlyph, measureName, '', '', false);
                 return `
-                    <div class="bubble clickable${faded}" style="${heatStyle}" data-action="focusBubble" data-key="${key}" title="Click to focus, or drag down to drill in">
+                    <div class="bubble clickable${faded}" style="${heatStyle}" data-action="focusBubble" data-key="${key}" title="${escapeAttr(label)}">
                         ${inner}
                     </div>`;
             }
@@ -1356,7 +1551,7 @@ export class ExplorePanel {
      *  this is only ever rendered when there's no grouping (no cloud). */
     private recordsToggleHtml(state: ExploreState): string {
         const open = state.showRecords;
-        const title = open ? 'Hide rows' : 'Show rows';
+        const title = `Top ${RECORD_LIMIT} rows`;
         // Lives INSIDE the bubble, at the bottom beside the cloud-bloom dots — the
         // two "open this bubble" affordances: bloom an aggregate cloud, or reveal
         // the raw rows. Calm at rest, brightens on hub hover (like the dim facet).
@@ -1800,9 +1995,9 @@ export class ExplorePanel {
        screen as real bubbles (click one to pop back to that level). Locked
        bubbles match the root's purple — they ARE sub-roots of the lineage — and
        carry no heat color (heat belongs to the live cloud you're comparing). */
-    .drill-spine { display: flex; flex-direction: column; align-items: center; }
+    .drill-spine { display: flex; flex-direction: column; align-items: center; margin-bottom: 10px; }
     .spine-node { display: flex; justify-content: center; }
-    .spine-link { position: relative; width: 2px; height: 16px; background: color-mix(in srgb, var(--root-accent) 50%, transparent); }
+    .spine-link { position: relative; width: 2px; height: 26px; background: color-mix(in srgb, var(--root-accent) 50%, transparent); }
     /* The dimension(s) locked in to reach the bubble below, shown beside the
        connector line (the bubbles no longer carry this as a nub). */
     .spine-link-label {
@@ -1820,11 +2015,10 @@ export class ExplorePanel {
     .spine-link-label.clickable:hover, .spine-link-label.clickable:focus {
         color: var(--vscode-foreground); border-bottom-color: currentColor; outline: none;
     }
-    /* The connector after the root hub is the same visible length as the gap
-       between locked bubbles (locked-hub margin-bottom 10 + spine-link 16 = 26), so
-       every bubble in the spine is evenly spaced. No negative margin — the root hub
-       no longer reserves space below its bubble. */
-    .spine-link-root { height: 26px; }
+    /* Every spine connector is a uniform 26px line spanning the whole gap between
+       bubbles, so its centered label sits exactly midway in every gap (no per-hub
+       margin to push it off-center). The trailing gap to the cloud lives on the
+       .drill-spine margin-bottom. */
     .bubble-locked {
         position: relative;
         width: 180px; height: 180px;
@@ -1833,12 +2027,10 @@ export class ExplorePanel {
         background: color-mix(in srgb, var(--root-accent) 14%, var(--vscode-editorWidget-background));
     }
     .bubble-locked:hover { box-shadow: 0 1px 6px rgba(0, 0, 0, 0.35); }
-    /* A locked spine node: the 120px bubble with its category nubs on the rim. The
-       bubble sits ABOVE its nubs (z-index) so each nub is tucked behind it (only
-       its outer half peeks out), matching the root/cloud bubbles. The bottom margin
-       (10px) + the following spine-link (16px) = a 26px gap to the next bubble,
-       matching the root→first gap so every bubble is evenly spaced. */
-    .locked-hub { position: relative; width: 180px; height: 180px; margin-bottom: 10px; }
+    /* A locked spine node: the 180px bubble. Spacing to the next bubble lives
+       entirely in the following 26px spine-link (no margin here), so every gap is
+       uniform and the connector label centers in it. */
+    .locked-hub { position: relative; width: 180px; height: 180px; }
     .locked-hub .bubble-locked { position: relative; z-index: 1; }
     .locked-cat { cursor: default; }
     /* Locked bubbles reveal their interactive nubs on hover, like the big hubs. */
@@ -1846,6 +2038,9 @@ export class ExplorePanel {
         opacity: 1; pointer-events: auto; outline: none;
     }
     .bubble-label { font-size: 0.85em; opacity: 0.85; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    /* Caption-less cloud bubbles let the title wrap to two lines for long
+       bin-range / dimension labels (the agg/column line is omitted there). */
+    .bubble-label-2 { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.15; }
     .bubble-primary { display: flex; flex-direction: column; align-items: center; line-height: 1.1; }
     .bubble-primary-num { font-weight: 700; font-size: 1.7em; font-variant-numeric: tabular-nums; }
     .bubble-primary-cap { font-size: 0.72em; opacity: 0.7; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1929,6 +2124,11 @@ export class ExplorePanel {
         text-overflow: ellipsis; padding: 0 10px; opacity: 0.65; transition: opacity 0.08s, transform 0.08s;
     }
     .dim-dial-item.current { color: var(--role-dimension); opacity: 1; font-weight: 600; transform: scale(1.1); }
+    /* A binnable (continuous) field is marked with a leading ruler glyph + a tint
+       so it reads as "this one buckets into ranges" vs a discrete dimension. */
+    .dim-dial-item.dim-dial-bin { color: var(--role-time); }
+    .dim-dial-item.dim-dial-bin::before { content: '\\1F4CF\\00a0'; opacity: 0.8; }
+    .dim-dial-item.dim-dial-bin.current { color: var(--role-time); }
     .dim-dial-center {
         position: absolute; left: 10px; right: 10px; top: 50%; height: 26px; transform: translateY(-50%);
         border-top: 1px solid var(--role-dimension); border-bottom: 1px solid var(--role-dimension);
@@ -1975,6 +2175,16 @@ export class ExplorePanel {
         white-space: nowrap; user-select: none;
     }
     .dim-chip-label { overflow: hidden; text-overflow: ellipsis; max-width: 120px; }
+    /* A binned key chip is tinted with the time role and prefixed with a ruler so
+       it reads as a continuous (bucketed) axis vs a discrete dimension. */
+    .dim-chip.is-bin {
+        background: color-mix(in srgb, var(--role-time) 18%, var(--vscode-editorWidget-background));
+        border-color: color-mix(in srgb, var(--role-time) 50%, transparent);
+    }
+    .dim-chip.is-bin .dim-chip-label::before { content: '\\1F4CF\\00a0'; opacity: 0.8; }
+    /* The binned chip's label is a bin-size dial: click it to scrub bucket sizes. */
+    .dim-chip-label.is-dial { cursor: pointer; border-radius: 6px; padding: 0 2px; }
+    .dim-chip-label.is-dial:hover { background: color-mix(in srgb, var(--role-time) 28%, transparent); }
     .dim-chip-x {
         display: inline-flex; align-items: center; justify-content: center;
         width: 14px; height: 14px; padding: 0; border: none; border-radius: 50%;
@@ -2225,11 +2435,15 @@ export class ExplorePanel {
         }
     }
     // Posts the chosen option back to the extension (shared by the capsule drag,
-    // the open-wheel scrub, and a plain commit). kind = 'aggregate' | 'measure'.
-    function commitDialChoice(kind, chosen) {
+    // the open-wheel scrub, and a plain commit). kind = 'aggregate' | 'measure' | 'bin'.
+    function commitDialChoice(kind, chosen, el) {
         if (kind === 'aggregate') {
             // Dial labels are Sum/Avg/Min/Max → lowercase to the agg kind.
             vscodeApi.postMessage({ command: 'setAggregate', agg: chosen.toLowerCase() });
+        } else if (kind === 'bin') {
+            // The binned chip's dial: change just the bucket size of its column.
+            var col = el && el.getAttribute ? el.getAttribute('data-dial-col') : null;
+            if (col) { vscodeApi.postMessage({ command: 'setBinSize', column: col, size: chosen }); }
         } else {
             // "rows" → empty column (count); a real column → that measure.
             vscodeApi.postMessage({ command: 'setMeasure', column: chosen === 'rows' ? '' : chosen });
@@ -2316,7 +2530,7 @@ export class ExplorePanel {
             if (dialState.popup) { dialState.popup.remove(); }
             if (wasFloating) { openWheel = null; }
             suppressClick = true;
-            commitDialChoice(dialState.kind, chosen);
+            commitDialChoice(dialState.kind, chosen, dialState.el);
         } else if (wasFloating) {
             // A click on the open wheel = select. Pick whichever item was clicked
             // (the centered one sits under the cursor; clicking another picks it).
@@ -2331,7 +2545,7 @@ export class ExplorePanel {
             const chosen = dialState.options[sel];
             suppressClick = true;
             closeDialWheel();
-            commitDialChoice(dialState.kind, chosen);
+            commitDialChoice(dialState.kind, chosen, dialState.el);
         } else {
             // No drag from a capsule = a click: bring up the draggable wheel.
             suppressClick = true;
@@ -2372,9 +2586,10 @@ export class ExplorePanel {
         p.className = 'dim-dial-popup is-open';
         const list = document.createElement('div');
         list.className = 'dim-dial-list';
+        const bins = s.bins || [];
         s.options.forEach(function(opt) {
             const item = document.createElement('div');
-            item.className = 'dim-dial-item';
+            item.className = 'dim-dial-item' + (bins.indexOf(opt) >= 0 ? ' dim-dial-bin' : '');
             item.textContent = opt;
             list.appendChild(item);
         });
@@ -2429,6 +2644,8 @@ export class ExplorePanel {
         let options;
         try { options = JSON.parse(facetEl.getAttribute(attr)); } catch (_) { return; }
         if (!options || options.length === 0) { return; }
+        let bins;
+        try { bins = JSON.parse(facetEl.getAttribute('data-dimfacet-bins')) || []; } catch (_) { bins = []; }
         const rect = facetEl.getBoundingClientRect();
         // Fall back to the facet center if no cursor was supplied (e.g. keyboard).
         const cy = (typeof cursorY === 'number') ? cursorY : (rect.top + rect.height / 2);
@@ -2437,7 +2654,7 @@ export class ExplorePanel {
         const current = accumulate ? null : facetEl.getAttribute('data-dimfacet-current');
         let startIndex = current ? options.indexOf(current) : 0;
         if (startIndex < 0) { startIndex = 0; }
-        const s = { facetEl: facetEl, options: options, index: startIndex, rect: rect, cursorY: cy, accumulate: !!accumulate, popup: null, list: null };
+        const s = { facetEl: facetEl, options: options, bins: bins, index: startIndex, rect: rect, cursorY: cy, accumulate: !!accumulate, popup: null, list: null };
         buildDimPopup(s);
         updateDimWheel(s);
         // PRIMARY: mouse-wheel scroll moves the wheel; it does NOT auto-apply.
@@ -2613,10 +2830,15 @@ function bracket(name: string): string {
  * datetime — those carry the 'time' role and aren't offered as drill nubs).
  */
 function kustoLiteral(value: unknown, type?: string): string {
+    const t = (type ?? '').toLowerCase();
+    // A binned datetime/date key locks as a range bound, so it must emit a real
+    // datetime literal (not a quoted string) for `col >= lo and col < lo + size`.
+    if (/datetime|date/.test(t) && !(typeof value === 'number')) {
+        return `todatetime('${String(value).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}')`;
+    }
     if (typeof value === 'number') { return Number.isFinite(value) ? String(value) : '0'; }
     if (typeof value === 'boolean') { return value ? 'true' : 'false'; }
     const s = String(value);
-    const t = (type ?? '').toLowerCase();
     if (/(int|long|real|double|decimal)/.test(t)) {
         const n = Number(s);
         if (Number.isFinite(n)) { return String(n); }
@@ -2624,6 +2846,155 @@ function kustoLiteral(value: unknown, type?: string): string {
     if (/bool/.test(t) && (s === 'true' || s === 'false')) { return s; }
     return `'${s.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
 }
+
+/** Timespan bin ladder (token + milliseconds), smallest to largest. */
+const TIME_BIN_LADDER: Array<{ token: string; ms: number }> = [
+    { token: '1m', ms: 60_000 },
+    { token: '5m', ms: 5 * 60_000 },
+    { token: '15m', ms: 15 * 60_000 },
+    { token: '1h', ms: 3_600_000 },
+    { token: '6h', ms: 6 * 3_600_000 },
+    { token: '1d', ms: 86_400_000 },
+    { token: '7d', ms: 7 * 86_400_000 },
+    { token: '30d', ms: 30 * 86_400_000 },
+    { token: '90d', ms: 90 * 86_400_000 },
+    { token: '365d', ms: 365 * 86_400_000 },
+];
+
+/** Picks a timespan bin token so a range spans ~24-40 buckets (the smallest
+ *  ladder step whose bucket count fits), defaulting to the coarsest on overflow. */
+function pickTimeBin(rangeMs: number): string {
+    for (const step of TIME_BIN_LADDER) {
+        if (rangeMs / step.ms <= 40) { return step.token; }
+    }
+    return TIME_BIN_LADDER[TIME_BIN_LADDER.length - 1]!.token;
+}
+
+/** Builds the bin-size options offered by a binned chip's dial. Time columns get
+ *  the timespan ladder (1m…365d); numeric columns get a 1-2-5×10ⁿ ladder spanning
+ *  a couple of magnitudes around the current size. The current size is always
+ *  included so the wheel can open centered on it. Returned ascending. */
+function binSizeOptions(type: string | undefined, current: string): string[] {
+    const t = (type ?? '').toLowerCase();
+    if (/datetime|date|timespan|time/.test(t)) {
+        return TIME_BIN_LADDER.map(s => s.token);
+    }
+    const opts: string[] = [];
+    const cur = parseFloat(current);
+    if (Number.isFinite(cur) && cur > 0) {
+        const baseExp = Math.floor(Math.log10(cur));
+        for (let e = baseExp - 2; e <= baseExp + 2; e++) {
+            const mag = Math.pow(10, e);
+            for (const m of [1, 2, 5]) {
+                const v = m * mag;
+                opts.push(Number.isInteger(v) ? String(v) : String(parseFloat(v.toPrecision(6))));
+            }
+        }
+    }
+    if (!opts.includes(current)) { opts.push(current); }
+    return Array.from(new Set(opts)).sort((a, b) => parseFloat(a) - parseFloat(b));
+}
+
+/** Picks a numeric bin size snapped to a 1-2-5×10ⁿ ladder, targeting ~30 buckets. */
+function pickNumericBin(range: number): string {
+    const raw = range / 30;
+    if (!(raw > 0)) { return '1'; }
+    const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+    const norm = raw / mag;
+    const step = norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10;
+    const size = step * mag;
+    // Keep integer sizes integer; otherwise trim float noise.
+    return Number.isInteger(size) ? String(size) : String(parseFloat(size.toPrecision(6)));
+}
+
+/** Renders a binned bucket's lock value as a compact label showing just the
+ *  bucket START (e.g. "2026-06-03" for a 1d time bin, "100" for a numeric bin).
+ *  The start alone identifies the bucket once they're laid out in order, and the
+ *  bin size is shown separately; the full range lives in the hover title. */
+function binRangeLabel(value: unknown, size: string, type?: string): string {
+    const t = (type ?? '').toLowerCase();
+    if (/datetime|date/.test(t)) {
+        return compactDateTime(value, size);
+    }
+    const lo = Number(value);
+    if (Number.isFinite(lo)) {
+        return formatCell(lo);
+    }
+    return formatCell(value);
+}
+
+/**
+ * Formats a datetime as compactly as the data allows so it fits a bubble label.
+ * Parses the ISO string by TEXT (never via `new Date()`) so there is no timezone
+ * interpretation: the output is a faithful truncation of the stored value and
+ * always agrees with the raw table. When a bin size token is given, the bucket
+ * WIDTH sets the precision (1d → date only, 1h → to the hour, minutes → to the
+ * minute). With no size, trailing zero components are trimmed. Falls back to
+ * formatCell for anything that isn't an ISO-ish datetime string.
+ */
+function compactDateTime(value: unknown, sizeToken?: string): string {
+    const p = parseIsoParts(value);
+    if (!p) { return formatCell(value); }
+    const date = `${p.y}-${p.mo}-${p.d}`;
+    const sm = sizeToken ? /^(\d+)(m|h|d)$/.exec(sizeToken) : null;
+    if (sm) {
+        // Bin width drives precision: never show finer than the bucket's unit.
+        const unit = sm[2];
+        if (unit === 'd') { return date; }
+        if (unit === 'h') { return `${date} ${p.h}:00`; }
+        return `${date} ${p.h}:${p.mi}`; // minutes
+    }
+    // No bin context: drop trailing zero components.
+    if (p.h === '00' && p.mi === '00' && p.s === '00' && p.ms === 0) { return date; }
+    if (p.s === '00' && p.ms === 0) { return `${date} ${p.h}:${p.mi}`; }
+    if (p.ms === 0) { return `${date} ${p.h}:${p.mi}:${p.s}`; }
+    return `${date} ${p.h}:${p.mi}:${p.s}.${String(p.ms).padStart(3, '0')}`;
+}
+
+/** The FULL bucket range for a binned datetime, "start – end" (end = start +
+ *  size), each formatted at the bin's precision. Used for the locked bubble's
+ *  hover title so the complete window is available even though the body shows
+ *  just the compact start. End is computed in UTC from the parsed parts (no local
+ *  timezone drift). Falls back to the compact start when it can't be widened. */
+function binRangeFull(value: unknown, size: string, type?: string): string {
+    const t = (type ?? '').toLowerCase();
+    if (/datetime|date/.test(t)) {
+        const start = compactDateTime(value, size);
+        const p = parseIsoParts(value);
+        const ms = timespanToMs(size);
+        if (!p || ms === null) { return start; }
+        const startMs = Date.UTC(Number(p.y), Number(p.mo) - 1, Number(p.d), Number(p.h), Number(p.mi), Number(p.s), p.ms);
+        const endIso = new Date(startMs + ms).toISOString();
+        return `${start} – ${compactDateTime(endIso, size)}`;
+    }
+    const lo = Number(value);
+    const step = Number(size);
+    if (Number.isFinite(lo) && Number.isFinite(step)) {
+        return `${formatCell(lo)}–${formatCell(lo + step)}`;
+    }
+    return formatCell(value);
+}
+
+/** Splits an ISO-ish datetime string into zero-padded text parts without any
+ *  timezone interpretation. Returns null for non-datetime input. */
+function parseIsoParts(value: unknown):
+    { y: string; mo: string; d: string; h: string; mi: string; s: string; ms: number } | null {
+    const m = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?/.exec(String(value));
+    if (!m) { return null; }
+    // Fractional seconds: take the first 3 digits as milliseconds (0 when absent).
+    const frac = m[7] ? Number((m[7] + '000').slice(0, 3)) : 0;
+    return { y: m[1]!, mo: m[2]!, d: m[3]!, h: m[4]!, mi: m[5]!, s: m[6]!, ms: frac };
+}
+
+/** Parses a simple Kusto timespan token (e.g. 1m/6h/30d) to milliseconds. */
+function timespanToMs(token: string): number | null {
+    const m = /^(\d+)(m|h|d)$/.exec(token);
+    if (!m) { return null; }
+    const n = Number(m[1]);
+    const unit = m[2] === 'm' ? 60_000 : m[2] === 'h' ? 3_600_000 : 86_400_000;
+    return n * unit;
+}
+
 
 /**
  * Parses a measure result-column header like "Sum of Revenue" into its
@@ -2651,16 +3022,25 @@ function truncateLabel(text: string, max: number): string {
  * Every bubble (root, cloud, locked, active) renders the same three lines so the
  * measure shown is always self-describing. Escapes all of its inputs.
  */
-function bubbleBody(label: string, valueText: string, aggGlyph: string, measureName: string, dialAttr = '', aggDialAttr = ''): string {
+function bubbleBody(label: string, valueText: string, aggGlyph: string, measureName: string, dialAttr = '', aggDialAttr = '', showCaption = true): string {
     // The measure dial lives on the caption's NAME span; the aggregate dial lives
     // on the GLYPH span. Both are small, precise ns-resize handles (the rest of the
     // bubble surface is free for click/drag). glyph = HOW you aggregate, name = WHAT.
-    return `<div class="bubble-label">${escapeHtml(label)}</div>`
+    // Cloud aggregate bubbles hide the caption (the agg/column is fixed and already
+    // shown on their parent hub) and instead let the title wrap to two lines, giving
+    // long bin-range / dimension labels more room.
+    const labelHtml = showCaption
+        ? `<div class="bubble-label">${escapeHtml(label)}</div>`
+        : `<div class="bubble-label bubble-label-2">${escapeHtml(label)}</div>`;
+    const cap = showCaption
+        ? `<div class="bubble-cap" title="${escapeAttr(aggGlyph + ' ' + measureName)}">`
+            + `<span class="bubble-agg"${aggDialAttr}><span class="agg-glyph">${escapeHtml(aggGlyph)}</span>`
+            + `<span class="agg-label">${escapeHtml(aggLabelFromGlyph(aggGlyph) || aggGlyph)}</span></span>`
+            + `<span class="bubble-cap-name"${dialAttr}>${escapeHtml(truncateLabel(measureName, MAX_MEASURE_NAME_LEN))}</span></div>`
+        : '';
+    return labelHtml
         + `<div class="bubble-primary"><span class="bubble-primary-num">${escapeHtml(valueText)}</span></div>`
-        + `<div class="bubble-cap" title="${escapeAttr(aggGlyph + ' ' + measureName)}">`
-        + `<span class="bubble-agg"${aggDialAttr}><span class="agg-glyph">${escapeHtml(aggGlyph)}</span>`
-        + `<span class="agg-label">${escapeHtml(aggLabelFromGlyph(aggGlyph) || aggGlyph)}</span></span>`
-        + `<span class="bubble-cap-name"${dialAttr}>${escapeHtml(truncateLabel(measureName, MAX_MEASURE_NAME_LEN))}</span></div>`;
+        + cap;
 }
 
 /**
