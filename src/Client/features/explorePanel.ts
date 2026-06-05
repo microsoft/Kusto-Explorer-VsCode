@@ -59,6 +59,22 @@ interface DrillCrumb {
      *  re-rendered as a bubble identical to how it looked when picked. */
     columns: string[];
     row: unknown[];
+    /** Snapshot of the ENTIRE sibling cloud this bubble was chosen from, captured
+     *  at descend time so the prior level can be left on screen as a receded ghost
+     *  layer (the depth stack) instead of being discarded. Optional: crumbs created
+     *  before this snapshotting existed simply render no ghost. */
+    cloud?: CloudSnapshot;
+}
+
+/** Everything needed to re-render a past level's cloud as a static ghost layer:
+ *  the grouped result plus the grouping/measure context it was rendered under.
+ *  Column classifications (types) come from the live state, which is stable. */
+interface CloudSnapshot {
+    result: { columns: string[]; rows: unknown[][] };
+    selectedDimensions: string[];
+    binKeys: Record<string, string>;
+    selectedMeasures: string[];
+    selectedAggregate: AggKind;
 }
 
 /** A category of nubs (dimension / measure) that blooms its members on hover. */
@@ -214,6 +230,11 @@ export class ExplorePanel {
     private ready = false;
     /** Monotonic token so stale async query results are ignored. */
     private renderToken = 0;
+    /** When set, the NEXT render tells the webview to play a depth-stack transition:
+     *  'drill' = layers step back (we descended); 'back' = layers step forward (we
+     *  reopened a prior cloud). Consumed (cleared) by render(). Post-drop only — the
+     *  drag itself is not animated. */
+    private pendingTransition: 'drill' | 'back' | null = null;
 
     constructor(
         private readonly context: vscode.ExtensionContext,
@@ -406,6 +427,21 @@ export class ExplorePanel {
                     this.popToRoot();
                 }
                 break;
+            case 'goBack':
+                if (this.state && this.state.drillChain.length > 0) {
+                    // "Put it back": the current working bubble is dragged up-left to
+                    // rejoin the prior faded cloud. That's reopening the cloud the
+                    // deepest bubble was picked from. Falls back to popToRoot if that
+                    // crumb has no remembered grouping (shouldn't normally happen).
+                    const last = this.state.drillChain.length - 1;
+                    const crumb = this.state.drillChain[last];
+                    if (crumb && crumb.fromDimensions.length > 0) {
+                        this.reopenCloud(last);
+                    } else {
+                        this.popToRoot();
+                    }
+                }
+                break;
             case 'clearGrouping':
                 if (this.state) {
                     // Clicking the bubble that owns the open cloud undoes its
@@ -533,6 +569,18 @@ export class ExplorePanel {
                 fromBinKeys: { ...this.state.binKeys },
                 display,
                 columns: [...result!.columns], row: [...row],
+                // Snapshot the whole sibling cloud so this level can stay on screen
+                // as a receded ghost layer (the depth stack) rather than vanishing.
+                cloud: {
+                    result: {
+                        columns: [...result!.columns],
+                        rows: result!.rows.map(r => [...r]),
+                    },
+                    selectedDimensions: [...this.state.selectedDimensions],
+                    binKeys: { ...this.state.binKeys },
+                    selectedMeasures: [...this.state.selectedMeasures],
+                    selectedAggregate: this.state.selectedAggregate,
+                },
             });
         }
 
@@ -541,6 +589,9 @@ export class ExplorePanel {
         this.state.focusKey = null;
         this.state.selectionKeys = [];
         this.state.selectionAnchor = null;
+        // Post-drop: the cloud we just left recedes into the depth stack — tell the
+        // next render to play the "layers step back" transition.
+        this.pendingTransition = 'drill';
         void this.runGrouping();
     }
 
@@ -628,11 +679,36 @@ export class ExplorePanel {
         if (!this.state) { return; }
         const crumb = this.state.drillChain[index];
         if (!crumb || crumb.fromDimensions.length === 0) { return; }
+        const snap = crumb.cloud;
         this.state.drillChain = this.state.drillChain.slice(0, index);
         this.state.selectedDimensions = [...crumb.fromDimensions];
         this.state.binKeys = { ...crumb.fromBinKeys };
         this.state.focusKey = null;
+        this.state.selectionKeys = [];
+        this.state.selectionAnchor = null;
         this.closeRecords();
+        if (snap) {
+            // The ghost cloud is already LIVE — refreshGhostClouds keeps its rows in
+            // sync with the current measure/aggregate, so it's the very same data the
+            // live cloud would produce. Bringing it forward therefore just reuses it
+            // directly: restore the result + grouping context and render. No clear,
+            // no requery, no loading flash — it simply moves forward into place.
+            this.state.selectedMeasures = [...snap.selectedMeasures];
+            this.state.selectedAggregate = snap.selectedAggregate;
+            this.state.result = {
+                columns: [...snap.result.columns],
+                rows: snap.result.rows.map(r => [...r]),
+            };
+            this.state.tooManyGroups = null;
+            this.state.loading = false;
+            this.state.error = undefined;
+            // Post-drop: the prior cloud comes forward out of the depth stack — tell
+            // the render to play the "layers step forward" transition.
+            this.pendingTransition = 'back';
+            this.render();
+            return;
+        }
+        // Legacy crumb with no captured cloud (pre-snapshot): fall back to a requery.
         void this.runGrouping();
     }
 
@@ -843,7 +919,50 @@ export class ExplorePanel {
                 /* keep the previous snapshot if the refresh query fails */
             }
         });
-        await Promise.all([rootPromise, ...crumbPromises]);
+        await Promise.all([rootPromise, ...crumbPromises, this.refreshGhostClouds(token)]);
+    }
+
+    /**
+     * Re-queries each past level's FULL sibling cloud under the CURRENT measure and
+     * aggregate, so the receded ghost layers stay live (they update when you change
+     * the measure/aggregate, exactly like the live cloud and the locked bubbles do
+     * — they're the same rendering, just pushed back into depth). Mirrors the cloud
+     * query runGrouping builds: scope to that level's ancestors, group by the keys
+     * the level was opened with, order by the active metric. Runs in parallel with
+     * the snapshot refresh. A failed level keeps its previous snapshot.
+     */
+    private async refreshGhostClouds(token: number): Promise<void> {
+        if (!this.state) { return; }
+        const { source, cluster, database } = this.state;
+        const measures = [...this.state.selectedMeasures];
+        const aggExprs = [`${bracket('Count')}=count()`, ...measures.map(m => this.measureExpr(m))];
+        const metricCol = measures.length > 0
+            ? bracket(this.measureHeader(measures[0]!)) : bracket('Count');
+        const tasks = this.state.drillChain.map(async (crumb, i) => {
+            if (!crumb.cloud || crumb.fromDimensions.length === 0) { return; }
+            const where = this.buildWhereClause(i); // scope to ancestors (locks 0..i-1)
+            const byExprs = crumb.fromDimensions.map(d => {
+                const size = crumb.fromBinKeys[d];
+                return size ? `bin(${bracket(d)}, ${size})` : bracket(d);
+            });
+            const binnedAxis = crumb.fromDimensions.length === 1
+                && !!crumb.fromBinKeys[crumb.fromDimensions[0]!];
+            const order = binnedAxis
+                ? ` | top ${MAX_GROUP_ROWS} by ${metricCol} desc | order by ${byExprs[0]} asc`
+                : ` | top ${MAX_GROUP_ROWS} by ${metricCol} desc`;
+            const query = `${bracket(source)}${where} | summarize ${aggExprs.join(', ')} by ${byExprs.join(', ')}${order}`;
+            try {
+                const result = await this.server.runQuery(query, cluster, database, true, MAX_GROUP_ROWS);
+                if (token !== this.renderToken || !this.state) { return; }
+                const table = result?.data?.tables?.[0];
+                if (table && crumb.cloud) {
+                    crumb.cloud.result = { columns: table.columns.map(c => c.name), rows: table.rows };
+                    crumb.cloud.selectedMeasures = measures;
+                    crumb.cloud.selectedAggregate = this.state.selectedAggregate;
+                }
+            } catch { /* keep the previous cloud snapshot on failure */ }
+        });
+        await Promise.all(tasks);
     }
 
     /**
@@ -1102,7 +1221,17 @@ export class ExplorePanel {
 
     private render(): void {
         if (!this.panel || !this.ready || !this.state) { return; }
-        this.panel.webview.postMessage({ command: 'render', html: this.bodyHtml(this.state) });
+        // The depth-stack transition plays on the SETTLED (non-loading) render only.
+        // A drill is loading-render → query → settled-render; playing on the loading
+        // render lets the settled DOM swap interrupt it mid-flight (the chunky/jittery
+        // recede). So while loading we KEEP the flag — ghostLayersHtml parks the
+        // ghosts at their FROM position — and only the settled render emits the
+        // transition and animates once. A put-back is a single settled render.
+        const settled = !this.state.loading;
+        const transition = settled ? this.pendingTransition : null;
+        const html = this.bodyHtml(this.state);
+        if (settled) { this.pendingTransition = null; }
+        this.panel.webview.postMessage({ command: 'render', html, transition });
     }
 
     private bodyHtml(state: ExploreState): string {
@@ -1173,16 +1302,28 @@ export class ExplorePanel {
         // dimension grouping exists), not only when one is focused — CSS keeps it
         // hidden until a drag is in flight. This lets you press-and-drag a bubble
         // directly without a focus click first.
+        // Two-plane layout (Stage 0 of the depth redesign):
+        //  • SCENE plane — the clouds/spine/value-area. This is the single unit that
+        //    will later translate/scale/recede into depth as you drill. Wrapping it
+        //    now (even though it doesn't move yet) gives every later stage one
+        //    transform handle (.scene) and one perspective room (.scene-plane).
+        //  • GLASS plane — fixed to the viewport, OUTSIDE the scene so a transform on
+        //    .scene never drags it along. Empty for now; Stage 1 lands the bottom
+        //    path strip (and eventually the forward controls) here. Kept as a sibling
+        //    of the scene, not a child, precisely so it stays put while the scene moves.
         return `
-            <div class="card">
-                ${this.drillSpineHtml(state, rootHub)}
-                ${hasGroups && !isActiveStacked(state)
-                    ? `<div class="drop-zone" data-dropzone="1"><span class="drop-zone-label">Drop here to drill in</span></div>`
-                    : ''}
-                ${hasGroups && !isActiveStacked(state) ? `<div class="value-area">${this.valueAreaHtml(state)}</div>` : ''}
-                ${!hasGroups ? this.recordsPanelHtml(state) : ''}
-                ${state.error ? `<div class="error">${escapeHtml(state.error)}</div>` : ''}
-            </div>`;
+            <div class="scene-plane">
+                <div class="scene${drilled ? ' drilled' : ''}">
+                    ${this.ghostLayersHtml(state)}
+                    <div class="card"${this.cardFromAttr(state)}>
+                        ${this.drillSpineHtml(state, rootHub)}
+                        ${hasGroups && !isActiveStacked(state) ? `<div class="value-area">${this.valueAreaHtml(state)}</div>` : ''}
+                        ${!hasGroups ? this.recordsPanelHtml(state) : ''}
+                        ${state.error ? `<div class="error">${escapeHtml(state.error)}</div>` : ''}
+                    </div>
+                </div>
+            </div>
+            <div class="glass-plane">${this.pathStripHtml(state)}</div>`;
     }
 
     /**
@@ -1323,32 +1464,48 @@ export class ExplorePanel {
      * view passes none and just shows the locked bubbles.
      */
     private drillSpineHtml(state: ExploreState, rootHub?: string): string {
-        if (!rootHub && state.drillChain.length === 0) { return ''; }
-        const nodes: string[] = [];
-        if (rootHub) { nodes.push(`<div class="spine-node">${rootHub}</div>`); }
-        const active = isActiveStacked(state);
-        state.drillChain.forEach((crumb, i) => {
-            const isActiveNode = active && i === state.drillChain.length - 1;
-            // A connector precedes every node that has a predecessor — including the
-            // active (deepest, drag-stacked) node, now that hubs are collapsed to fit
-            // their bubble and reserve no space to span. Each connector carries the
-            // dimension(s) locked in to reach the bubble it leads into, which doubles
-            // as the "back to that cloud" button.
-            if (nodes.length > 0) {
-                const linkClass = (rootHub && i === 0) ? 'spine-link spine-link-root' : 'spine-link';
-                nodes.push(`<div class="${linkClass}">${this.linkLabelHtml(crumb, i)}</div>`);
-            }
-            // When stacked with no grouping yet (drag gesture), the DEEPEST node is
-            // the "active" bubble: a full interactive hub like the root, awaiting a
-            // grouping choice. Shallower nodes stay compact and static.
-            if (isActiveNode) {
-                nodes.push(`<div class="spine-node">${this.activeBubbleHtml(state, crumb)}</div>`);
-            } else {
-                const isDeepest = i === state.drillChain.length - 1;
-                nodes.push(`<div class="spine-node">${this.lockedBubbleHtml(state, crumb, i, isDeepest)}</div>`);
-            }
-        });
-        return `<div class="drill-spine">${nodes.join('')}</div>`;
+        const chain = state.drillChain;
+        // Not drilled: the live hub is the root (ungrouped or grouping the source).
+        if (chain.length === 0) {
+            return rootHub ? `<div class="drill-spine"><div class="spine-node">${rootHub}</div></div>` : '';
+        }
+        // Drilled: only the CURRENT (deepest) hub stays live and forward. The
+        // ancestors — including the root — now recede with their clouds as ghost
+        // layers (ghostLayersHtml), and the full provenance lives on the bottom
+        // path strip, so the vertical spine of locked bubbles + connector lines is
+        // gone. We render just the one hub you're working on.
+        const i = chain.length - 1;
+        const crumb = chain[i]!;
+        const node = isActiveStacked(state)
+            ? this.activeBubbleHtml(state, crumb)
+            : this.lockedBubbleHtml(state, crumb, i, true);
+        return `<div class="drill-spine"><div class="spine-node">${node}</div></div>`;
+    }
+
+    /**
+     * The fixed bottom "path strip" (glass plane): the full chain of drill choices,
+     * one segment per locked level — the dimension column drilled and the value (or
+     * range/set) chosen — oldest at the left, newest at the right, after the source
+     * origin. Each segment re-opens that level's sibling cloud (reopenCloud), so the
+     * strip is both the always-legible record of the query AND the portal back to any
+     * decision point. It lives on the glass plane and never recedes with the scene.
+     * Returns '' until at least one level is locked.
+     */
+    private pathStripHtml(state: ExploreState): string {
+        if (state.drillChain.length === 0) { return ''; }
+        const steps = state.drillChain.map((crumb, i) => {
+            const dim = crumb.fromDimensions.join(' · ');
+            const full = this.crumbFullDisplay(crumb);
+            const tip = dim ? `${dim} = ${full} — reopen these groups` : full;
+            const dimSpan = dim ? `<span class="path-step-dim">${escapeHtml(dim)}</span>` : '';
+            return `<button class="path-step" data-action="reopenCloud" data-index="${i}"`
+                + ` title="${escapeAttr(tip)}">${dimSpan}`
+                + `<span class="path-step-val">${escapeHtml(crumb.display)}</span></button>`;
+        }).join('<span class="path-sep">›</span>');
+        const origin = `<button class="path-origin" data-action="popToRoot"`
+            + ` title="${escapeAttr('Back to ' + state.source)}">${escapeHtml(state.source)}</button>`;
+        return `<div class="path-strip" data-path-strip="1">${origin}`
+            + `<span class="path-sep">›</span>${steps}</div>`;
     }
 
     /** The label shown on the connector leading into a bubble: the dimension
@@ -1356,11 +1513,12 @@ export class ExplorePanel {
      *  "back to that cloud" button — clicking it drops this bubble and re-opens the
      *  field of siblings it was picked from (reopenCloud). */
     private linkLabelHtml(crumb: DrillCrumb, index: number): string {
-        if (crumb.fromDimensions.length === 0) { return ''; }
-        const text = crumb.fromDimensions.join(' · ');
-        const tip = `Back to ${text} groups`;
-        return `<span class="spine-link-label clickable" data-action="reopenCloud" data-index="${index}"`
-            + ` role="button" tabindex="0" title="${escapeAttr(tip)}">${escapeHtml(text)}</span>`;
+        // Stage 1 of the depth redesign: the per-step choice (column + value) and
+        // its "reopen these groups" action now live on the fixed bottom path strip
+        // (pathStripHtml), not on the inter-bubble connector. The connector is left
+        // as a bare line — relatedness will be carried by depth in a later stage.
+        void crumb; void index;
+        return '';
     }
 
     /**
@@ -1441,7 +1599,7 @@ export class ExplorePanel {
         const bubbleExtra = `${facet ? ' has-facet' : ''}${records ? ' has-records' : ''}`;
         return `
             <div class="bubble-hub bubble-hub-active">
-                <div class="bubble bubble-locked bubble-active${bubbleExtra}"
+                <div class="bubble bubble-locked bubble-active${bubbleExtra}" data-hubdrag="1"
                     title="${escapeAttr(this.crumbFullDisplay(crumb))}">
                     ${bubbleBody(crumb.display, m.valueText, m.aggGlyph, m.measureName, dial, aggDial)}
                     ${facet}
@@ -1474,15 +1632,176 @@ export class ExplorePanel {
             ? ` data-action="clearGrouping"`
             : ` data-action="popDrill" data-index="${index}"`;
         const title = isDeepest ? this.crumbFullDisplay(crumb) : 'Back to ' + this.crumbFullDisplay(crumb);
+        // The deepest (current working) hub is the bubble you just pulled forward;
+        // it can be dragged back up-left to "put it back" — return to the prior
+        // cloud (handled by the client's hub-drag gesture → goBack).
+        const hubDrag = isDeepest ? ' data-hubdrag="1"' : '';
         return `
             <div class="locked-hub">
-                <div class="bubble bubble-locked clickable"${action}
+                <div class="bubble bubble-locked clickable"${action}${hubDrag}
                     title="${escapeAttr(title)}">
                     ${bubbleBody(crumb.display, m.valueText, m.aggGlyph, m.measureName, dial, aggDial)}
                     ${facet}
                 </div>
                 ${chips}
             </div>`;
+    }
+
+    /**
+     * Synthesize a render-only state from a captured cloud snapshot, so a past
+     * level's cloud can be drawn by the SAME valueAreaHtml as the live one (pixel
+     * fidelity, zero duplication). Interactive/selection fields are neutralized —
+     * the ghost is decorative depth, made inert by `pointer-events:none` on its
+     * wrapper.
+     */
+    private ghostState(base: ExploreState, snap: CloudSnapshot): ExploreState {
+        return {
+            ...base,
+            result: snap.result,
+            selectedDimensions: snap.selectedDimensions,
+            binKeys: snap.binKeys,
+            selectedMeasures: snap.selectedMeasures,
+            selectedAggregate: snap.selectedAggregate,
+            focusKey: null,
+            selectionKeys: [],
+            selectionAnchor: null,
+            viewMode: 'auto',
+            loading: false,
+            tooManyGroups: null,
+            showRecords: false,
+            records: null,
+            recordsLoading: false,
+        };
+    }
+
+    /**
+     * The hub bubble that sat ABOVE a past cloud, so the bubble recedes together
+     * with its cloud (not just the field of siblings). For ghost of chain level
+     * `ci`, the owning hub is the bubble you had drilled into to open that cloud:
+     * the previous crumb (`ci-1`), or the root/source bubble for the first level.
+     * Static and inert — pure depth context.
+     */
+    private ghostHubHtml(state: ExploreState, ci: number): string {
+        let body: string;
+        if (ci === 0) {
+            const hasMeasure = state.selectedMeasures.length > 0;
+            const measureName = hasMeasure ? state.selectedMeasures[0]! : 'rows';
+            const aggGlyph = hasMeasure ? AGGREGATES[state.selectedAggregate].glyph : '#';
+            const val = hasMeasure
+                ? (state.totalMeasure === null ? '—' : formatMeasureValue(state.totalMeasure))
+                : (state.totalCount === null ? '—' : formatCompact(state.totalCount));
+            body = bubbleBody(state.source, val, aggGlyph, measureName);
+        } else {
+            const p = state.drillChain[ci - 1]!;
+            const m = extractBubbleMetric(p.columns, p.row);
+            body = bubbleBody(p.display, m.valueText, m.aggGlyph, m.measureName);
+        }
+        return `<div class="bubble-hub"><div class="bubble bubble-locked">${body}</div></div>`;
+    }
+
+    /**
+     * The depth stack: the prior levels' clouds (each with the hub bubble it hung
+     * under), left on screen and pushed back into depth behind the live cloud. The
+     * nearest (most recent) ghost is sharp; deeper ones shrink, darken, fade and
+     * blur, drifting toward the upper-LEFT — so you see "where you came from"
+     * trailing off into the dark. Only the last few levels are drawn. Static for
+     * now (Stage 2): driven purely by drill depth, no drag/animation yet. All the
+     * recede magnitudes here are deliberately tunable constants.
+     */
+    private ghostLayersHtml(state: ExploreState): string {
+        const GHOST_MAX = 2;                 // how many prior layers stay visible
+        const chain = state.drillChain;
+        const start = Math.max(0, chain.length - GHOST_MAX);
+        const layers: string[] = [];
+        // A post-drop transition makes the layers visibly step into their new depth:
+        // on a drill they animate FROM one level closer (depth-1); on a back they
+        // animate FROM one level further (depth+1). The webview applies the FROM
+        // geometry, forces a reflow, then lets CSS transition to the target.
+        //
+        // A drill renders TWICE (loading → settled). To avoid the settled DOM swap
+        // snapping the recede mid-flight, while LOADING we hold each ghost STILL at
+        // its FROM position (no data-from); only the SETTLED render emits data-from
+        // and plays the single clean animation. A put-back is one settled render.
+        const trans = this.pendingTransition;
+        const holding = trans !== null && state.loading; // pre-settle: park at FROM
+        for (let ci = start; ci < chain.length; ci++) {
+            const crumb = chain[ci]!;
+            if (!crumb.cloud) { continue; }  // legacy crumbs (no snapshot) render no ghost
+            const depth = chain.length - ci; // 1 = nearest ghost (the level you just left)
+            const fromDepth = trans === 'drill' ? depth - 1 : depth + 1;
+            const g = this.depthGeom(holding ? fromDepth : depth);
+            const z = 10 - depth;                                // nearer ghost higher (still behind card)
+            const hub = this.ghostHubHtml(state, ci);
+            const cloud = this.valueAreaHtml(this.ghostState(state, crumb.cloud));
+            // Emit the FROM geometry only on the SETTLED render so the webview plays
+            // the step-back / step-forward animation once. Packed transform|filter|opacity.
+            let fromAttr = '';
+            if (trans && !holding) {
+                const f = this.depthGeom(fromDepth);
+                fromAttr = ` data-from="${escapeAttr(`${f.transform}|${f.filter}|${f.opacity}`)}"`;
+            }
+            // The whole layer is a click target that brings this level forward
+            // (reopenCloud): the clicked cloud becomes live and the remaining ghosts
+            // shift forward. Inner bubbles are made inert via CSS so the click always
+            // resolves to the layer, not a stale bubble. aria-hidden keeps the depth
+            // decoration out of the a11y tree.
+            const tip = `Return to ${crumb.fromDimensions.join(' · ') || state.source} groups`;
+            layers.push(`<div class="ghost-layer clickable" data-action="reopenCloud" data-index="${ci}"`
+                + ` title="${escapeAttr(tip)}"${fromAttr}`
+                + ` style="transform:${g.transform};${g.filter ? `filter:${g.filter};` : ''}opacity:${g.opacity};z-index:${z};">${hub}${cloud}</div>`);
+        }
+        if (layers.length === 0) { return ''; }
+        return `<div class="layer-stack" aria-hidden="true">${layers.join('')}</div>`;
+    }
+
+    /** The depth-stack geometry for a layer at the given depth (1 = nearest ghost,
+     *  0 = front/live-ish, higher = further into the fog). Shared by the rendered
+     *  target position AND the transition's FROM position (depth±1) so a step looks
+     *  consistent. All the recede magnitudes are deliberately tunable constants. */
+    private depthGeom(depth: number): { transform: string; filter: string; opacity: number } {
+        const scale = Math.max(0.34, 1 - 0.24 * depth);      // shrink HARDER with distance
+        // Drift LEFT as a PERCENTAGE of the layer width, not fixed px. With
+        // transform-origin:center top, scaling pulls a layer's left edge back toward
+        // its centre by (1-scale)·width/2; a fixed-px tx gets swallowed by that on a
+        // wide panel, so the deeper (smaller) layer's left edge re-aligns with the
+        // nearer one. A %-of-width drift is proportional and survives the shrink, so
+        // each deeper layer is reliably MORE to the left at any panel width — and the
+        // hub still stays on screen on a narrow side panel.
+        const txPct = -15 * depth;                           // % of layer width, compounding per level
+        // Drift UP with DIMINISHING returns so deeper layers don't fly off the top —
+        // they stay inside the panel and read as "further" via shrink/fade instead.
+        const ty = -150 - 70 * (depth - 1);
+        // FOG via OPACITY, not a scrim: the ghosts sit behind the live card with only
+        // the (editor-background) body behind them, so simply lowering their opacity
+        // dissolves them TOWARD the background — theme-correct fog — without painting
+        // a rectangle. (A bg-coloured scrim used to leave a muddy rectangle because it
+        // filled the layer's whole box and composited with the bubbles' widget-bg.)
+        const opacity = Math.max(0.3, 1 - 0.32 * depth);     // fade into the fog with distance
+        const blur = depth * 1.6;                            // soft from the FIRST ghost back
+        // DESATURATE with distance so the receded clouds read as muted/greyed memory
+        // rather than vivid competing colour — WITHOUT darkening them (brightness is
+        // left alone; only the colour intensity drains). Floors so the deepest ghost
+        // keeps a hint of its heat hue.
+        const sat = Math.max(0.45, 1 - 0.3 * depth);         // 1=full colour, lower=greyer
+        const filter = [blur > 0 ? `blur(${blur}px)` : '', `saturate(${sat})`]
+            .filter(Boolean).join(' ');
+        return {
+            transform: `translate(${txPct}%, ${ty}px) scale(${scale})`,
+            filter,
+            opacity,
+        };
+    }
+
+    /** On a 'back' (put-it-back) transition, the cloud being brought forward becomes
+     *  the LIVE card — not a ghost layer — so without help it would just pop into
+     *  the front. We give the card a FROM geometry (the nearest-ghost depth it's
+     *  emerging from) so the webview can animate it forward into its resting (front)
+     *  position, mirroring the ghosts' step-forward. Returns '' otherwise. Only on
+     *  the settled render (put-back is a single synchronous render, never loading). */
+    private cardFromAttr(state: ExploreState): string {
+        if (this.pendingTransition !== 'back' || state.loading) { return ''; }
+        const f = this.depthGeom(1); // emerge from where the nearest ghost sat
+        return ` data-card-from="${escapeAttr(`${f.transform}|${f.filter}|${f.opacity}`)}"`;
     }
 
     private valueAreaHtml(state: ExploreState): string {
@@ -1837,7 +2156,11 @@ export class ExplorePanel {
 <head>
 <meta charset="utf-8" />
 <style>
-    body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); padding: 12px; }
+    body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); padding: 12px;
+        /* Explicit backdrop = the colour the receding ghosts fade toward (their
+           opacity dissolves them into whatever is behind, which is this body). Pin it
+           to editor-background so the fog reads as the true background everywhere. */
+        background: var(--vscode-editor-background); }
     /* Role palette — single source of truth so the card chips and the bubble
        category/member nubs always share the same colors. */
     :root {
@@ -1854,6 +2177,99 @@ export class ExplorePanel {
         --focus-accent: #e5c07b;
     }
     #app { display: flex; flex-direction: column; gap: 12px; }
+    /* SCENE plane — the "room" the clouds live in. .scene-plane is the perspective
+       context (the depth the layers will recede into); .scene is the single
+       transformable unit (Stage 2+ will translate/scale/fade it). For Stage 0 both
+       are inert pass-through wrappers, so the card renders exactly as before. */
+    .scene-plane { position: relative; perspective: 1400px; }
+    .scene { transform-origin: center top; position: relative; padding-top: 180px; }
+    /* Drilled or not, the working hub sits low (toward the panel's vertical middle)
+       so it reads consistently and the receding ghosts have room to rise UP above it
+       (and clip out the top) — that upward travel is what sells "moving back into
+       depth". A touch MORE headroom once drilled, since the ghost stack lives there.
+       The cloud blooms below the hub, so the panel scrolls if it runs long. */
+    .scene.drilled { padding-top: 240px; }
+    /* The depth stack of receded prior clouds. Fills the scene, sits behind the
+       live card, and is clickable per-layer (return to that level). Each
+       .ghost-layer is transformed/darkened/blurred per its depth by inline style
+       (tuned in ghostLayersHtml). Anchored at the live hub's vertical position,
+       then drifting up-left as it recedes. */
+    .layer-stack { position: absolute; inset: 0; pointer-events: none; z-index: 0; }
+    .ghost-layer {
+        position: absolute; left: 0; right: 0; top: 240px;
+        transform-origin: center top;
+        transition: transform .35s ease, filter .35s ease, opacity .35s ease;
+        pointer-events: none;
+    }
+    /* Only the ghost's HUB BUBBLE is the click target (return to that level): it's
+       the visible, un-occluded representative of the level. The cloud below it sits
+       behind the live working card, so making it clickable would just be invisible
+       dead zones. The click bubbles up to the layer's data-action via closest(). */
+    .ghost-layer .bubble-hub { pointer-events: auto; cursor: pointer; }
+    .ghost-layer .bubble-hub:hover .bubble { outline: 2px solid var(--vscode-focusBorder); }
+    /* Ghosts are context, not controls — hide the per-cloud chrome that would
+       otherwise repeat behind the live one. */
+    .ghost-layer .view-toggle, .ghost-layer .hint { display: none !important; }
+    /* Inside a blurred, faded ghost every HARD EDGE smears into an artifact: drop
+       shadows bleed into a dark halo "around the cloud" (the root/hub bubble's
+       shadow, closest in), and the scrollable table frame — its 1px border, its
+       sticky-header band, its row rules and its own scrollbar — smears into stray
+       horizontal smudge lines that track the scrollbar as the ghost moves. The
+       ghost is pure depth context, so strip those edges: no shadows, no table
+       chrome. The soft bubble field alone carries the recede. */
+    .ghost-layer .bubble, .ghost-layer .bubble-root, .ghost-layer .bubble-locked,
+    .ghost-layer .records-facet, .ghost-layer .cat-nub { box-shadow: none !important; }
+    .ghost-layer .cloud-table-wrap { border: none; overflow: hidden; }
+    .ghost-layer .cloud-table th, .ghost-layer .cloud-table td { border-bottom: none; }
+    .ghost-layer .cloud-table thead th { position: static; background: transparent; }
+    /* Lift the live card above the depth stack. */
+    .card { position: relative; z-index: 5; display: flex; flex-direction: column; gap: 10px;
+        transform-origin: center top;
+        transition: transform .35s ease, filter .35s ease, opacity .35s ease; }
+    /* GLASS plane — fixed HUD layer pinned to the viewport, above the scene and
+       outside its transform. Empty until Stage 1 (bottom path strip). pointer-events
+       pass through while it holds nothing so it can't intercept clicks. */
+    .glass-plane {
+        position: fixed; left: 0; right: 0; bottom: 0;
+        z-index: 10; pointer-events: none;
+    }
+    /* The fixed bottom path strip — the always-legible record of the drill chain.
+       Lives on the glass plane (re-enables pointer events for itself), scrolls its
+       contents horizontally when the chain outgrows the rail (the rail itself never
+       moves), and the render handler keeps the newest step (right edge) in view. */
+    .path-strip {
+        pointer-events: auto;
+        display: flex; align-items: center; gap: 2px;
+        overflow-x: auto; overflow-y: hidden;
+        padding: 6px 12px;
+        background: color-mix(in srgb, var(--vscode-editor-background) 85%, transparent);
+        border-top: 1px solid var(--vscode-widget-border, rgba(128,128,128,0.35));
+        backdrop-filter: blur(6px);
+        scrollbar-width: thin;
+        white-space: nowrap;
+    }
+    .path-origin { flex: 0 0 auto; font-weight: 600; color: var(--root-accent); padding: 2px 6px;
+        background: transparent; border: 1px solid transparent; border-radius: 6px;
+        cursor: pointer; font-family: inherit; font-size: 0.95em; }
+    .path-origin:hover, .path-origin:focus {
+        border-color: var(--vscode-focusBorder);
+        background: var(--vscode-list-hoverBackground); outline: none; }
+    .path-sep { flex: 0 0 auto; opacity: 0.4; padding: 0 1px; }
+    .path-step {
+        flex: 0 0 auto;
+        display: inline-flex; align-items: baseline; gap: 5px;
+        background: transparent; border: 1px solid transparent; border-radius: 6px;
+        color: var(--vscode-foreground); cursor: pointer;
+        padding: 2px 8px; font-size: 0.9em; font-family: inherit; line-height: 1.4;
+    }
+    .path-step:hover, .path-step:focus {
+        border-color: var(--vscode-focusBorder);
+        background: var(--vscode-list-hoverBackground); outline: none;
+    }
+    .path-step-dim { opacity: 0.6; font-size: 0.85em; }
+    .path-step-val { font-weight: 600; }
+    /* Reserve room so the bottom of the scene can scroll clear of the fixed strip. */
+    #app { padding-bottom: 52px; }
     .card { display: flex; flex-direction: column; gap: 10px; }
     /* Until the full pan/zoom canvas exists, center the hub (and its flowering
        value area) along the panel width instead of hugging the left. */
@@ -2110,43 +2526,39 @@ export class ExplorePanel {
        cursor and a touch more lift so the gesture feels physical. */
     #app.dragging-bubble .bubble-focus { cursor: grabbing; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5); }
 
-    /* Drop zone: the attach target that appears just below the stack only while
-       a focused bubble is being dragged. Dropping on it links (drills in). It's
-       drawn as a dashed CIRCLE the size of a locked bubble (the shape it will
-       become once attached), centered in the column. Its top sits at the SAME 26px
-       gap a real bubble would have once attached. Following a compact locked bubble
-       (10px margin) needs +16px; the root hub reserves ~120px of empty bloom space
-       below its bubble, so the root-following zone is pulled up to that same gap.
-       The actual accepted drop area is larger (see overDropZone in script). */
-    .drop-zone { display: none; }
-    #app.dragging-bubble .drop-zone {
-        display: flex; align-items: center; justify-content: center;
-        width: 180px; height: 180px; margin: 16px 0 6px;
-        border: 2px dashed color-mix(in srgb, var(--root-accent) 60%, transparent);
-        border-radius: 50%;
-        background: color-mix(in srgb, var(--root-accent) 6%, transparent);
-        transition: background 0.1s, border-color 0.1s;
+    /* "Put it back" gesture: while dragging the current working hub up-left to
+       return to the prior cloud, light the nearest ghost (release-to-land). The
+       drag ghost itself is tinted inline (purple -> target cloud heat) in script. */
+    #app.dragging-bubble.arming-back .ghost-layer:last-of-type .bubble {
+        outline: 2px solid var(--vscode-focusBorder); outline-offset: 2px;
     }
-    #app.dragging-bubble.over-dropzone .drop-zone {
-        border-color: var(--root-accent);
-        background: color-mix(in srgb, var(--root-accent) 18%, transparent);
-    }
-    .drop-zone-label { font-size: 0.8em; opacity: 0.75; pointer-events: none; }
-    #app.over-dropzone .drop-zone-label { opacity: 1; }
 
     /* Cursor-following ghost shown during the drag, so the bubble visibly moves
-       toward the drop zone. */
+       away from the cloud as you pull it apart. Its SIZE animates with the gesture
+       (set inline in script): a detach grows toward the full hub size as it arms
+       (feels like picking it up); a put-back starts hub-size and shrinks to the
+       cloud-circle size as it arms (feels like setting it back down). */
     .drag-ghost {
         position: fixed; z-index: 1000; left: 0; top: 0;
         transform: translate(-50%, -50%);
-        min-width: 96px; max-width: 180px; padding: 8px 10px;
-        border-radius: 50%; aspect-ratio: 1;
+        width: 96px; height: 96px; box-sizing: border-box; padding: 8px 10px;
+        border-radius: 50%;
         display: flex; align-items: center; justify-content: center; text-align: center;
         font-size: 0.78em; overflow: hidden;
         border: 2px solid var(--focus-accent);
         background: color-mix(in srgb, var(--focus-accent) 18%, var(--vscode-editorWidget-background));
         box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
         pointer-events: none; opacity: 0.92;
+        transition: border-color 0.18s ease, background 0.18s ease, box-shadow 0.18s ease,
+                    width 0.22s ease, height 0.22s ease;
+    }
+    /* Armed "drag it apart" state: the bubble has been pulled far enough that a
+       release will drill in. Brighten the ghost with the drill accent so the commit
+       is unmistakable. */
+    #app.dragging-bubble.arming-apart .drag-ghost {
+        border-color: var(--root-accent);
+        background: color-mix(in srgb, var(--root-accent) 30%, var(--vscode-editorWidget-background));
+        box-shadow: 0 8px 22px rgba(0, 0, 0, 0.6);
     }
     /* The focused bubble occupies a normal 96px slot in the flow so its peers stay
        put; the enlarged 180px hub is overlaid on top, centered on the slot. */
@@ -2473,49 +2885,137 @@ export class ExplorePanel {
     if (!vscodeApi) { return; }
     const app = document.getElementById('app');
 
-    // Drag-and-drop-to-link gesture: press the focused aggregate bubble and drag
-    // it onto the drop zone that appears just below the stack to ATTACH it (drill
-    // in). A cursor-following ghost makes the link feel deliberate. Dropping
-    // anywhere other than the zone simply deselects (clears focus). The trailing
-    // click is suppressed so a drag release doesn't also clear focus.
+    // Drag-to-drill gesture: press a cloud aggregate bubble and drag it AWAY from
+    // where it sits — in any direction — past a small commit distance, then drop.
+    // There is no drop target; pulling the bubble apart from the cloud IS the
+    // gesture ("drag it apart"). A cursor-following ghost makes it feel deliberate.
+    // A press that barely moves is treated as a click (deselect); the trailing
+    // click is suppressed so a real drag release doesn't also clear focus.
     let dragState = null;      // { x, y, dragging, ghost }
     let suppressClick = false;
+    // The viewport point where a detach drop was released. Stashed at pointerup so
+    // the SETTLED drill render can grow the new purple hub bubble OUT of that spot
+    // (a FLIP), tying the gesture's end to the new bubble's arrival. Consumed (and
+    // cleared) by the render handler. Survives the intermediate loading render
+    // because that render carries no transition.
+    let pendingDrop = null;    // { x, y } or null
     const DRAG_THRESHOLD = 6;
-    function dropZoneRect() {
-        const zone = app.querySelector('[data-dropzone]');
-        return zone ? zone.getBoundingClientRect() : null;
+    // How far the bubble must travel from its origin (in any direction) before the
+    // drill commits on release. Larger than DRAG_THRESHOLD so a tiny nudge reads as
+    // a click, not a drill.
+    const APART_COMMIT = 56;
+    function apartArmed(dx, dy) {
+        return (dx * dx + dy * dy) >= APART_COMMIT * APART_COMMIT;
     }
-    function overDropZone(x, y) {
-        const r = dropZoneRect();
-        if (!r) { return false; }
-        // Count it as long as the dragged object (the ghost circle) intersects the
-        // drop zone — not just the cursor point. The ghost is centered on the
-        // cursor, so derive its box from the ghost element (fallback to a 120px
-        // circle around the cursor if it isn't up yet).
-        let g = dragState && dragState.ghost ? dragState.ghost.getBoundingClientRect() : null;
-        if (!g) {
-            const half = 60;
-            g = { left: x - half, right: x + half, top: y - half, bottom: y + half };
+    // The dragged bubble's heat colour seeds the ghost so it visibly "lifts off"
+    // the cloud as the same circle, then morphs to the layer accent (purple) once
+    // it's far enough to commit. Read the bubble's computed border colour (that's
+    // where the heat hue lives). With a multi-selection, blend all the selected
+    // bubbles' heats so the ghost reads as "this whole set".
+    function readHeat(el) {
+        const c = getComputedStyle(el).borderTopColor; // e.g. "rgb(r, g, b)"
+        const lp = c.indexOf('('), rp = c.indexOf(')');
+        if (lp < 0 || rp < 0) { return null; }
+        const p = c.substring(lp + 1, rp).split(',').map(function(s) { return parseFloat(s); });
+        return { r: p[0] || 0, g: p[1] || 0, b: p[2] || 0 };
+    }
+    function blendHeats(els) {
+        let r = 0, g = 0, b = 0, n = 0;
+        els.forEach(function(el) {
+            const h = readHeat(el);
+            if (h) { r += h.r; g += h.g; b += h.b; n++; }
+        });
+        if (!n) { return null; }
+        return 'rgb(' + Math.round(r / n) + ', ' + Math.round(g / n) + ', ' + Math.round(b / n) + ')';
+    }
+    // The label a cloud bubble represents, however it's drawn: the full tier carries
+    // a .bubble-label and title=label; the numeric tier a .bubble-mini-num; the dot
+    // tier only a "label — agg measure: value" hover title. Normalise to the bare
+    // dimension label so we can match it against the dragged hub's label.
+    function bubbleLabelOf(el) {
+        const full = el.querySelector('.bubble-label');
+        if (full) { return full.textContent.trim(); }
+        const mini = el.querySelector('.bubble-mini-num');
+        if (mini) { return mini.textContent.trim(); }
+        const t = el.getAttribute('title') || '';
+        const dash = t.indexOf(' \\u2014 '); // " — "
+        return (dash >= 0 ? t.substring(0, dash) : t).trim();
+    }
+    // Find the heat of the ONE bubble in a cloud whose label matches the given
+    // label — i.e. the specific group the hub came from — so "put it back" returns
+    // to that exact colour rather than the cloud's average.
+    function heatOfLabel(els, label) {
+        for (let i = 0; i < els.length; i++) {
+            if (bubbleLabelOf(els[i]) === label) { return blendHeats([els[i]]); }
         }
-        return g.left <= r.right && g.right >= r.left
-            && g.top <= r.bottom && g.bottom >= r.top;
+        return null;
+    }
+    // Paint the ghost with a tint (heat or the purple commit accent). Border is the
+    // solid tint; the fill is a soft wash of it over the widget background. The
+    // .drag-ghost transition makes the heat->purple swap a smooth morph.
+    function tintGhost(g, color, pct) {
+        g.style.borderColor = color;
+        g.style.background = 'color-mix(in srgb, ' + color + ' ' + pct + '%, var(--vscode-editorWidget-background))';
+    }
+    // The drag-ghost SIZE morphs with the gesture to reinforce the metaphor:
+    // CLOUD = the larger cloud-circle size (a satellite bubble), HUB = the full
+    // working-hub size. Detach grows CLOUD -> HUB on arm (pick it up); put-back
+    // starts HUB and shrinks HUB -> CLOUD on arm (set it back down on the cloud).
+    const GHOST_CLOUD_SIZE = 96;
+    const GHOST_HUB_SIZE = 180;
+    function sizeGhost(g, px) { g.style.width = px + 'px'; g.style.height = px + 'px'; }
+    // The "put it back" commit test: like the detach gesture, pulling the current
+    // hub bubble AWAY from where it sits — in ANY direction — past a small commit
+    // distance arms the return to the prior cloud. Direction-agnostic so it feels
+    // identical to "drag it apart"; the colour morph signals droppability.
+    const BACK_COMMIT = 56;
+    function backArmed(dx, dy) {
+        return (dx * dx + dy * dy) >= BACK_COMMIT * BACK_COMMIT;
     }
     app.addEventListener('pointerdown', function(e) {
         if (!e.target.closest) { return; }
+        // A press starting on a dial capsule or the dim facet belongs to those
+        // controls (handled separately), never the drag gestures.
+        if (e.target.closest('[data-dial]') || e.target.closest('.dim-facet')) { return; }
         // Either the already-focused aggregate (legacy gesture) OR any cloud
         // bubble directly — press and drag without a focus click first. The cloud
         // bubble carries its row key so the drop can drill straight into it.
         const focus = e.target.closest('.bubble-focus');
         const cloud = e.target.closest('.bubble[data-action="focusBubble"]');
-        const target = focus || cloud;
+        // The current working hub bubble: dragging it up-left "puts it back" — i.e.
+        // returns to the prior (faded) cloud. Distinct object, distinct meaning from
+        // the cloud bubbles (which drag FORWARD to drill in).
+        const hub = e.target.closest('.bubble[data-hubdrag]');
+        const target = focus || cloud || hub;
         if (target) {
             // Stop the browser from starting a text selection on the bubble's
             // label/numbers as the pointer drags.
             e.preventDefault();
             dragState = { x: e.clientX, y: e.clientY, dragging: false, ghost: null, label: '',
-                key: cloud ? cloud.getAttribute('data-key') : null };
+                key: cloud ? cloud.getAttribute('data-key') : null,
+                hub: !cloud && !focus && !!hub };
             const lbl = target.querySelector('.bubble-label');
             dragState.label = lbl ? lbl.textContent : '';
+            // Seed the ghost with the dragged bubble's heat hue so it reads as the
+            // SAME circle lifting off the cloud. If a multi-selection is being
+            // dragged, blend every selected bubble's heat. Hubs keep the neutral
+            // ghost (they aren't heat-coloured cloud bubbles).
+            if (!dragState.hub) {
+                const selected = app.querySelectorAll('.bubble.selected');
+                dragState.heat = (selected.length > 1 && target.classList.contains('selected'))
+                    ? blendHeats(Array.prototype.slice.call(selected))
+                    : blendHeats([target]);
+            } else {
+                // The hub ghost is the MIRROR: it starts as the layer accent (purple)
+                // and morphs to the HEAT of the prior faded cloud it'll rejoin, so
+                // "drop here = back into that cloud" reads. Use the heat of the ONE
+                // ghost bubble matching the hub's label (the exact group it came
+                // from) so red returns to red; fall back to the cloud's blended heat.
+                const ghostCloud = Array.prototype.slice.call(
+                    app.querySelectorAll('.ghost-layer:last-of-type .bubble:not(.bubble-locked)'));
+                dragState.targetHeat = heatOfLabel(ghostCloud, dragState.label)
+                    || (ghostCloud.length ? blendHeats(ghostCloud) : null);
+            }
         }
     });
     window.addEventListener('pointermove', function(e) {
@@ -2529,6 +3029,15 @@ export class ExplorePanel {
             const g = document.createElement('div');
             g.className = 'drag-ghost';
             g.textContent = dragState.label;
+            // Forward-drill ghosts start in the bubble's own heat colour (so it's
+            // visibly the same circle) and will morph to the commit accent below.
+            // The hub ghost is the mirror: it starts as the layer accent (purple)
+            // and morphs to the target cloud's heat when armed.
+            // Base SIZE (no transition on this first set — it's the element's initial
+            // style): a detach starts at the cloud-circle size and grows on arm; a
+            // put-back starts at the full hub size and shrinks on arm.
+            if (dragState.heat) { tintGhost(g, dragState.heat, 18); dragState.armed = false; sizeGhost(g, GHOST_CLOUD_SIZE); }
+            else if (dragState.hub) { tintGhost(g, 'var(--root-accent)', 24); dragState.armed = false; sizeGhost(g, GHOST_HUB_SIZE); }
             document.body.appendChild(g);
             dragState.ghost = g;
         }
@@ -2536,19 +3045,76 @@ export class ExplorePanel {
             dragState.ghost.style.left = e.clientX + 'px';
             dragState.ghost.style.top = e.clientY + 'px';
         }
-        app.classList.toggle('over-dropzone', overDropZone(e.clientX, e.clientY));
+        if (dragState.hub) {
+            // "Put it back" gesture: the prior cloud sits behind this bubble, mostly
+            // up and to the LEFT. So a drag whose net direction is left (or up-left)
+            // past a small commit distance means "return to it". Reflect the armed
+            // state — and morph the ghost from the layer accent (purple) to the prior
+            // cloud's HEAT so "drop here = back into that cloud" reads (mirror of the
+            // forward gesture's heat->purple).
+            const armed = backArmed(dx, dy);
+            app.classList.toggle('arming-back', armed);
+            if (armed !== dragState.armed) {
+                dragState.armed = armed;
+                if (armed && dragState.targetHeat) { tintGhost(dragState.ghost, dragState.targetHeat, 30); }
+                else { tintGhost(dragState.ghost, 'var(--root-accent)', 24); }
+                // Settle down onto the cloud (shrink to cloud-circle size) when armed;
+                // swell back to the full hub size when disarmed.
+                sizeGhost(dragState.ghost, armed ? GHOST_CLOUD_SIZE : GHOST_HUB_SIZE);
+            }
+        } else {
+            // "Drag it apart" gesture: pulling the cloud bubble away from its origin
+            // in ANY direction past the commit distance drills into it. Reflect the
+            // armed state so the user sees it'll commit on release — and morph the
+            // ghost from its heat hue to the layer accent (purple) so "drop here =
+            // becomes its own layer" is unmistakable.
+            const armed = apartArmed(dx, dy);
+            app.classList.toggle('arming-apart', armed);
+            if (dragState.heat && armed !== dragState.armed) {
+                dragState.armed = armed;
+                if (armed) { tintGhost(dragState.ghost, 'var(--root-accent)', 32); }
+                else { tintGhost(dragState.ghost, dragState.heat, 18); }
+                // Pick it up (grow to the full hub size) when armed; settle back to
+                // the cloud-circle size when disarmed.
+                sizeGhost(dragState.ghost, armed ? GHOST_HUB_SIZE : GHOST_CLOUD_SIZE);
+            }
+        }
     });
     window.addEventListener('pointerup', function(e) {
         if (dragState && dragState.dragging) {
-            const onZone = overDropZone(e.clientX, e.clientY);
-            if (dragState.ghost) { dragState.ghost.remove(); }
-            app.classList.remove('dragging-bubble', 'over-dropzone');
-            suppressClick = true;
-            // Dropped on the zone → link (drill in), carrying the dragged bubble's
-            // key (null = the already-focused bubble). Dropped elsewhere → deselect.
-            vscodeApi.postMessage(onZone
-                ? { command: 'descendBubble', key: dragState.key }
-                : { command: 'clearFocus' });
+            if (dragState.hub) {
+                const dx = e.clientX - dragState.x;
+                const dy = e.clientY - dragState.y;
+                const armed = backArmed(dx, dy);
+                if (dragState.ghost) { dragState.ghost.remove(); }
+                app.classList.remove('dragging-bubble', 'arming-back');
+                suppressClick = true;
+                // Dragged up-left past the commit → return to the prior cloud
+                // ("put it back"). Anything else → no-op (just settles back).
+                if (armed) { vscodeApi.postMessage({ command: 'goBack' }); }
+            } else {
+                const dx = e.clientX - dragState.x;
+                const dy = e.clientY - dragState.y;
+                const armed = apartArmed(dx, dy);
+                if (dragState.ghost) { dragState.ghost.remove(); }
+                app.classList.remove('dragging-bubble', 'arming-apart');
+                suppressClick = true;
+                // Dragged apart past the commit → drill in, carrying the dragged
+                // bubble's key (null = the already-focused bubble). Barely moved →
+                // deselect (clear focus).
+                if (armed) {
+                    // Remember the release point so the new hub bubble can grow out
+                    // of exactly where the dragged bubble was let go. VIEWPORT coords
+                    // (clientX/Y) = the physical release pixel, independent of scroll
+                    // and of which element scrolls. The hub rect we measure later is
+                    // also viewport-relative, so the delta is correct in any scroll
+                    // state without any page-coord/scroll bookkeeping.
+                    pendingDrop = { x: e.clientX, y: e.clientY };
+                    vscodeApi.postMessage({ command: 'descendBubble', key: dragState.key });
+                } else {
+                    vscodeApi.postMessage({ command: 'clearFocus' });
+                }
+            }
         }
         dragState = null;
     });
@@ -2965,11 +3531,186 @@ export class ExplorePanel {
     });
     app.addEventListener('mouseleave', function() { closeBloom(); });
 
+    // Plays the post-drop depth-stack transition: place each ghost layer at its
+    // FROM geometry (one level closer on a drill, one further on a back), flush the
+    // layout, then restore the target geometry so the CSS transition eases each
+    // layer into its new depth. The drag itself stays un-animated.
+    //
+    // delay (ms) holds the layers parked at FROM before releasing, so on a detach
+    // drill the bubble-emerge can lead and the receding background doesn't compete
+    // with (and visually skew) where the grow appears to start.
+    function playGhostTransition(delay) {
+        const layers = app.querySelectorAll('.ghost-layer[data-from]');
+        if (!layers.length) { return; }
+        const items = [];
+        for (let i = 0; i < layers.length; i++) {
+            const el = layers[i];
+            const parts = (el.getAttribute('data-from') || '').split('|');
+            // Stash the TARGET (already in the inline style) before overwriting it.
+            items.push({
+                el: el,
+                toTransform: el.style.transform, toFilter: el.style.filter, toOpacity: el.style.opacity,
+                fromTransform: parts[0] || '', fromFilter: parts[1] || '', fromOpacity: parts[2] || '1'
+            });
+        }
+        // 1) Jump to FROM with transitions suppressed.
+        items.forEach(function(it) {
+            it.el.style.transition = 'none';
+            it.el.style.transform = it.fromTransform;
+            it.el.style.filter = it.fromFilter;
+            it.el.style.opacity = it.fromOpacity;
+        });
+        // 2) Force a reflow so the FROM values are committed as the starting point.
+        void app.offsetWidth;
+        // 3) Release to TARGET — clearing the inline transition restores the CSS
+        //    rule (.ghost-layer transitions over .35s), which eases. Optionally
+        //    after a short hold so the bubble-emerge leads.
+        const release = function() {
+            items.forEach(function(it) {
+                it.el.style.transition = '';
+                it.el.style.transform = it.toTransform;
+                it.el.style.filter = it.toFilter;
+                it.el.style.opacity = it.toOpacity;
+                it.el.removeAttribute('data-from');
+            });
+        };
+        if (delay > 0) { setTimeout(release, delay); } else { release(); }
+    }
+
+    // On a put-back, the cloud coming forward is the LIVE card (not a ghost layer),
+    // so animate it from the nearest-ghost depth into its resting (front) position —
+    // otherwise it just pops in. Same snap-to-FROM → reflow → release technique.
+    function playCardTransition() {
+        const card = app.querySelector('.card[data-card-from]');
+        if (!card) { return; }
+        const parts = (card.getAttribute('data-card-from') || '').split('|');
+        card.style.transition = 'none';
+        card.style.transform = parts[0] || '';
+        card.style.filter = parts[1] || '';
+        card.style.opacity = parts[2] || '1';
+        void app.offsetWidth;
+        card.style.transition = '';
+        card.style.transform = '';      // resting front position (identity)
+        card.style.filter = '';
+        card.style.opacity = '';
+        card.removeAttribute('data-card-from');
+    }
+
+    // After a detach drop the new working hub (the full purple bubble) should look
+    // like it GREW from where you let the dragged bubble go — not just blink into
+    // the centre while the depth stack recedes behind it.
+    //
+    // The robust way is to animate a position:FIXED clone of the hub, not the real
+    // hub itself. The real hub lives inside the SCROLLED scene (and inside
+    // .scene-plane, which establishes a perspective/containing block), so a CSS
+    // transform on it lives in CONTENT space — any scroll (or that containing
+    // block) between measure and paint reintroduces an offset, which is exactly the
+    // "starts from the wrong place, proportional to scroll" symptom. A fixed clone
+    // on <body> is in pure VIEWPORT space — the same space as the pointer's
+    // clientX/clientY drop point and as getBoundingClientRect — so it is immune to
+    // scroll and to ancestor transforms. (This mirrors the drag-ghost, which is
+    // also fixed and tracked the cursor perfectly.)
+    //
+    // A detach renders TWICE (loading → settled), and each render rebuilds the hub,
+    // so we keep the REAL hub hidden until the clone lands, then reveal it — no
+    // centre flash on either render. The released drag-ghost is already at the full
+    // hub size (it grew on arm), so the clone only TRANSLATES from the drop point to
+    // the resting hub — no scale change.
+    function hideRealHub() {
+        const bubble = app.querySelector('.card .bubble-active');
+        if (bubble) { bubble.style.visibility = 'hidden'; }
+    }
+    function playBubbleEmerge(drop) {
+        const bubble = app.querySelector('.card .bubble-active');
+        if (!bubble) { return; }
+        bubble.style.visibility = 'hidden';
+        // Settle the scroll to its FINAL resting state BEFORE measuring/animating.
+        // After a drill the short new-hub layout scrolls back toward the top; if we
+        // animate first and that scroll lands afterwards, the hub jumps out from
+        // under the clone (the "broken" re-draw the user saw). The drop point is a
+        // fixed VIEWPORT pixel (clientX/Y) and is unaffected by scrolling, so it
+        // still maps to where the finger let go. Scroll both the window and any
+        // scrollable ancestor of the hub to the top so the hub's resting viewport
+        // position is final.
+        window.scrollTo(0, 0);
+        let node = bubble.parentNode;
+        while (node && node.nodeType === 1 && node !== document.body) {
+            if (node.scrollTop) { node.scrollTop = 0; }
+            node = node.parentNode;
+        }
+        // Measure the hub's resting viewport rect on the NEXT frame, once the
+        // settled layout AND the scroll reset above have committed.
+        requestAnimationFrame(function() {
+            const rect = bubble.getBoundingClientRect();
+            if (!rect.width) { bubble.style.visibility = ''; return; }
+            const targetX = rect.left + rect.width / 2;   // viewport centre of the resting hub
+            const targetY = rect.top + rect.height / 2;
+            // A fixed clone, styled like the hub, pinned at the DROP point (viewport).
+            const clone = bubble.cloneNode(true);
+            clone.style.position = 'fixed';
+            clone.style.margin = '0';
+            clone.style.left = drop.x + 'px';
+            clone.style.top = drop.y + 'px';
+            clone.style.width = rect.width + 'px';
+            clone.style.height = rect.height + 'px';
+            clone.style.zIndex = '900';
+            clone.style.pointerEvents = 'none';
+            clone.style.visibility = 'visible';
+            clone.style.transformOrigin = 'center center';
+            clone.style.transition = 'none';
+            // Centre the clone on the drop point. It's already at full hub size (the
+            // drag-ghost grew to that on arm), so no initial scale — just position.
+            clone.style.transform = 'translate(-50%, -50%)';
+            document.body.appendChild(clone);
+            void clone.offsetWidth;   // commit the FROM state
+            // Glide to the hub's resting centre. tx/ty are viewport deltas, so the
+            // clone arrives exactly where the real hub sits.
+            const tx = targetX - drop.x;
+            const ty = targetY - drop.y;
+            clone.style.transition = 'transform .55s cubic-bezier(.18,.85,.25,1.08)';
+            clone.style.transform = 'translate(calc(-50% + ' + tx + 'px), calc(-50% + ' + ty + 'px))';
+            let finished = false;
+            const done = function() {
+                if (finished) { return; }
+                finished = true;
+                if (clone.parentNode) { clone.parentNode.removeChild(clone); }
+                bubble.style.visibility = '';   // hand off to the real hub
+            };
+            clone.addEventListener('transitionend', done);
+            setTimeout(done, 700);   // safety net if transitionend doesn't fire
+        });
+    }
+
     window.addEventListener('message', function(event) {
         const msg = event.data;
         if (msg && msg.command === 'render') {
             closeBloom();
             app.innerHTML = msg.html;
+            // Keep the newest step (right edge) of the path strip in view when the
+            // chain outgrows the fixed rail.
+            const strip = app.querySelector('[data-path-strip]');
+            if (strip) { strip.scrollLeft = strip.scrollWidth; }
+            // Post-drop depth-stack transition: each ghost layer carries a data-from
+            // (its one-level-off start geometry). Snap to FROM with transitions off,
+            // force a reflow, then release to the target so CSS eases it into place —
+            // a clean "layers step back / forward" move without animating the drag.
+            // On a put-back the incoming live card also animates forward from depth.
+            if (msg.transition) {
+                // Detach drill: the new hub grows in from the drop point while the
+                // depth stack recedes — both at once now that the emerge runs in a
+                // stable scroll state (no longer competing, so no stagger needed).
+                const emerging = msg.transition === 'drill' && pendingDrop;
+                playGhostTransition(0);
+                playCardTransition();
+                if (emerging) { playBubbleEmerge(pendingDrop); }
+                pendingDrop = null;
+            } else if (pendingDrop) {
+                // Intermediate LOADING render after a detach drop (no transition yet):
+                // hide the freshly-built hub so it doesn't flash at full size in the
+                // centre — the settled 'drill' render then animates a fixed clone in
+                // from the drop point and reveals the real hub when it lands.
+                hideRealHub();
+            }
         }
     });
 
