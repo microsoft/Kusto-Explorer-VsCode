@@ -436,6 +436,11 @@ export class ExplorePanel {
                     this.reopenCloud(Number(message.index));
                 }
                 break;
+            case 'focusLayer':
+                if (this.state && typeof message.index === 'string') {
+                    this.focusLayerCloud(Number(message.index));
+                }
+                break;
             case 'popToRoot':
                 if (this.state) {
                     this.popToRoot();
@@ -627,8 +632,13 @@ export class ExplorePanel {
         const type = this.state?.columns.find(c => c.name === l.dimension)?.type;
         if (l.values && l.values.length > 1) {
             if (l.binSize) {
-                // Ordered range: first bucket start – last bucket end.
+                // Ordered range: first bucket start – last bucket end. Datetime
+                // ranges elide the end's shared leading components (don't repeat the
+                // year/month when both ends share them).
                 const { lo, hi } = orderedBounds(l.values, type);
+                if (/datetime|date/.test((type ?? '').toLowerCase())) {
+                    return binSpanRangeDatetime(lo, hi, l.binSize);
+                }
                 return `${binRangeLabel(lo, l.binSize, type)} – ${binRangeEndLabel(hi, l.binSize, type)}`;
             }
             // Discrete set: first few values, then "+N".
@@ -636,8 +646,12 @@ export class ExplorePanel {
             const extra = l.values.length - shown.length;
             return extra > 0 ? `${shown.join(', ')} +${extra}` : shown.join(', ');
         }
+        // A single binned bucket shows its FULL RANGE (start – end), not just the
+        // bucket start — so the locked bubble conveys the bin WIDTH on its face
+        // instead of hiding it behind the hover title. (Matches the multi-select
+        // range above.)
         return l.binSize
-            ? binRangeLabel(l.value, l.binSize, type)
+            ? binRangeFull(l.value, l.binSize, type)
             : formatCell(l.value);
     }
 
@@ -736,6 +750,19 @@ export class ExplorePanel {
         }
         // Legacy crumb with no captured cloud (pre-snapshot): fall back to a requery.
         void this.runGrouping();
+    }
+
+    /** Path-strip navigation: focus the clicked layer `index`, keeping it and its
+     *  ancestors locked while pruning everything deeper, and re-open ITS cloud —
+     *  the field of child groupings this layer opened. That child cloud was
+     *  snapshotted on the NEXT crumb (captured the moment we descended from this
+     *  layer into it), so reopening at `index + 1` lands us back on `index` as the
+     *  current hub with its children spread out. Clicking the deepest layer (which
+     *  has no child crumb) is a no-op — you're already there. (This differs from
+     *  reopenCloud, which steps to the layer a bubble was picked FROM; the path
+     *  strip instead focuses the layer the user clicked.) */
+    private focusLayerCloud(index: number): void {
+        this.reopenCloud(index + 1);
     }
 
     /** Pops all the way back to the root, ungrouped (the dimension selection is
@@ -1043,6 +1070,15 @@ export class ExplorePanel {
         this.state.loading = true;
         this.state.error = undefined;
         this.state.tooManyGroups = null;
+        // A fresh grouping is incoming and will BLOOM out of the hub. The old result
+        // (e.g. the single ungrouped "All" aggregate, or a different-shaped prior
+        // cloud) is not representative of the new field, so drop it now — otherwise
+        // the loading render flashes that stale bubble in the value area just before
+        // the bloom, undercutting the animation. With it cleared, the loading render
+        // shows the bare "Querying…" hint and the cloud blooms in from nothing.
+        // (Measure/order/bin-size requeries don't set pendingBloom, so they keep the
+        // result and dim it in place via is-refreshing — no flash there.)
+        if (this.pendingBloom) { this.state.result = null; }
         this.render();
 
         // Drill chain → a `where` that scopes the cloud to the locked-in ancestor
@@ -1537,7 +1573,7 @@ export class ExplorePanel {
             const full = this.crumbFullDisplay(crumb);
             const tip = dim ? `${dim} = ${full} — reopen these groups` : full;
             const dimSpan = dim ? `<span class="path-step-dim">${escapeHtml(dim)}</span>` : '';
-            return `<button class="path-step" data-action="reopenCloud" data-index="${i}"`
+            return `<button class="path-step" data-action="focusLayer" data-index="${i}"`
                 + ` title="${escapeAttr(tip)}">${dimSpan}`
                 + `<span class="path-step-val">${escapeHtml(crumb.display)}</span></button>`;
         }).join('<span class="path-sep">›</span>');
@@ -1640,7 +1676,7 @@ export class ExplorePanel {
             <div class="bubble-hub bubble-hub-active">
                 <div class="bubble bubble-locked bubble-active${bubbleExtra}" data-hubdrag="1"
                     title="${escapeAttr(this.crumbFullDisplay(crumb))}">
-                    ${bubbleBody(crumb.display, m.valueText, m.aggGlyph, m.measureName, dial, aggDial)}
+                    ${bubbleBody(crumb.display, m.valueText, m.aggGlyph, m.measureName, dial, aggDial, true, crumb.fromDimensions.join(' · '))}
                     ${facet}
                     ${records}
                 </div>
@@ -1679,7 +1715,7 @@ export class ExplorePanel {
             <div class="locked-hub">
                 <div class="bubble bubble-locked clickable"${action}${hubDrag}
                     title="${escapeAttr(title)}">
-                    ${bubbleBody(crumb.display, m.valueText, m.aggGlyph, m.measureName, dial, aggDial)}
+                    ${bubbleBody(crumb.display, m.valueText, m.aggGlyph, m.measureName, dial, aggDial, true, crumb.fromDimensions.join(' · '))}
                     ${facet}
                 </div>
                 ${chips}
@@ -1849,7 +1885,7 @@ export class ExplorePanel {
         // query — we keep the existing bubbles up and just dim them (`is-refreshing`)
         // so they update in place instead of flashing off to "Loading…" and back.
         if (state.loading && !state.result) {
-            return `<div class="hint">Loading…</div>`;
+            return `<div class="hint">Querying…</div>`;
         }
         if (state.selectedDimensions.length === 0 && state.selectedMeasures.length === 0) {
             // No grouping yet: a single total bubble in the same three-line layout.
@@ -2655,6 +2691,14 @@ export class ExplorePanel {
         opacity: 1; pointer-events: auto; outline: none;
     }
     .bubble-label { font-size: 0.85em; opacity: 0.85; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    /* The dimension column name as an eyebrow above a spine bubble's range/value
+       so a standalone range says WHAT it ranges over (cloud bubbles use their
+       floating pill instead). Tinted toward the bubble's purple accent to bind it
+       to the bubble that owns it, but muted (mixed with the normal fg) so it reads
+       as a quiet label, not a bright link. Real column casing is preserved. */
+    .bubble-context { font-size: 0.68em; letter-spacing: 0.02em;
+        color: color-mix(in srgb, var(--root-accent) 55%, var(--vscode-foreground));
+        max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     /* Caption-less cloud bubbles let the title wrap to two lines for long
        bin-range / dimension labels (the agg/column line is omitted there). */
     .bubble-label-2 { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.15; }
@@ -3602,6 +3646,8 @@ export class ExplorePanel {
             vscodeApi.postMessage({ command: 'popDrill', index: el.getAttribute('data-index') });
         } else if (action === 'reopenCloud') {
             vscodeApi.postMessage({ command: 'reopenCloud', index: el.getAttribute('data-index') });
+        } else if (action === 'focusLayer') {
+            vscodeApi.postMessage({ command: 'focusLayer', index: el.getAttribute('data-index') });
         } else if (action === 'popToRoot') {
             vscodeApi.postMessage({ command: 'popToRoot' });
         } else if (action === 'setViewMode') {
@@ -4101,13 +4147,7 @@ function compactDateTime(value: unknown, sizeToken?: string): string {
 function binRangeFull(value: unknown, size: string, type?: string): string {
     const t = (type ?? '').toLowerCase();
     if (/datetime|date/.test(t)) {
-        const start = compactDateTime(value, size);
-        const p = parseIsoParts(value);
-        const ms = timespanToMs(size);
-        if (!p || ms === null) { return start; }
-        const startMs = Date.UTC(Number(p.y), Number(p.mo) - 1, Number(p.d), Number(p.h), Number(p.mi), Number(p.s), p.ms);
-        const endIso = new Date(startMs + ms).toISOString();
-        return `${start} – ${compactDateTime(endIso, size)}`;
+        return binSpanRangeDatetime(value, value, size);
     }
     const lo = Number(value);
     const step = Number(size);
@@ -4115,6 +4155,56 @@ function binRangeFull(value: unknown, size: string, type?: string): string {
         return `${formatCell(lo)}–${formatCell(lo + step)}`;
     }
     return formatCell(value);
+}
+
+/** A datetime bin range "start – end" where the END drops every leading
+ *  component it SHARES with the start, so a same-year (or same-month, same-day)
+ *  range never repeats that context — e.g. "2026-06-03 – 05" instead of
+ *  "2026-06-03 – 2026-06-05", or "2026-06-03 14:00 – 15:00" for a same-day hour
+ *  span. This is the ISO 8601 §4.4.2 / CLDR interval convention. `loStart` is the
+ *  first bucket's start and `hiStart` the last bucket's start (equal for a single
+ *  bucket); the end is `hiStart + size`. Falls back to the bare start when the
+ *  value or size can't be parsed (so it never invents a window). */
+function binSpanRangeDatetime(loStart: unknown, hiStart: unknown, size: string): string {
+    const start = compactDateTime(loStart, size);
+    const ps = parseIsoParts(loStart);
+    const ph = parseIsoParts(hiStart);
+    const ms = timespanToMs(size);
+    if (!ps || !ph || ms === null) { return start; }
+    const hiStartMs = Date.UTC(Number(ph.y), Number(ph.mo) - 1, Number(ph.d), Number(ph.h), Number(ph.mi), Number(ph.s), ph.ms);
+    const endIso = new Date(hiStartMs + ms).toISOString();
+    const pe = parseIsoParts(endIso);
+    const end = pe ? elideDatetimeRangeEnd(ps, pe, size) : compactDateTime(endIso, size);
+    return `${start} – ${end}`;
+}
+
+/** The END term of a datetime range with its leading components elided relative
+ *  to the start (`ps`). Date fields are dropped field-by-field down to the first
+ *  that differs (year → month → day), the ISO 8601 truncated-interval form. The
+ *  TIME, when the bin carries one, is treated as a block: shown whole when the
+ *  calendar day is shared (date elided entirely → "15:00"), otherwise the end's
+ *  full date precedes it (so a cross-midnight hour bin reads "… – 2026-06-04
+ *  00:00", never a bare-day "04 00:00"). Never field-elides a time (a lone
+ *  "– 06" minute would be unreadable). */
+function elideDatetimeRangeEnd(
+    ps: { y: string; mo: string; d: string; h: string; mi: string; s: string; ms: number },
+    pe: { y: string; mo: string; d: string; h: string; mi: string; s: string; ms: number },
+    sizeToken: string,
+): string {
+    const sm = /^(\d+)(m|h|d)$/.exec(sizeToken);
+    const unit = sm ? sm[2] : '';
+    const showHour = unit === 'h' || unit === 'm';
+    const showMin = unit === 'm';
+    const sameY = ps.y === pe.y;
+    const sameMo = sameY && ps.mo === pe.mo;
+    const sameD = sameMo && ps.d === pe.d;
+    if (showHour) {
+        const time = showMin ? `${pe.h}:${pe.mi}` : `${pe.h}:00`;
+        return sameD ? time : `${pe.y}-${pe.mo}-${pe.d} ${time}`;
+    }
+    if (!sameY) { return `${pe.y}-${pe.mo}-${pe.d}`; }
+    if (!sameMo) { return `${pe.mo}-${pe.d}`; }
+    return pe.d;
 }
 
 /** The min and max bucket START among a set of selected bucket values, ordered
@@ -4203,14 +4293,23 @@ function truncateLabel(text: string, max: number): string {
  * "aggregate glyph + measure column name" (or "# rows" when measuring counts).
  * Every bubble (root, cloud, locked, active) renders the same three lines so the
  * measure shown is always self-describing. Escapes all of its inputs.
+ *
+ * `contextLabel` (optional) renders a small eyebrow ABOVE the title line naming
+ * the dimension column the title value belongs to. The spine's locked/active
+ * bubbles pass it so a standalone range like "2026-06-03 – 05" says WHAT it
+ * ranges over; cloud bubbles omit it (their floating pill already names the
+ * column for the whole field).
  */
-function bubbleBody(label: string, valueText: string, aggGlyph: string, measureName: string, dialAttr = '', aggDialAttr = '', showCaption = true): string {
+function bubbleBody(label: string, valueText: string, aggGlyph: string, measureName: string, dialAttr = '', aggDialAttr = '', showCaption = true, contextLabel = ''): string {
     // The measure dial lives on the caption's NAME span; the aggregate dial lives
     // on the GLYPH span. Both are small, precise ns-resize handles (the rest of the
     // bubble surface is free for click/drag). glyph = HOW you aggregate, name = WHAT.
     // Cloud aggregate bubbles hide the caption (the agg/column is fixed and already
     // shown on their parent hub) and instead let the title wrap to two lines, giving
     // long bin-range / dimension labels more room.
+    const contextHtml = contextLabel
+        ? `<div class="bubble-context" title="${escapeAttr(contextLabel)}">${escapeHtml(truncateLabel(contextLabel, MAX_MEASURE_NAME_LEN))}</div>`
+        : '';
     const labelHtml = showCaption
         ? `<div class="bubble-label">${escapeHtml(label)}</div>`
         : `<div class="bubble-label bubble-label-2">${escapeHtml(label)}</div>`;
@@ -4220,7 +4319,8 @@ function bubbleBody(label: string, valueText: string, aggGlyph: string, measureN
             + `<span class="agg-label">${escapeHtml(aggLabelFromGlyph(aggGlyph) || aggGlyph)}</span></span>`
             + `<span class="bubble-cap-name"${dialAttr}>${escapeHtml(truncateLabel(measureName, MAX_MEASURE_NAME_LEN))}</span></div>`
         : '';
-    return labelHtml
+    return contextHtml
+        + labelHtml
         + `<div class="bubble-primary"><span class="bubble-primary-num">${escapeHtml(valueText)}</span></div>`
         + cap;
 }
@@ -4237,10 +4337,10 @@ function extractBubbleMetric(
     const countIdx = columns.indexOf('Count');
     const measureCols = columns
         .map((name, i) => ({ name, i }))
-        .filter(c => c.name.startsWith('Sum of '));
+        .filter(c => isMeasureHeader(c.name));
     const dimIdxs = columns
         .map((name, i) => ({ name, i }))
-        .filter(c => c.name !== 'Count' && !c.name.startsWith('Sum of '))
+        .filter(c => c.name !== 'Count' && !isMeasureHeader(c.name))
         .map(c => c.i);
 
     const count = Number(row[countIdx]) || 0;
