@@ -235,6 +235,20 @@ export class ExplorePanel {
      *  reopened a prior cloud). Consumed (cleared) by render(). Post-drop only — the
      *  drag itself is not animated. */
     private pendingTransition: 'drill' | 'back' | null = null;
+    /** When set, the NEXT settled render tells the webview to BLOOM the freshly
+     *  grouped cloud — each child bubble emanates (scale + fade) out of the parent
+     *  hub to its place. Set when a grouping is picked (applyGroupKey); consumed
+     *  (cleared) by render() on the settled render. Independent of pendingTransition
+     *  (a grouping pick is not a depth-stack step). */
+    private pendingBloom = false;
+    /** When set, the NEXT render tells the webview to COLLAPSE the open cloud back
+     *  into the parent hub — the inverse of the bloom: each child bubble recedes
+     *  (translate toward the hub + scale + fade) before the level falls back to a
+     *  single ungrouped bubble. Set when removing the chip(s) that close the cloud
+     *  (removeDimension/clearGrouping landing on zero dimensions). Consumed (cleared)
+     *  by render() on the FIRST following render (the loading one, while the old
+     *  cloud is still in the client DOM to be snapshotted). */
+    private pendingCollapse = false;
 
     constructor(
         private readonly context: vscode.ExtensionContext,
@@ -450,6 +464,8 @@ export class ExplorePanel {
                     this.state.selectedDimensions = [];
                     this.state.binKeys = {};
                     this.state.focusKey = null;
+                    // The cloud is closing — recede its bubbles back into the hub.
+                    this.pendingCollapse = true;
                     void this.runGrouping();
                 }
                 break;
@@ -470,6 +486,16 @@ export class ExplorePanel {
                     if (i >= 0) { this.state.selectedDimensions.splice(i, 1); }
                     delete this.state.binKeys[message.column];
                     this.state.focusKey = null;
+                    // If that was the last chip the cloud fully closes — recede its
+                    // bubbles back into the hub (the inverse of the bloom). Removing
+                    // one of several dims instead RE-AGGREGATES into a coarser cloud,
+                    // so just bloom the recomputed set out of the hub (same as adding
+                    // a dim) — any grouping change blooms, only the full close recedes.
+                    if (this.state.selectedDimensions.length === 0) {
+                        this.pendingCollapse = true;
+                    } else {
+                        this.pendingBloom = true;
+                    }
                     void this.runGrouping();
                 }
                 break;
@@ -817,6 +843,9 @@ export class ExplorePanel {
             }
         }
         this.state.focusKey = null;
+        // Picking a grouping makes a fresh child cloud appear — bloom it out of the
+        // parent hub on the settled render.
+        this.pendingBloom = true;
         void this.runGrouping();
     }
 
@@ -1229,9 +1258,19 @@ export class ExplorePanel {
         // transition and animates once. A put-back is a single settled render.
         const settled = !this.state.loading;
         const transition = settled ? this.pendingTransition : null;
+        // Bloom (grouped-cloud entrance) plays on the SETTLED render too — the cloud
+        // bubbles only exist once the query lands. Keep the flag across the loading
+        // render, emit + clear on the settled one.
+        const bloom = settled ? this.pendingBloom : false;
+        // Collapse (cloud closing) plays on the FIRST render after the chip is
+        // removed — the LOADING one — because that's when the old cloud is still in
+        // the client DOM to be snapshotted before it's swapped away. Consume it on
+        // whichever render comes next (loading or, if there's none, settled).
+        const collapse = this.pendingCollapse;
         const html = this.bodyHtml(this.state);
-        if (settled) { this.pendingTransition = null; }
-        this.panel.webview.postMessage({ command: 'render', html, transition });
+        if (settled) { this.pendingTransition = null; this.pendingBloom = false; }
+        this.pendingCollapse = false;
+        this.panel.webview.postMessage({ command: 'render', html, transition, bloom, collapse });
     }
 
     private bodyHtml(state: ExploreState): string {
@@ -1709,7 +1748,7 @@ export class ExplorePanel {
      * recede magnitudes here are deliberately tunable constants.
      */
     private ghostLayersHtml(state: ExploreState): string {
-        const GHOST_MAX = 2;                 // how many prior layers stay visible
+        const GHOST_MAX = 3;                 // how many prior layers stay visible
         const chain = state.drillChain;
         const start = Math.max(0, chain.length - GHOST_MAX);
         const layers: string[] = [];
@@ -2964,6 +3003,57 @@ export class ExplorePanel {
     const GHOST_CLOUD_SIZE = 96;
     const GHOST_HUB_SIZE = 180;
     function sizeGhost(g, px) { g.style.width = px + 'px'; g.style.height = px + 'px'; }
+    // Multi-select tear: the whole selected set collapses into the single drag ghost
+    // so the group reads as "becoming one thing". Each selected bubble emits a
+    // position:fixed CLONE on <body> (viewport space, survives the later render swap,
+    // same trick as the bloom/collapse) that flies into the ghost's birth point while
+    // shrinking + fading. The real bubbles STAY PUT (the clone starts exactly atop its
+    // original, so you just see a copy peel off toward the pointer) — the cloud stays
+    // whole and recedes whole, matching the single-drag (no torn holes) and the
+    // "nothing is destroyed, you can always go back" model. Fire-once at tear; clones
+    // self-remove when they land.
+    function playSelectionCoalesce(els, cx, cy) {
+        const clones = [];
+        for (let i = 0; i < els.length; i++) {
+            const el = els[i];
+            const r = el.getBoundingClientRect();
+            if (r.width === 0 || r.height === 0) { continue; }
+            const clone = el.cloneNode(true);
+            clone.classList.remove('selected');   // drop the selection tile chrome
+            clone.style.position = 'fixed';
+            clone.style.margin = '0';
+            clone.style.left = r.left + 'px';
+            clone.style.top = r.top + 'px';
+            clone.style.width = r.width + 'px';
+            clone.style.height = r.height + 'px';
+            clone.style.zIndex = '990';   // just under the ghost (1000)
+            clone.style.pointerEvents = 'none';
+            clone.style.transformOrigin = 'center center';
+            clone.style.transition = 'none';
+            clone.style.transform = 'translate(0,0) scale(1)';
+            document.body.appendChild(clone);
+            clones.push({
+                el: clone,
+                dx: cx - (r.left + r.width / 2),
+                dy: cy - (r.top + r.height / 2),
+            });
+        }
+        if (!clones.length) { return; }
+        void document.body.offsetWidth;   // commit the FROM state for all at once
+        clones.forEach(function(c) {
+            c.el.style.transition = 'transform .28s cubic-bezier(.4,0,.2,1), opacity .28s ease-in';
+            c.el.style.transform = 'translate(' + c.dx + 'px,' + c.dy + 'px) scale(0.25)';
+            c.el.style.opacity = '0';
+            let finished = false;
+            const done = function() {
+                if (finished) { return; }
+                finished = true;
+                if (c.el.parentNode) { c.el.parentNode.removeChild(c.el); }
+            };
+            c.el.addEventListener('transitionend', done);
+            setTimeout(done, 500);   // safety net
+        });
+    }
     // The "put it back" commit test: like the detach gesture, pulling the current
     // hub bubble AWAY from where it sits — in ANY direction — past a small commit
     // distance arms the return to the prior cloud. Direction-agnostic so it feels
@@ -2994,15 +3084,22 @@ export class ExplorePanel {
             dragState = { x: e.clientX, y: e.clientY, dragging: false, ghost: null, label: '',
                 key: cloud ? cloud.getAttribute('data-key') : null,
                 hub: !cloud && !focus && !!hub };
-            const lbl = target.querySelector('.bubble-label');
-            dragState.label = lbl ? lbl.textContent : '';
+            // The dragged bubble's label, however its tier draws it (full label,
+            // numeric mini, or dot hover-title) — so a smaller-tier bubble's ghost
+            // still carries its name instead of coming up blank.
+            dragState.label = bubbleLabelOf(target);
             // Seed the ghost with the dragged bubble's heat hue so it reads as the
             // SAME circle lifting off the cloud. If a multi-selection is being
             // dragged, blend every selected bubble's heat. Hubs keep the neutral
             // ghost (they aren't heat-coloured cloud bubbles).
             if (!dragState.hub) {
                 const selected = app.querySelectorAll('.bubble.selected');
-                dragState.heat = (selected.length > 1 && target.classList.contains('selected'))
+                const multi = selected.length > 1 && target.classList.contains('selected');
+                dragState.multi = multi;
+                // Stash the selected elements so the tear can coalesce the whole set
+                // into the single ghost ("becoming one thing").
+                if (multi) { dragState.selectedEls = Array.prototype.slice.call(selected); }
+                dragState.heat = multi
                     ? blendHeats(Array.prototype.slice.call(selected))
                     : blendHeats([target]);
             } else {
@@ -3040,6 +3137,11 @@ export class ExplorePanel {
             else if (dragState.hub) { tintGhost(g, 'var(--root-accent)', 24); dragState.armed = false; sizeGhost(g, GHOST_HUB_SIZE); }
             document.body.appendChild(g);
             dragState.ghost = g;
+            // Multi-select: the selected bubbles tear away and coalesce into this one
+            // ghost, converging on its birth point (the current pointer) as it lifts.
+            if (dragState.multi && dragState.selectedEls) {
+                playSelectionCoalesce(dragState.selectedEls, e.clientX, e.clientY);
+            }
         }
         if (dragState.ghost) {
             dragState.ghost.style.left = e.clientX + 'px';
@@ -3681,11 +3783,141 @@ export class ExplorePanel {
         });
     }
 
+    // Bloom the freshly-grouped cloud: every child bubble emanates (scale up + fade
+    // in) OUT of the parent hub to its resting place, like petals opening. Runs on
+    // the settled render after a grouping is picked.
+    //
+    // Both the hub and the cloud bubbles live in the SAME (scene) coordinate space,
+    // so the per-bubble offset from the hub is just the difference of their
+    // getBoundingClientRect centres — scroll-invariant (both rects shift together)
+    // and unaffected by perspective (the live card isn't projected at rest). No
+    // fixed clones needed here, unlike the hub emerge which bridged viewport↔scene.
+    const BLOOM_STAGGER = 220;   // ms spread from the innermost to the outermost ring
+    function playCloudBloom() {
+        const hub = app.querySelector('.card .drill-spine .bubble');
+        const bubbles = app.querySelectorAll('.card .value-area .flower .bubble');
+        if (!hub || !bubbles.length) { return; }
+        const hr = hub.getBoundingClientRect();
+        const hx = hr.left + hr.width / 2;
+        const hy = hr.top + hr.height / 2;
+        // Measure every bubble first (one layout read), capturing its offset from the
+        // hub and its distance (for a radial, expanding-ring stagger).
+        const items = [];
+        let maxDist = 1;
+        for (let i = 0; i < bubbles.length; i++) {
+            const b = bubbles[i];
+            const r = b.getBoundingClientRect();
+            const dx = (r.left + r.width / 2) - hx;
+            const dy = (r.top + r.height / 2) - hy;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist > maxDist) { maxDist = dist; }
+            items.push({ el: b, dx: dx, dy: dy, dist: dist });
+        }
+        // Park each bubble AT the hub (translate back by its offset) shrunk + faded,
+        // transitions suppressed.
+        items.forEach(function(it) {
+            it.el.style.transformOrigin = 'center center';
+            it.el.style.transition = 'none';
+            it.el.style.transform = 'translate(' + (-it.dx) + 'px,' + (-it.dy) + 'px) scale(0.1)';
+            it.el.style.opacity = '0';
+        });
+        void app.offsetWidth;   // commit the FROM state for all at once
+        // Release each to its resting place, delayed by its ring (inner first) so the
+        // cloud blooms outward. Clear the inline overrides once done so hover/focus
+        // styling isn't pinned by a stale transition.
+        items.forEach(function(it) {
+            const delay = (it.dist / maxDist) * BLOOM_STAGGER;
+            it.el.style.transition = 'transform .4s cubic-bezier(.2,.7,.3,1) ' + delay + 'ms, opacity .3s ease-out ' + delay + 'ms';
+            it.el.style.transform = '';
+            it.el.style.opacity = '';
+            setTimeout(function() {
+                it.el.style.transition = '';
+                it.el.style.transformOrigin = '';
+            }, delay + 450);
+        });
+    }
+
+    // Collapse the open cloud back INTO the parent hub — the inverse of the bloom,
+    // played when a chip is removed and the level falls back to a single ungrouped
+    // bubble. The old cloud bubbles are about to be destroyed by the innerHTML swap
+    // (and a later settled render swaps again), so we can't animate them in place.
+    // Instead we snapshot each as a position:fixed CLONE on <body> (pure viewport
+    // space, immune to the swaps, scroll and perspective — same trick as the hub
+    // emerge), then glide the clones into the hub's resting centre and fade them.
+    //
+    // Returns a starter fn to call AFTER the swap, so the hub centre is measured on
+    // the NEW (ungrouped) layout where the single bubble has settled. Returns null
+    // when there's nothing to collapse (e.g. table view has no flower bubbles).
+    const COLLAPSE_STAGGER = 180;   // ms spread; outer rings leave first, all arrive together
+    function snapshotCloudCollapse() {
+        const bubbles = app.querySelectorAll('.card .value-area .flower .bubble');
+        if (!bubbles.length) { return null; }
+        // Clone each bubble at its current viewport rect, frozen on the body.
+        const clones = [];
+        for (let i = 0; i < bubbles.length; i++) {
+            const b = bubbles[i];
+            const r = b.getBoundingClientRect();
+            if (r.width === 0 || r.height === 0) { continue; }
+            const clone = b.cloneNode(true);
+            clone.style.position = 'fixed';
+            clone.style.margin = '0';
+            clone.style.left = r.left + 'px';
+            clone.style.top = r.top + 'px';
+            clone.style.width = r.width + 'px';
+            clone.style.height = r.height + 'px';
+            clone.style.zIndex = '880';
+            clone.style.pointerEvents = 'none';
+            clone.style.transformOrigin = 'center center';
+            clone.style.transition = 'none';
+            clone.style.transform = 'translate(0,0) scale(1)';
+            document.body.appendChild(clone);
+            clones.push({ el: clone, cx: r.left + r.width / 2, cy: r.top + r.height / 2 });
+        }
+        if (!clones.length) { return null; }
+        // The starter, run post-swap once the new single hub bubble has its place.
+        return function startCollapse() {
+            const hub = app.querySelector('.card .drill-spine .bubble');
+            const hr = hub ? hub.getBoundingClientRect() : null;
+            // Fall back to the screen centre if the hub somehow isn't there yet.
+            const hx = hr ? hr.left + hr.width / 2 : window.innerWidth / 2;
+            const hy = hr ? hr.top + hr.height / 2 : window.innerHeight / 2;
+            let maxDist = 1;
+            clones.forEach(function(c) {
+                c.dx = hx - c.cx;
+                c.dy = hy - c.cy;
+                c.dist = Math.sqrt(c.dx * c.dx + c.dy * c.dy);
+                if (c.dist > maxDist) { maxDist = c.dist; }
+            });
+            void document.body.offsetWidth;   // commit the FROM state
+            clones.forEach(function(c) {
+                // Outermost (farthest) leave first so the ring contracts inward and
+                // everything lands on the hub together.
+                const delay = (1 - c.dist / maxDist) * COLLAPSE_STAGGER;
+                c.el.style.transition = 'transform .42s cubic-bezier(.5,0,.3,1) ' + delay + 'ms, opacity .42s ease-in ' + delay + 'ms';
+                c.el.style.transform = 'translate(' + c.dx + 'px,' + c.dy + 'px) scale(0.1)';
+                c.el.style.opacity = '0';
+                let finished = false;
+                const done = function() {
+                    if (finished) { return; }
+                    finished = true;
+                    if (c.el.parentNode) { c.el.parentNode.removeChild(c.el); }
+                };
+                c.el.addEventListener('transitionend', done);
+                setTimeout(done, delay + 700);   // safety net
+            });
+        };
+    }
+
     window.addEventListener('message', function(event) {
         const msg = event.data;
         if (msg && msg.command === 'render') {
             closeBloom();
+            // Snapshot the closing cloud BEFORE the swap destroys it (clones live on
+            // <body>, so they survive this and the later settled render).
+            const startCollapse = msg.collapse ? snapshotCloudCollapse() : null;
             app.innerHTML = msg.html;
+            // Measure the hub on the fresh layout, then contract the clones into it.
+            if (startCollapse) { startCollapse(); }
             // Keep the newest step (right edge) of the path strip in view when the
             // chain outgrows the fixed rail.
             const strip = app.querySelector('[data-path-strip]');
@@ -3711,6 +3943,9 @@ export class ExplorePanel {
                 // from the drop point and reveals the real hub when it lands.
                 hideRealHub();
             }
+            // A freshly grouped cloud blooms out of the parent hub (independent of
+            // the depth-stack transition — a grouping pick is not a stack step).
+            if (msg.bloom) { playCloudBloom(); }
         }
     });
 
