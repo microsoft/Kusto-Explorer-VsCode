@@ -23,6 +23,8 @@
 import * as vscode from 'vscode';
 import { IServer } from './server';
 import type { DatabaseColumnInfo, DatabaseTableInfo } from './server';
+import type { DatabaseRelationshipModel } from './relationshipModel';
+import type { RelationshipBuildPhase } from './relationshipManager';
 import {
     classifyColumns,
     refineClassification,
@@ -34,6 +36,34 @@ import {
     type ClassifiedColumn,
     type ProfileStats,
 } from './columnClassifier';
+import { kustoLiteral } from './kustoLiteral';
+
+/**
+ * Builds (or returns a cached) verified, named relationship model for a database,
+ * reporting build-phase progress. Injected so the panel can show an in-place
+ * "setting things up" state while the first build runs. Returns undefined if the
+ * model can't be built (e.g. schema unavailable); the panel still explores.
+ */
+export type RelationshipProvider = (
+    cluster: string,
+    database: string,
+    token: vscode.CancellationToken,
+    onProgress: (phase: RelationshipBuildPhase) => void,
+) => Promise<DatabaseRelationshipModel | undefined>;
+
+/** Maps a relationship build phase to the status line shown in the setup card. */
+function setupMessageFor(phase: RelationshipBuildPhase): string {
+    switch (phase.kind) {
+        case 'inferring':
+            return 'Identifying tables, columns, and relationships…';
+        case 'verifying':
+            return `Verifying relationships (${phase.done}/${phase.total})…`;
+        case 'naming':
+            return 'Naming relationships…';
+        default:
+            return 'Setting things up…';
+    }
+}
 
 /** A tree item carrying enough context to explore a table. */
 export interface ExploreTarget {
@@ -142,6 +172,13 @@ interface ExploreState {
     /** True while the record sample is being fetched. */
     recordsLoading: boolean;
     loading: boolean;
+    /** While set, the panel shows a centered "setting things up" status instead of
+     *  the bubble scene — used during the first (slow) relationship-model build for
+     *  the database, before we can show the table bubble. Null once setup is done. */
+    setupMessage: string | null;
+    /** The database's verified, named relationship model (built on first explore),
+     *  or null until/unless it's available. */
+    relationships: DatabaseRelationshipModel | null;
     error?: string;
 }
 
@@ -249,10 +286,15 @@ export class ExplorePanel {
      *  by render() on the FIRST following render (the loading one, while the old
      *  cloud is still in the client DOM to be snapshotted). */
     private pendingCollapse = false;
+    /** Cancels an in-flight relationship build when the user re-explores or the
+     *  panel is disposed (so we don't keep building for an abandoned table). */
+    private buildCts: vscode.CancellationTokenSource | undefined;
 
     constructor(
         private readonly context: vscode.ExtensionContext,
         private readonly server: IServer,
+        /** Builds/returns the database's relationship model; omit to skip setup. */
+        private readonly relationshipProvider?: RelationshipProvider,
     ) {}
 
     /** Entry point: open (or reuse) the panel and explore the given table. */
@@ -282,6 +324,8 @@ export class ExplorePanel {
             records: null,
             recordsLoading: false,
             loading: true,
+            setupMessage: this.relationshipProvider ? 'Setting things up…' : null,
+            relationships: null,
         };
 
         this.ensurePanel();
@@ -289,7 +333,58 @@ export class ExplorePanel {
         this.panel!.reveal(vscode.ViewColumn.Active, false);
         this.render();
 
+        // Build the database's relationship model first (the slow, once-per-session
+        // step). While it runs the panel shows a "setting things up" status rather
+        // than an empty scene; on cache hit this returns immediately.
+        await this.prepareRelationships(target.clusterName, target.databaseName);
+
         await this.loadOverview();
+    }
+
+    /**
+     * Ensures the database's relationship model is built, showing in-panel setup
+     * status while the (first) build runs. Best-effort: any failure just clears
+     * the setup state and proceeds — exploration never depends on relationships.
+     */
+    private async prepareRelationships(cluster: string, database: string): Promise<void> {
+        if (!this.relationshipProvider) {
+            if (this.state) { this.state.setupMessage = null; }
+            return;
+        }
+        // Cancel any prior build and start a fresh token for this explore.
+        this.buildCts?.cancel();
+        this.buildCts?.dispose();
+        const cts = new vscode.CancellationTokenSource();
+        this.buildCts = cts;
+
+        const requestState = this.state;
+        try {
+            const model = await this.relationshipProvider(
+                cluster,
+                database,
+                cts.token,
+                (phase) => {
+                    // Ignore progress for a superseded explore.
+                    if (this.state !== requestState || !this.state) { return; }
+                    this.state.setupMessage = setupMessageFor(phase);
+                    this.render();
+                },
+            );
+            if (this.state === requestState && this.state) {
+                this.state.relationships = model ?? null;
+            }
+        } catch {
+            // Relationships are an enhancement, not a requirement — ignore failures.
+        } finally {
+            if (this.state === requestState && this.state) {
+                this.state.setupMessage = null;
+                this.render();
+            }
+            if (this.buildCts === cts) {
+                this.buildCts = undefined;
+            }
+            cts.dispose();
+        }
     }
 
     // ─── Webview lifecycle ──────────────────────────────────────────────
@@ -314,6 +409,9 @@ export class ExplorePanel {
 
         this.panel.onDidDispose(
             () => {
+                this.buildCts?.cancel();
+                this.buildCts?.dispose();
+                this.buildCts = undefined;
                 this.panel = undefined;
                 this.state = undefined;
                 this.ready = false;
@@ -521,11 +619,20 @@ export class ExplorePanel {
             const total = await this.runScalarCount(`${bracket(source)} | count`, cluster, database);
             if (token !== this.renderToken || !this.state) { return; }
             this.state.totalCount = total;
+            // Paint the count AS SOON as it lands — don't wait for the profile query
+            // below. Profiling (a dcount over every column) can be slow on large
+            // tables and may not return at all on external tables; blocking the
+            // render on it left the count sitting invisible in state until the user
+            // clicked (which forced a render). Profiling is a progressive refinement,
+            // so show the count now and let it re-render when (if) profiling lands.
+            this.state.loading = false;
+            this.render();
 
             const stats = await this.profile(this.state.columns, source, cluster, database, total);
             if (token !== this.renderToken || !this.state) { return; }
             if (stats) {
                 this.state.columns = refineClassification(this.state.columns, stats);
+                this.render();
             }
         } catch (err) {
             if (token === this.renderToken && this.state) {
@@ -1310,7 +1417,26 @@ export class ExplorePanel {
     }
 
     private bodyHtml(state: ExploreState): string {
+        // While the database's relationship model is being built (the slow,
+        // once-per-session step), show a centered status instead of an empty scene
+        // — we can't draw the table bubble until setup completes.
+        if (state.setupMessage) {
+            return this.setupHtml(state);
+        }
         return this.collapsedHtml(state);
+    }
+
+    /** A centered "setting things up" status shown during the relationship build. */
+    private setupHtml(state: ExploreState): string {
+        return `
+            <div class="setup-plane">
+                <div class="setup-card">
+                    <div class="setup-spinner" aria-hidden="true"></div>
+                    <div class="setup-title">Preparing ${escapeHtml(state.source)}</div>
+                    <div class="setup-message">${escapeHtml(state.setupMessage ?? '')}</div>
+                    <div class="setup-hint">Learning this database's tables, columns, and relationships. This happens once.</div>
+                </div>
+            </div>`;
     }
 
     private collapsedHtml(state: ExploreState): string {
@@ -1357,18 +1483,22 @@ export class ExplorePanel {
         // chips live on the root only while it owns the grouping (before drilling).
         const rootFacet = drilled ? '' : this.dimFacetHtml(state);
         const rootChips = drilled ? '' : this.dimChipsHtml(state);
+        // The relationship facet (links to related tables) lives on the root while
+        // it's the working bubble (before drilling), beside the dimension facet.
+        const rootRel = drilled ? '' : this.relFacetHtml(state);
         // The record-lens toggle lives inside the root bubble (beside the facet)
         // only while the root is the ungrouped bubble you're looking at — i.e. not
         // drilled (a deeper bubble owns it then) and not grouped (the cloud owns
         // the "below" slot then).
         const rootRecords = (!drilled && !hasGroups) ? this.recordsToggleHtml(state) : '';
-        const rootBubbleExtra = `${rootFacet ? ' has-facet' : ''}${rootRecords ? ' has-records' : ''}`;
+        const rootBubbleExtra = `${rootFacet ? ' has-facet' : ''}${rootRecords ? ' has-records' : ''}${rootRel ? ' has-rel' : ''}`;
         const rootHub = `
                 <div class="bubble-hub">
                     <div class="${rootBubbleClass}${rootBubbleExtra}"${rootAction}
                         title="${escapeAttr(rootTitle)}">
                         ${bubbleBody(state.source, rootValue, aggGlyph, measureName, rootDial, rootAggDial)}
                         ${rootFacet}
+                        ${rootRel}
                         ${rootRecords}
                     </div>
                     ${rootChips}
@@ -1493,6 +1623,61 @@ export class ExplorePanel {
             + (current ? ` data-dimfacet-current="${escapeAttr(current)}"` : '')
             + ` title="${escapeAttr(tip)}">`
             + `${dots}</div>`;
+    }
+
+    /**
+     * The in-circle relationship facet, anchored at the bottom interior of a hub
+     * bubble beside the dimension facet. Click it to open a vertical wheel of the
+     * relationships this table takes part in, listed by their relationship name
+     * (e.g. "Customer", "Orders"). Choosing one will — in a later step — open a
+     * new bubble across that relationship; for now it's a no-op. Hidden entirely
+     * when this table has no known relationships (or the model hasn't loaded).
+     * Returns '' when there are none.
+     */
+    private relFacetHtml(state: ExploreState): string {
+        if (!state.relationships) { return ''; }
+        const links = state.relationships.getLinks(state.source);
+        // One flat list, both directions together (no "belongs to" / "has many"
+        // sectioning). Each entry carries enough edge identity to follow it later;
+        // the wheel only shows the name. Outbound = this table's FK → parent
+        // (forwardName, singular); inbound = child's FK → this table (reverseName,
+        // plural).
+        const descriptors: Array<{ name: string; direction: 'out' | 'in'; table: string; fromTable: string; fromColumn: string; toTable: string; toColumn: string }> = [];
+        for (const e of links.outbound) {
+            descriptors.push({
+                name: e.forwardName ?? e.toTable,
+                direction: 'out',
+                table: e.toTable,
+                fromTable: e.fromTable, fromColumn: e.fromColumn, toTable: e.toTable, toColumn: e.toColumn,
+            });
+        }
+        for (const e of links.inbound) {
+            descriptors.push({
+                name: e.reverseName ?? e.fromTable,
+                direction: 'in',
+                table: e.fromTable,
+                fromTable: e.fromTable, fromColumn: e.fromColumn, toTable: e.toTable, toColumn: e.toColumn,
+            });
+        }
+        if (descriptors.length === 0) { return ''; }
+        const names = descriptors.map(d => d.name);
+        const tip = 'Related tables';
+        // A small hub-and-spoke glyph: a center node with links radiating to three
+        // satellites — a glyph for "tables related to this one". Tinted with the
+        // id/key role colour, since relationships ride on key columns.
+        const icon = `<svg class="rel-facet-mark" viewBox="0 0 16 16" aria-hidden="true">`
+            + `<line x1="8" y1="8" x2="3" y2="3.6" stroke="currentColor" stroke-width="1.1"/>`
+            + `<line x1="8" y1="8" x2="13.2" y2="5.2" stroke="currentColor" stroke-width="1.1"/>`
+            + `<line x1="8" y1="8" x2="6" y2="13.2" stroke="currentColor" stroke-width="1.1"/>`
+            + `<circle cx="8" cy="8" r="2.3" fill="currentColor"/>`
+            + `<circle cx="3" cy="3.6" r="1.7" fill="currentColor"/>`
+            + `<circle cx="13.2" cy="5.2" r="1.7" fill="currentColor"/>`
+            + `<circle cx="6" cy="13.2" r="1.7" fill="currentColor"/></svg>`;
+        return `<div class="rel-facet"`
+            + ` data-relfacet="${escapeAttr(JSON.stringify(names))}"`
+            + ` data-relfacet-links="${escapeAttr(JSON.stringify(descriptors))}"`
+            + ` title="${escapeAttr(tip)}">`
+            + `${icon}</div>`;
     }
 
     /**
@@ -1670,14 +1855,16 @@ export class ExplorePanel {
         // The active stacked bubble is always ungrouped (no dimension yet), so it
         // owns the record lens — its toggle sits inside, beside the dim facet.
         const facet = this.dimFacetHtml(state);
+        const rel = this.relFacetHtml(state);
         const records = this.recordsToggleHtml(state);
-        const bubbleExtra = `${facet ? ' has-facet' : ''}${records ? ' has-records' : ''}`;
+        const bubbleExtra = `${facet ? ' has-facet' : ''}${records ? ' has-records' : ''}${rel ? ' has-rel' : ''}`;
         return `
             <div class="bubble-hub bubble-hub-active">
                 <div class="bubble bubble-locked bubble-active${bubbleExtra}" data-hubdrag="1"
                     title="${escapeAttr(this.crumbFullDisplay(crumb))}">
                     ${bubbleBody(crumb.display, m.valueText, m.aggGlyph, m.measureName, dial, aggDial, true, crumb.fromDimensions.join(' · '))}
                     ${facet}
+                    ${rel}
                     ${records}
                 </div>
                 ${this.dimChipsHtml(state)}
@@ -1695,6 +1882,7 @@ export class ExplorePanel {
         // Only the deepest locked bubble carries the dimension facet (pick the next
         // grouping) and the active-dimension chips.
         const facet = isDeepest ? this.dimFacetHtml(state) : '';
+        const rel = isDeepest ? this.relFacetHtml(state) : '';
         const chips = isDeepest ? this.dimChipsHtml(state) : '';
         // Only the deepest locked bubble owns the live measure choice → only it
         // gets the dial.
@@ -1713,10 +1901,11 @@ export class ExplorePanel {
         const hubDrag = isDeepest ? ' data-hubdrag="1"' : '';
         return `
             <div class="locked-hub">
-                <div class="bubble bubble-locked clickable"${action}${hubDrag}
+                <div class="bubble bubble-locked clickable${facet ? ' has-facet' : ''}${rel ? ' has-rel' : ''}"${action}${hubDrag}
                     title="${escapeAttr(title)}">
                     ${bubbleBody(crumb.display, m.valueText, m.aggGlyph, m.measureName, dial, aggDial, true, crumb.fromDimensions.join(' · '))}
                     ${facet}
+                    ${rel}
                 </div>
                 ${chips}
             </div>`;
@@ -2252,6 +2441,20 @@ export class ExplorePanel {
         --focus-accent: #e5c07b;
     }
     #app { display: flex; flex-direction: column; gap: 12px; }
+    /* SETUP card — the centered "setting things up" status shown while the
+       database's relationship model is built (the first explore of a database).
+       Replaces the scene entirely until setup completes. */
+    .setup-plane { display: flex; align-items: center; justify-content: center; min-height: 60vh; }
+    .setup-card { display: flex; flex-direction: column; align-items: center; gap: 12px;
+        text-align: center; max-width: 420px; padding: 28px 32px; }
+    .setup-spinner { width: 34px; height: 34px; border-radius: 50%;
+        border: 3px solid var(--vscode-editorWidget-border, #555);
+        border-top-color: var(--root-accent);
+        animation: setup-spin 0.9s linear infinite; }
+    @keyframes setup-spin { to { transform: rotate(360deg); } }
+    .setup-title { font-size: 1.15em; font-weight: 600; color: var(--vscode-foreground); }
+    .setup-message { font-size: 0.95em; color: var(--vscode-foreground); opacity: 0.9; min-height: 1.2em; }
+    .setup-hint { font-size: 0.82em; color: var(--vscode-descriptionForeground); opacity: 0.8; }
     /* SCENE plane — the "room" the clouds live in. .scene-plane is the perspective
        context (the depth the layers will recede into); .scene is the single
        transformable unit (Stage 2+ will translate/scale/fade it). For Stage 0 both
@@ -2566,10 +2769,21 @@ export class ExplorePanel {
     .records-facet.active:hover {
         background: color-mix(in srgb, var(--vscode-foreground) 88%, transparent);
     }
-    /* When the bubble carries BOTH controls, nudge each off-center so they read as
-       a pair; alone, each stays centered (the default transform above). */
-    .bubble.has-facet.has-records .dim-facet { transform: translateX(calc(-50% - 14px)); }
-    .bubble.has-facet.has-records .records-facet { transform: translateX(calc(-50% + 14px)); }
+    /* When the bubble carries MULTIPLE in-circle controls, nudge each off-center
+       so they read as an evenly spaced row; a lone control stays centered (the
+       default transform on each). Controls, in slot order: break-down (dim-facet),
+       record-lens (records-facet), relationships (rel-facet). */
+    /* two controls → ±14px */
+    .bubble.has-facet.has-records:not(.has-rel) .dim-facet { transform: translateX(calc(-50% - 14px)); }
+    .bubble.has-facet.has-records:not(.has-rel) .records-facet { transform: translateX(calc(-50% + 14px)); }
+    .bubble.has-facet.has-rel:not(.has-records) .dim-facet { transform: translateX(calc(-50% - 14px)); }
+    .bubble.has-facet.has-rel:not(.has-records) .rel-facet { transform: translateX(calc(-50% + 14px)); }
+    .bubble.has-records.has-rel:not(.has-facet) .records-facet { transform: translateX(calc(-50% - 14px)); }
+    .bubble.has-records.has-rel:not(.has-facet) .rel-facet { transform: translateX(calc(-50% + 14px)); }
+    /* three controls → -28 / 0 / +28 */
+    .bubble.has-facet.has-records.has-rel .dim-facet { transform: translateX(calc(-50% - 28px)); }
+    .bubble.has-facet.has-records.has-rel .records-facet { transform: translateX(-50%); }
+    .bubble.has-facet.has-records.has-rel .rel-facet { transform: translateX(calc(-50% + 28px)); }
 
     .card .records-panel { align-self: stretch; }
     /* The record lens sits below the spine at the same card gap as the cloud — both
@@ -2795,6 +3009,11 @@ export class ExplorePanel {
         border-top: 1px solid var(--role-dimension); border-bottom: 1px solid var(--role-dimension);
         opacity: 0.35; pointer-events: none;
     }
+    /* The relationship wheel reuses the dimension wheel's popup chrome but tints
+       its centered (current) item and centerline with the id/key role colour, to
+       match the relationship facet glyph. */
+    .dim-dial-popup.is-rel .dim-dial-item.current { color: var(--role-id); }
+    .dim-dial-popup.is-rel .dim-dial-center { border-color: var(--role-id); }
 
     /* ── Dimension facet: the in-circle, bottom-interior dimension control ──
        Icon-only — a 2x2 cluster of heat-tinted dots that hints at the bubble
@@ -2818,6 +3037,29 @@ export class ExplorePanel {
         box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--vscode-foreground) 32%, transparent);
     }
     .dim-facet-mark { display: block; width: 15px; height: 15px; }
+
+    /* ── Relationship facet: the in-circle, bottom-interior links control ──
+       Twin of the dimension facet, but icon-only with a hub-and-spoke glyph that
+       hints at "tables related to this one". Tinted with the id/key role colour
+       (relationships ride on key columns). Calm at rest, brightens on hub hover;
+       click to open the relationship-name scroller. Hidden when the table has no
+       known relationships. */
+    .rel-facet {
+        position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%);
+        display: inline-flex; align-items: center; justify-content: center; z-index: 2;
+        width: 22px; height: 22px; border-radius: 50%;
+        user-select: none; color: var(--role-id);
+        background: transparent; box-shadow: none;
+        opacity: 0.55; cursor: pointer; touch-action: none;
+        transition: opacity 0.12s ease-out, background 0.12s ease-out, box-shadow 0.12s ease-out;
+    }
+    .bubble-hub:hover .rel-facet, .locked-hub:hover .rel-facet { opacity: 0.95; }
+    .rel-facet:hover {
+        opacity: 1;
+        background: color-mix(in srgb, var(--vscode-foreground) 14%, transparent);
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--vscode-foreground) 32%, transparent);
+    }
+    .rel-facet-mark { display: block; width: 15px; height: 15px; }
 
     /* Active grouping chips: shown just below the hub bubble (in the bloom-reserve
        space). The × prunes one dimension at a time so accumulated (combined)
@@ -3110,7 +3352,7 @@ export class ExplorePanel {
         if (!e.target.closest) { return; }
         // A press starting on a dial capsule or the dim facet belongs to those
         // controls (handled separately), never the drag gestures.
-        if (e.target.closest('[data-dial]') || e.target.closest('.dim-facet')) { return; }
+        if (e.target.closest('[data-dial]') || e.target.closest('.dim-facet') || e.target.closest('.rel-facet')) { return; }
         // Either the already-focused aggregate (legacy gesture) OR any cloud
         // bubble directly — press and drag without a focus click first. The cloud
         // bubble carries its row key so the drop can drill straight into it.
@@ -3437,9 +3679,11 @@ export class ExplorePanel {
         if (openWheel && !onDial) { closeDialWheel(); }
         const onDim = e.target.closest && (e.target.closest('.dim-dial-popup') || e.target.closest('[data-dimfacet]'));
         if (openDim && !onDim) { closeDimWheel(); }
+        const onRel = e.target.closest && (e.target.closest('.dim-dial-popup') || e.target.closest('[data-relfacet]'));
+        if (openRel && !onRel) { closeRelWheel(); }
     });
     window.addEventListener('keydown', function(e) {
-        if (e.key === 'Escape') { closeDialWheel(); closeDimWheel(); }
+        if (e.key === 'Escape') { closeDialWheel(); closeDimWheel(); closeRelWheel(); }
     });
 
     // ── Dimension facet: click the icon to open, scroll to pick (auto-applies) ──
@@ -3516,6 +3760,7 @@ export class ExplorePanel {
     }
     function openDimFacet(facetEl, cursorX, cursorY, accumulate) {
         closeDimWheel();
+        closeRelWheel();
         // Shift held on the facet press = ACCUMULATE: only fields not already in
         // use. No Shift = REPLACE: every available field (current included).
         const attr = accumulate ? 'data-dimfacet-accumulate' : 'data-dimfacet';
@@ -3612,6 +3857,145 @@ export class ExplorePanel {
                     }
                 }
                 commitDim(s);
+            }
+        }
+    });
+
+    // ── Relationship facet: click the icon to open a wheel of related-table names ──
+    // Twin of the dimension facet, but it lists the relationships this table takes
+    // part in (by their relationship name). PRIMARY = MOUSE WHEEL to spin the menu;
+    // CLICK an item (or the centered one) to choose. ALT = drag the wheel
+    // vertically (touch); release applies. Picking a relationship currently just
+    // dismisses the wheel — following it into a new bubble is a later step.
+    let openRel = null;     // persistent wheel: { facetEl, options, index, rect, cursorY, popup, list }
+    let relDrag = null;     // active drag on the open wheel: { startY, startIndex, dragging }
+    let relPress = null;    // facet press waiting to resolve into an open-tap
+    const REL_ROW_H = 26;   // px height of one wheel item (matches CSS)
+    const REL_GAIN = 2.2;   // drag-scrub travels a little faster than the finger
+    function buildRelPopup(s) {
+        const p = document.createElement('div');
+        // Reuse the dimension wheel's chrome; the .is-rel modifier re-tints it.
+        p.className = 'dim-dial-popup is-rel is-open';
+        const list = document.createElement('div');
+        list.className = 'dim-dial-list';
+        s.options.forEach(function(opt) {
+            const item = document.createElement('div');
+            item.className = 'dim-dial-item';
+            item.textContent = opt;
+            list.appendChild(item);
+        });
+        p.appendChild(list);
+        const center = document.createElement('div');
+        center.className = 'dim-dial-center';
+        p.appendChild(center);
+        const r = s.rect;
+        p.style.left = (r.left + r.width / 2) + 'px';
+        p.style.top = s.cursorY + 'px';
+        document.body.appendChild(p);
+        s.popup = p; s.list = list;
+    }
+    function updateRelWheel(s) {
+        const ty = -(s.index * REL_ROW_H + REL_ROW_H / 2);
+        s.list.style.transform = 'translateY(' + ty + 'px)';
+        const items = s.list.children;
+        for (let i = 0; i < items.length; i++) {
+            items[i].classList.toggle('current', i === s.index);
+        }
+    }
+    function setRelIndex(s, idx) {
+        if (idx < 0) { idx = 0; }
+        if (idx > s.options.length - 1) { idx = s.options.length - 1; }
+        s.index = idx;
+        updateRelWheel(s);
+    }
+    function closeRelWheel() {
+        if (openRel) {
+            if (openRel.popup) { openRel.popup.remove(); }
+            openRel = null;
+        }
+        relDrag = null;
+    }
+    function commitRel(s) {
+        // The chosen relationship is s.options[s.index]. Following it into a new
+        // bubble across the relationship is a later step; for now picking simply
+        // dismisses the wheel.
+        closeRelWheel();
+    }
+    function openRelFacet(facetEl, cursorX, cursorY) {
+        closeRelWheel();
+        closeDimWheel();
+        let options;
+        try { options = JSON.parse(facetEl.getAttribute('data-relfacet')); } catch (_) { return; }
+        if (!options || options.length === 0) { return; }
+        const rect = facetEl.getBoundingClientRect();
+        const cy = (typeof cursorY === 'number') ? cursorY : (rect.top + rect.height / 2);
+        const s = { facetEl: facetEl, options: options, index: 0, rect: rect, cursorY: cy, popup: null, list: null };
+        buildRelPopup(s);
+        updateRelWheel(s);
+        // PRIMARY: mouse-wheel scroll moves the wheel; CLICK selects.
+        s.popup.addEventListener('wheel', function(ev) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            setRelIndex(s, s.index + (ev.deltaY > 0 ? 1 : -1));
+        }, { passive: false });
+        s.popup.addEventListener('pointerdown', function(ev) {
+            ev.stopPropagation();
+            relDrag = { startY: ev.clientY, startIndex: s.index, dragging: false };
+        });
+        openRel = s;
+    }
+    // Press the relationship facet icon → resolve to an open/close tap on release.
+    app.addEventListener('pointerdown', function(e) {
+        if (!e.target.closest) { return; }
+        const fac = e.target.closest('[data-relfacet]');
+        if (!fac) { return; }
+        e.preventDefault();
+        relPress = { el: fac, x: e.clientX, y: e.clientY };
+    });
+    window.addEventListener('pointermove', function(e) {
+        if (!relDrag || !openRel) { return; }
+        const s = openRel;
+        const dy = e.clientY - relDrag.startY;
+        if (!relDrag.dragging) {
+            if (Math.abs(dy) < DRAG_THRESHOLD) { return; }
+            relDrag.dragging = true;
+        }
+        // Drag UP advances toward later options (matches the other wheels).
+        setRelIndex(s, relDrag.startIndex - Math.round(dy * REL_GAIN / REL_ROW_H));
+    });
+    window.addEventListener('pointerup', function(e) {
+        // Facet icon tap → toggle the wheel open/closed.
+        if (relPress) {
+            const moved = Math.abs(e.clientX - relPress.x) > DRAG_THRESHOLD
+                || Math.abs(e.clientY - relPress.y) > DRAG_THRESHOLD;
+            const el = relPress.el;
+            relPress = null;
+            // Swallow the trailing click so the facet press never triggers the
+            // bubble's own action.
+            suppressClick = true;
+            if (!moved) {
+                if (openRel && openRel.facetEl === el) { closeRelWheel(); }
+                else { openRelFacet(el, e.clientX, e.clientY); }
+                return;
+            }
+        }
+        // Pointerup on the open wheel: a CLICK selects the name, a DRAG (touch)
+        // releases onto the centered name.
+        if (relDrag) {
+            const s = openRel;
+            const wasDragging = relDrag.dragging;
+            relDrag = null;
+            if (s) {
+                if (!wasDragging) {
+                    const item = e.target.closest && e.target.closest('.dim-dial-item');
+                    if (item) {
+                        const items = s.list.children;
+                        for (let i = 0; i < items.length; i++) {
+                            if (items[i] === item) { setRelIndex(s, i); break; }
+                        }
+                    }
+                }
+                commitRel(s);
             }
         }
     });
@@ -4009,30 +4393,6 @@ export class ExplorePanel {
 function bracket(name: string): string {
     const escaped = name.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
     return `['${escaped}']`;
-}
-
-/**
- * Renders a drill-lock value as a Kusto literal for a `==` predicate. Numbers
- * and booleans pass through; everything else is emitted as a quoted string
- * literal (the dimensions we drill on are string/bool/low-cardinality, never
- * datetime — those carry the 'time' role and aren't offered as drill nubs).
- */
-function kustoLiteral(value: unknown, type?: string): string {
-    const t = (type ?? '').toLowerCase();
-    // A binned datetime/date key locks as a range bound, so it must emit a real
-    // datetime literal (not a quoted string) for `col >= lo and col < lo + size`.
-    if (/datetime|date/.test(t) && !(typeof value === 'number')) {
-        return `todatetime('${String(value).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}')`;
-    }
-    if (typeof value === 'number') { return Number.isFinite(value) ? String(value) : '0'; }
-    if (typeof value === 'boolean') { return value ? 'true' : 'false'; }
-    const s = String(value);
-    if (/(int|long|real|double|decimal)/.test(t)) {
-        const n = Number(s);
-        if (Number.isFinite(n)) { return String(n); }
-    }
-    if (/bool/.test(t) && (s === 'true' || s === 'false')) { return s; }
-    return `'${s.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
 }
 
 /** Timespan bin ladder (token + milliseconds), smallest to largest. */

@@ -24,6 +24,11 @@ import { Importer } from './features/importer'
 import { ImportManager } from './features/importManager'
 import { EntityDefinitionProvider, ENTITY_DEFINITION_SCHEME } from './features/entityDefinitionProvider'
 import { ExplorePanel } from './features/explorePanel'
+import type { RelationshipProvider } from './features/explorePanel'
+import { RelationshipManager } from './features/relationshipManager'
+import type { RelationshipBuildDeps, RelationshipVerifier, RelationshipModelStore, PersistedRelationshipModel } from './features/relationshipManager'
+import { nameEdgesByLink, RELATIONSHIP_LINK_NAMING_VERSION } from './features/relationshipModel'
+import { verifyEdges, pruneUnmatched, createServerRunQuery, DEFAULT_VERIFY_SAMPLE_SIZE, DEFAULT_MIN_KEY_UNIQUENESS, DEFAULT_VERIFY_QUERY_TIMEOUT_MS, DEFAULT_VERIFY_CONCURRENCY } from './features/relationshipVerifier'
 import { Server, NullServer } from './features/server'
 import type { IServer } from './features/server'
 import
@@ -200,10 +205,68 @@ export async function activate(context: ExtensionContext)
         vscode.commands.registerCommand('msKustoExplorer.viewEntityDefinition', (item) => connectionsPanel.viewEntityDefinition(item)),
     );
 
+    // Relationship inference (heuristic) + data verification + deterministic
+    // naming. The Explore panel asks the manager for a database's relationships,
+    // which triggers this pipeline (and caches it per database). A globalState-
+    // backed store persists each built model across sessions, keyed by
+    // cluster::database; entries are re-validated against the live schema +
+    // naming version on load, so a stale one is ignored and rebuilt.
+    const RELATIONSHIP_STORE_PREFIX = 'relationshipModel:';
+    const relationshipStore: RelationshipModelStore = {
+        load: (key) => context.globalState.get<PersistedRelationshipModel>(RELATIONSHIP_STORE_PREFIX + key),
+        save: (key, model) => { void context.globalState.update(RELATIONSHIP_STORE_PREFIX + key, model); },
+    };
+    const relationshipManager = new RelationshipManager(connectionManager, relationshipStore);
+    const relationshipVerifier: RelationshipVerifier = async (cluster, database, edges, token, onProgress) => {
+        const cfg = vscode.workspace.getConfiguration('msKustoExplorer');
+        if (cfg.get<boolean>('explore.verifyWithData') === false) { return edges; }
+        const sampleSize = cfg.get<number>('explore.verifySampleSize') ?? DEFAULT_VERIFY_SAMPLE_SIZE;
+        const minKeyUniqueness = cfg.get<number>('explore.verifyMinKeyUniqueness') ?? DEFAULT_MIN_KEY_UNIQUENESS;
+        const queryTimeoutMs = cfg.get<number>('explore.verifyQueryTimeoutMs') ?? DEFAULT_VERIFY_QUERY_TIMEOUT_MS;
+        const concurrency = cfg.get<number>('explore.verifyConcurrency') ?? DEFAULT_VERIFY_CONCURRENCY;
+        const runQuery = createServerRunQuery(server, cluster, database);
+        outputChannel.appendLine('');
+        outputChannel.appendLine(`── Verifying ${edges.length} edge(s) for ${cluster} / ${database} (sample ${sampleSize}, min key uniqueness ${minKeyUniqueness}) ──`);
+        let done = 0;
+        const verifyStart = Date.now();
+        const verifications = await verifyEdges(
+            edges, runQuery, { sampleSize, minKeyUniqueness, queryTimeoutMs, concurrency, onDiagnostic: msg => outputChannel.appendLine(msg) }, token,
+            v => {
+                done++;
+                onProgress?.(done, edges.length);
+                const mark = v.status === 'verified' ? '✓' : (v.status === 'unmatched' || v.status === 'not-a-key') ? '✗' : '?';
+                outputChannel.appendLine(`  ${mark} [${v.status}] ${v.edge.fromTable}.${v.edge.fromColumn} → ${v.edge.toTable}.${v.edge.toColumn} — ${v.detail}`);
+            });
+        const kept = pruneUnmatched(verifications);
+        outputChannel.appendLine(`  → ${kept.length} kept, ${edges.length - kept.length} dropped (verify took ${Date.now() - verifyStart}ms).`);
+        return kept;
+    };
+    const relationshipDeps: RelationshipBuildDeps = {
+        verifier: relationshipVerifier,
+        namer: async (edges) => nameEdgesByLink(edges),
+        namingVersion: RELATIONSHIP_LINK_NAMING_VERSION,
+    };
+    const relationshipProvider: RelationshipProvider = (cluster, database, token, onProgress) =>
+    {
+        const bypassCache = vscode.workspace
+            .getConfiguration('msKustoExplorer')
+            .get<boolean>('explore.bypassCache') === true;
+        return relationshipManager.getRelationships(
+            cluster, database, relationshipDeps, token, onProgress, { bypassCache });
+    };
+
     // activate the Explore panel (spatial table exploration)
-    const explorePanel = new ExplorePanel(context, server);
+    const explorePanel = new ExplorePanel(context, server, relationshipProvider);
     context.subscriptions.push(
         vscode.commands.registerCommand('msKustoExplorer.exploreTable', (item) => explorePanel.exploreTable(item)),
+    );
+
+    // Manual debug command: build the active document's relationships end-to-end and
+    // dump the result to the Kusto output channel (the real trigger is the Explore
+    // panel asking the manager; this is for manually inspecting the pipeline).
+    context.subscriptions.push(
+        vscode.commands.registerCommand('msKustoExplorer.inferRelationships', () =>
+            inferRelationships(context, connectionManager, relationshipManager, relationshipDeps, outputChannel)),
     );
 
     // Create status bar item showing the active document's cluster and database connection.
@@ -238,6 +301,82 @@ export async function activate(context: ExtensionContext)
 
     // Expose internal components for integration tests
     return { historyManager, connectionManager, resultsViewer, server };
+}
+
+/**
+ * Manual debug command: builds the active document's database relationships
+ * end-to-end (heuristic inference → data verification → deterministic naming),
+ * dumping the resulting model to the output channel. The real trigger for this
+ * work is the Explore panel asking the manager; this command just lets us
+ * inspect the pipeline on demand.
+ */
+async function inferRelationships(
+    context: ExtensionContext,
+    connectionManager: ConnectionManager,
+    relationshipManager: RelationshipManager,
+    deps: RelationshipBuildDeps,
+    outputChannel: vscode.OutputChannel,
+): Promise<void>
+{
+    const active = await connectionManager.getActiveDocumentConnection();
+    if (!active || !active.database)
+    {
+        vscode.window.showWarningMessage('Kusto: open a query connected to a cluster and database first.');
+        return;
+    }
+    const cluster = active.cluster;
+    const database = active.database;
+
+    // Optionally rebuild every run instead of reusing the cached model, gated
+    // by a setting so it can be toggled without recompiling.
+    const bypassCache = vscode.workspace
+        .getConfiguration('msKustoExplorer')
+        .get<boolean>('explore.bypassCache') === true;
+
+    await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: 'Kusto: building data model…', cancellable: true },
+        async (progress, token) =>
+        {
+            if (bypassCache)
+            {
+                outputChannel.appendLine('[relationships] cache bypassed (explore.bypassCache); rebuilding.');
+            }
+            const model = await relationshipManager.getRelationships(
+                cluster, database, deps, token,
+                phase =>
+                {
+                    const message = phase.kind === 'verifying'
+                        ? `verifying data model: ${phase.done}/${phase.total} relationship(s)…`
+                        : phase.kind === 'naming'
+                            ? `naming ${phase.total} relationship(s)…`
+                            : 'identifying tables, columns, and relationships…';
+                    progress.report({ message });
+                },
+                { bypassCache },
+            );
+            if (!model)
+            {
+                vscode.window.showWarningMessage(`Kusto: could not load schema for ${cluster} / ${database}.`);
+                return;
+            }
+
+            outputChannel.appendLine('');
+            outputChannel.appendLine(`── Relationships for ${cluster} / ${database} (source: ${model.source}) ──`);
+            if (model.edges.length === 0)
+            {
+                outputChannel.appendLine('  (no relationships found)');
+            }
+            for (const e of [...model.edges].sort((a, b) => b.confidence - a.confidence))
+            {
+                outputChannel.appendLine(
+                    `  ${e.toTable} has many "${e.reverseName}"  ·  ${e.fromTable} has one "${e.forwardName}"` +
+                    `  (${e.fromColumn} → ${e.toTable}.${e.toColumn}, ${e.confidence.toFixed(2)}, ${e.source})`);
+            }
+
+            outputChannel.show(true);
+            vscode.window.showInformationMessage(
+                `Kusto: ${model.edges.length} relationship(s) for ${database}.`);
+        });
 }
 
 export function deactivate(): Thenable<void> | undefined

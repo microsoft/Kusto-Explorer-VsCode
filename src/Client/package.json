@@ -223,6 +223,11 @@
         "icon": "$(graph-scatter)"
       },
       {
+        "command": "msKustoExplorer.inferRelationships",
+        "title": "Kusto: Infer Table Relationships",
+        "category": "Kusto"
+      },
+      {
         "command": "msKustoExplorer.copyChart",
         "title": "Copy Chart",
         "icon": "$(file-media)"
@@ -732,6 +737,46 @@
       ]
     },
     "configuration": [
+      {
+        "title": "Explore",
+        "properties": {
+          "msKustoExplorer.explore.verifyWithData": {
+            "type": "boolean",
+            "default": true,
+            "description": "After inferring relationships, verify each candidate foreign key against the data: sample values from the FK column and look them up in the target table's key column. Edges whose sampled values match nothing in the target are dropped."
+          },
+          "msKustoExplorer.explore.verifySampleSize": {
+            "type": "number",
+            "default": 5,
+            "minimum": 1,
+            "description": "Number of distinct foreign-key values to sample per relationship when verifying against data."
+          },
+          "msKustoExplorer.explore.verifyMinKeyUniqueness": {
+            "type": "number",
+            "default": 0.95,
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Minimum distinct/total ratio for a target column to be accepted as a key when verifying relationships. Edges pointing at a column below this (a low-cardinality category rather than a real primary key) are dropped. Set to 0 to disable the key-cardinality check."
+          },
+          "msKustoExplorer.explore.verifyQueryTimeoutMs": {
+            "type": "number",
+            "default": 20000,
+            "minimum": 0,
+            "description": "Per-query timeout (in milliseconds) when verifying relationships against data. A single slow verification query (e.g. over a very large table) is abandoned after this budget so it can't stall the whole relationship build; the affected edge is kept but left unverified. Set to 0 to disable the timeout."
+          },
+          "msKustoExplorer.explore.verifyConcurrency": {
+            "type": "number",
+            "default": 12,
+            "minimum": 1,
+            "description": "How many relationships to verify against data in parallel. Verification queries are small and read-only, so a higher value hides per-query latency and speeds up the overall build; lower it if you want to be gentler on a small cluster."
+          },
+          "msKustoExplorer.explore.bypassCache": {
+            "type": "boolean",
+            "default": false,
+            "description": "Bypass the per-database relationship cache and rebuild the data model from scratch every time it's requested. Useful when iterating on inference or naming logic; leave off for normal use so relationships are reused across requests."
+          }
+        }
+      },
       {
         "title": "Charts",
         "properties": {

@@ -140,4 +140,65 @@ describe('RelationshipManager', () => {
             expect(model!.source).toBe('native');
         });
     });
+
+    describe('persistent store', () => {
+        function memoryStore() {
+            const map = new Map<string, unknown>();
+            return {
+                map,
+                load: vi.fn((key: string) => map.get(key) as never),
+                save: vi.fn((key: string, model: unknown) => { map.set(key, JSON.parse(JSON.stringify(model))); }),
+            };
+        }
+
+        it('saves the built final model to the store', async () => {
+            const store = memoryStore();
+            const mgr = new RelationshipManager(provider(SAMPLE), store);
+            const model = await mgr.getRelationships('c', 'd', {});
+            expect(store.save).toHaveBeenCalledTimes(1);
+            const saved = store.map.get('c::d') as { edges: unknown[]; schemaVersion: string };
+            expect(saved.edges).toHaveLength(model!.edges.length);
+            expect(saved.schemaVersion).toBe(model!.schemaVersion);
+        });
+
+        it('rebuilds a working model (with getLinks) from a persisted snapshot', async () => {
+            const store = memoryStore();
+            // First manager builds + persists.
+            await new RelationshipManager(provider(SAMPLE), store).getRelationships('c', 'd', {});
+            // A FRESH manager (cold in-memory cache, e.g. a new session) loads it.
+            const fresh = new RelationshipManager(provider(SAMPLE), store);
+            const model = await fresh.getRelationships('c', 'd', {});
+            expect(store.load).toHaveBeenCalled();
+            expect(model).toBeDefined();
+            // The rehydrated model is fully functional, not just data.
+            expect(typeof model!.getLinks).toBe('function');
+            expect(model!.getLinks('Users').inbound.map(e => e.fromTable)).toEqual(['Events']);
+        });
+
+        it('ignores a stale snapshot when the schema version changed', async () => {
+            const store = memoryStore();
+            await new RelationshipManager(provider(SAMPLE), store).getRelationships('c', 'd', {});
+
+            // A new session sees a DIFFERENT schema → snapshot is stale → rebuild.
+            const changed = makeDb([
+                { name: 'Users', columns: [{ name: 'Id', type: 'long' }] },
+                { name: 'Events', columns: [{ name: 'UserId', type: 'long' }] },
+                { name: 'Orders', columns: [{ name: 'UserId', type: 'long' }] },
+            ]);
+            const fresh = new RelationshipManager(provider(changed), store);
+            const model = await fresh.getRelationships('c', 'd', {});
+            expect(model!.edges.length).toBe(2); // rebuilt against the new schema
+            expect(store.save).toHaveBeenCalledTimes(2); // re-persisted the fresh build
+        });
+
+        it('ignores a stale snapshot when the naming version changed', async () => {
+            const store = memoryStore();
+            await new RelationshipManager(provider(SAMPLE), store)
+                .getRelationships('c', 'd', { namingVersion: 1 });
+            const fresh = new RelationshipManager(provider(SAMPLE), store);
+            const model = await fresh.getRelationships('c', 'd', { namingVersion: 2 });
+            expect(model).toBeDefined();
+            expect(store.save).toHaveBeenCalledTimes(2); // rebuilt + re-saved under v2
+        });
+    });
 });

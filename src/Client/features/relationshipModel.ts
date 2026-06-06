@@ -10,9 +10,9 @@
  * confidence score and a human-readable `basis` explaining why it was inferred.
  *
  * Provenance: every edge and the model as a whole records a `source`
- * ('inferred' | 'user' | 'native'). Today only 'inferred' is produced here, but
- * the shape is shared so user-supplied or Kusto-native relationship models can
- * be layered in later (merge precedence native > user > inferred).
+ * ('inferred' | 'user' | 'native'). The heuristics here produce 'inferred'
+ * edges; user-supplied or Kusto-native models can be layered in too. Merge
+ * precedence is native > user > inferred.
  *
  * Versioning: a model is only safely reusable from cache when BOTH
  *   - schemaVersion  (the DATA it was built from) and
@@ -35,6 +35,13 @@ import { looksLikeIdName } from './columnClassifier';
  */
 export const RELATIONSHIP_ALGORITHM_VERSION = 1;
 
+/**
+ * Naming-logic version for {@link nameEdgesByLink}. BUMP THIS whenever the
+ * deterministic link-label format changes, so cached final models built with the
+ * old labels are rebuilt.
+ */
+export const RELATIONSHIP_LINK_NAMING_VERSION = 1;
+
 /** Where a relationship model (or a single edge) came from. */
 export type RelationshipSource = 'inferred' | 'user' | 'native';
 
@@ -48,12 +55,33 @@ export interface ForeignKeyEdge {
     toTable: string;
     /** The identity column in `toTable` being referenced. */
     toColumn: string;
+    /**
+     * Kusto type of `toColumn` (e.g. `long`, `guid`, `string`), when known.
+     * Lets the data verifier compare the target column in its NATIVE type during
+     * the containment lookup instead of wrapping it in `tostring()` — the latter
+     * defeats the column index and forces a full scan. Optional; absent for
+     * edges from sources that don't carry type info (the verifier then falls
+     * back to the type-agnostic string comparison).
+     */
+    toColumnType?: string;
     /** 0..1 confidence. Authored (user/native) edges are 1. */
     confidence: number;
     /** Human-readable explanation of why this edge exists. */
     basis: string;
     /** Provenance of this individual edge. */
     source: RelationshipSource;
+    /**
+     * Navigation name in the FK direction (child → parent), singular: from
+     * `Orders.CustomerId → Customers` this is "Customer". Optional; absent until a
+     * naming pass runs. Set by the heuristic namer and refined by the AI namer.
+     */
+    forwardName?: string;
+    /**
+     * Navigation name in the reverse direction (parent → child collection),
+     * plural: from `Customers ← Orders` this is "Orders". Optional; absent until a
+     * naming pass runs.
+     */
+    reverseName?: string;
 }
 
 /** Outbound (drill to parent) and inbound (expand to children) links for one table. */
@@ -151,6 +179,158 @@ export function singularize(name: string): string {
     // Leave 'ss'/'us' endings alone (e.g. address, status, bonus).
     if (n.endsWith('s') && !n.endsWith('ss') && !n.endsWith('us') && n.length > 1) { return n.slice(0, -1); }
     return n;
+}
+
+// ─── Heuristic relationship naming ───────────────────────────────────────────
+//
+// These produce a deterministic English name for each navigation direction
+// (singular forward, plural reverse). They cover common English cases only. The
+// default pipeline uses the simpler, language-agnostic `nameEdgesByLink`; this
+// prettier namer is kept for a future opt-in. The structural CONSTRAINT that two
+// links from the same table must have distinct names is enforced here.
+
+/**
+ * Strips a trailing id-like suffix (`Id`/`Key`/`Ref`), preserving the casing of
+ * the remainder, but only when there's a word boundary (an underscore or a
+ * lower→suffix transition) so we don't maul words that merely end in those
+ * letters. Returns the original name if stripping would leave nothing.
+ */
+export function stripIdSuffix(name: string): string {
+    const n = (name ?? '').trim();
+    const stripped = n.replace(/(?:_|(?<=[a-z0-9]))(id|key|ref)$/i, '');
+    const cleaned = stripped.replace(/[_\s]+$/, '');
+    return cleaned.length > 0 ? cleaned : n;
+}
+
+/**
+ * Splits a camelCase / snake_case / PascalCase identifier into space-separated,
+ * capitalized words: `ShipToCustomerId` → "Ship To Customer Id",
+ * `customer_id` → "Customer Id".
+ */
+export function humanizeIdentifier(name: string): string {
+    const spaced = (name ?? '')
+        .replace(/[_\s]+/g, ' ')
+        .replace(/([a-z0-9])([A-Z])/g, '$1 $2')      // camelCase boundary
+        .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')   // ACRONYMWord boundary
+        .trim();
+    return spaced
+        .split(/\s+/)
+        .filter(w => w.length > 0)
+        .map(w => w[0].toUpperCase() + w.slice(1))
+        .join(' ');
+}
+
+/** Naive English pluralization of the LAST word of a (possibly multi-word) name. */
+export function pluralizeWord(name: string): string {
+    const n = (name ?? '').trim();
+    if (n.length === 0) { return n; }
+    const spaceIdx = n.lastIndexOf(' ');
+    const head = spaceIdx >= 0 ? n.slice(0, spaceIdx + 1) : '';
+    const word = spaceIdx >= 0 ? n.slice(spaceIdx + 1) : n;
+    const lower = word.toLowerCase();
+    let plural: string;
+    if (/[^aeiou]y$/i.test(word)) {
+        plural = word.slice(0, -1) + 'ies';
+    } else if (/(ss|x|z|ch|sh)$/i.test(word)) {
+        plural = word + 'es';
+    } else if (lower.endsWith('s')) {
+        plural = word; // already plural (best-effort)
+    } else {
+        plural = word + 's';
+    }
+    return head + plural;
+}
+
+/**
+ * Derives the FORWARD (child → parent) navigation name for an edge: strip the
+ * FK column's id suffix and humanize it, falling back to the singularized parent
+ * table when the column carries no usable stem (a bare `Id`).
+ */
+function forwardNameFor(edge: ForeignKeyEdge): string {
+    const stem = stripIdSuffix(edge.fromColumn);
+    // stripIdSuffix returns the original when nothing usable remains (bare `Id`).
+    const stemmed = stem.toLowerCase() !== edge.fromColumn.toLowerCase();
+    if (stemmed) {
+        const name = humanizeIdentifier(stem);
+        if (name) { return name; }
+    }
+    return humanizeIdentifier(singularize(edge.toTable));
+}
+
+/** Derives the REVERSE (parent → child collection) name: the pluralized child table. */
+function reverseNameFor(edge: ForeignKeyEdge): string {
+    return pluralizeWord(humanizeIdentifier(edge.fromTable));
+}
+
+/**
+ * Assigns deterministic `forwardName`/`reverseName` to every edge and enforces
+ * uniqueness of the names exposed from any single table:
+ *  - reverse names are unique per PARENT table (a Customer's many "Orders" vs
+ *    "Orders Shipped" when there are two FKs from Orders to Customers), and
+ *  - forward names are unique per CHILD table.
+ * Colliding names are disambiguated by qualifying with the other direction's
+ * base name. Returns NEW edge objects (does not mutate the inputs).
+ */
+export function nameEdgesHeuristic(edges: ForeignKeyEdge[]): ForeignKeyEdge[] {
+    const named = edges.map(e => ({
+        ...e,
+        forwardName: e.forwardName ?? forwardNameFor(e),
+        reverseName: e.reverseName ?? reverseNameFor(e),
+    }));
+
+    // Disambiguate reverse names that collide within the same parent table.
+    disambiguate(
+        named,
+        e => e.toTable.toLowerCase(),
+        e => (e.reverseName ?? '').toLowerCase(),
+        (e) => { e.reverseName = `${e.reverseName} (${e.forwardName})`; },
+    );
+    // Disambiguate forward names that collide within the same child table.
+    disambiguate(
+        named,
+        e => e.fromTable.toLowerCase(),
+        e => (e.forwardName ?? '').toLowerCase(),
+        (e) => { e.forwardName = `${e.forwardName} (${humanizeIdentifier(stripIdSuffix(e.fromColumn))})`; },
+    );
+    return named;
+}
+
+/**
+ * Assigns DETERMINISTIC link labels to every edge, describing each relationship
+ * by the table it leads to and the foreign-key column that links the two:
+ *   - forward (child → parent): `"{toTable} ({fromColumn})"`
+ *       viewing `Orders`, its `CustomerId` FK reads "Customers (CustomerId)".
+ *   - reverse (parent → child): `"{fromTable} ({fromColumn})"`
+ *       viewing `Customers`, the inbound link reads "Orders (CustomerId)".
+ *
+ * Because the FK column is part of every label, two relationships between the
+ * same pair of tables (e.g. `Orders.BillToId` and `Orders.ShipToId` both to
+ * `Customers`) get distinct labels with no extra disambiguation. This is fully
+ * deterministic (no AI, no pluralization guesswork): the same edges always
+ * produce the same labels. Returns NEW edge objects (does not mutate inputs).
+ */
+export function nameEdgesByLink(edges: ForeignKeyEdge[]): ForeignKeyEdge[] {
+    return edges.map(e => ({
+        ...e,
+        forwardName: `${e.toTable} (${e.fromColumn})`,
+        reverseName: `${e.fromTable} (${e.fromColumn})`,
+    }));
+}
+function disambiguate(
+    edges: ForeignKeyEdge[],
+    groupKey: (e: ForeignKeyEdge) => string,
+    nameKey: (e: ForeignKeyEdge) => string,
+    qualify: (e: ForeignKeyEdge) => void,
+): void {
+    const counts = new Map<string, number>();
+    for (const e of edges) {
+        const k = `${groupKey(e)}\u0000${nameKey(e)}`;
+        counts.set(k, (counts.get(k) ?? 0) + 1);
+    }
+    for (const e of edges) {
+        const k = `${groupKey(e)}\u0000${nameKey(e)}`;
+        if ((counts.get(k) ?? 0) > 1) { qualify(e); }
+    }
 }
 
 /** Whether two Kusto column types are compatible enough to be a key/foreign-key pair. */
@@ -327,6 +507,7 @@ function scoreEdge(
         fromColumn: fromColumn.name,
         toTable: target.table,
         toColumn: target.column,
+        toColumnType: target.type,
         confidence,
         basis: reasons.join('; '),
         source: 'inferred',
