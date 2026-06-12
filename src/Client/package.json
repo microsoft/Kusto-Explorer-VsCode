@@ -2229,7 +2229,7 @@
     "@typescript-eslint/parser": "^8.0.0",
     "@vscode/test-cli": "^0.0.10",
     "@vscode/test-electron": "^2.5.2",
-    "esbuild": "^0.27.5",
+    "esbuild": "^0.28.1",
     "eslint": "^9.0.0",
     "typescript": "^5.0.0",
     "typescript-eslint": "^8.0.0",
