@@ -8,6 +8,14 @@ using System.Diagnostics.CodeAnalysis;
 
 namespace Kusto.Vscode;
 
+/// <summary>
+/// Tracks every open editor document (keyed by URI) and keeps its parsed
+/// <see cref="Kusto.Language.Editor.CodeScript"/> in sync with two moving inputs: the document text
+/// (as the user types) and the shared symbols (when <see cref="ISymbolManager.GlobalsChanged"/>
+/// fires). It also remembers each document's cluster/database connection context so language
+/// services analyze the query against the right schema. Editor features (diagnostics, completion,
+/// hover, etc.) read documents from here rather than re-parsing, so parsing happens once per change.
+/// </summary>
 public class DocumentManager : IDocumentManager
 {
     /// <summary>

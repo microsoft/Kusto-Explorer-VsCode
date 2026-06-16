@@ -8,6 +8,14 @@ using System.Collections.Immutable;
 
 namespace Kusto.Vscode;
 
+/// <summary>
+/// Owns the shared <see cref="Kusto.Language.Symbols.GlobalState"/> that the Kusto parser needs to
+/// resolve names (clusters, databases, tables, functions). It turns the raw schema from
+/// <see cref="ISchemaManager"/> into parser symbols and publishes a single, immutable globals
+/// snapshot via <see cref="GlobalsChanged"/>, which downstream consumers (documents, diagnostics,
+/// completion) react to. All loads run through a <see cref="TaskQueue"/> so concurrent requests
+/// can't race while mutating the globals — the global state has exactly one writer.
+/// </summary>
 public class SymbolManager : ISymbolManager
 {
     private readonly ISchemaManager _schemaManager;
