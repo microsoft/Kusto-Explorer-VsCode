@@ -81,6 +81,12 @@ Only after that process has resulted in an "open for contribution" status, shoul
 
 If a pull request arrives without prior discussion for a change that needs design or roadmap approval, it may be closed and redirected to Discussions.
 
+## Architecture
+
+For a component-level overview of how the extension works — the client/server split, the LSP +
+custom `kusto/*` RPC seam, how a query runs end-to-end, and the design intent behind the
+structure — see [ARCHITECTURE.md](ARCHITECTURE.md).
+
 ## Repository Structure
 
 | Path | Description |

@@ -10,6 +10,13 @@ namespace Kusto.Vscode;
 
 public record DiagnosticInfo(Uri Id, string Text, ImmutableList<Diagnostic> Diagnostics);
 
+/// <summary>
+/// Turns document changes into published diagnostics. It listens to
+/// <see cref="IDocumentManager"/> add/change events, recomputes parse + analyzer diagnostics for
+/// the affected document, and raises <see cref="DiagnosticsUpdated"/> for the server to forward as an
+/// LSP <c>publishDiagnostics</c> notification. Recomputation is debounced/serialized so a burst of
+/// keystrokes collapses into a single up-to-date result rather than a flood of stale ones.
+/// </summary>
 public class DiagnosticsManager : IDiagnosticsManager
 {
     private readonly IDocumentManager _documentManager;

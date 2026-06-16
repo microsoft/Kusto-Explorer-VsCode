@@ -10,6 +10,15 @@ using System.Collections.Immutable;
 
 namespace Kusto.Vscode;
 
+/// <summary>
+/// Orchestrates query validation, result-typing, and execution. This is the seam where
+/// the three independent subsystems meet for a single request: it asks <see cref="ISymbolManager"/>
+/// to ensure the cluster/database symbols are loaded (so the parser can analyze the query),
+/// resolves an <see cref="IConnection"/> from <see cref="IConnectionManager"/>, then runs the
+/// query and wraps the tables/charts/diagnostics into a single result. It also handles inline
+/// directives (e.g. <c>#connect</c>) before execution. Kept deliberately thin: it coordinates,
+/// it does not parse, cache schema, or own connections.
+/// </summary>
 public class QueryManager : IQueryManager
 {
     private readonly IConnectionManager _connectionManager;

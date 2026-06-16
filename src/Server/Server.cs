@@ -16,6 +16,18 @@ using Lsp.Common;
 
 namespace Kusto.Vscode;
 
+/// <summary>
+/// The language server entry point and coordinator. It extends <see cref="LspServer"/> (the
+/// StreamJsonRpc/LSP plumbing) to implement the standard editor features as well as the custom
+/// <c>kusto/*</c> RPC methods (run query, fetch schema, decode connection strings, etc.), delegating
+/// each one to the appropriate manager. It deliberately owns no domain logic itself; instead it wires
+/// the managers together and implements the small host-facing seams
+/// (<see cref="ILogger"/>, <see cref="ISettingSource"/>, <see cref="IStorage"/>,
+/// <see cref="IAuthenticationProvider"/>) that bridge server concerns back to the VS Code client —
+/// logging, configuration, persistence, and AAD token acquisition all live in the host window.
+/// Two constructors exist: one for dependency injection (tests) and one that composes the concrete
+/// manager graph for normal startup.
+/// </summary>
 public class Server : LspServer, ILogger, ISettingSource, IStorage, IAuthenticationProvider
 {
     private readonly ILogger _logger;
