@@ -1233,10 +1233,12 @@ export class ExplorePanel {
             ? bracket(this.measureHeader(measures[0]!)) : bracket('Count');
         // A single binned key reads as an axis: order by the bucket (chronological /
         // ascending) so the cloud lays out as a continuous strip, not by magnitude.
+        // summarize auto-names the `by bin(col, size)` output after the original
+        // column, so we order by that column name rather than re-issuing the bin().
         const binnedAxis = dims.length === 1 && this.state.binKeys[dims[0]!];
         const orderClause = dims.length > 0
             ? (binnedAxis
-                ? ` | top ${MAX_GROUP_ROWS} by ${metricCol} desc | order by ${this.groupExpr(dims[0]!)} asc`
+                ? ` | top ${MAX_GROUP_ROWS} by ${metricCol} desc | order by ${bracket(dims[0]!)} asc`
                 : ` | top ${MAX_GROUP_ROWS} by ${metricCol} desc`)
             : ` | order by ${metricCol} desc`;
         const query = `${bracket(source)}${whereClause} | summarize ${aggs.join(', ')}${byClause}${orderClause}`;
@@ -4791,7 +4793,12 @@ function formatCompact(n: number): string {
     if (!Number.isFinite(n)) { return '—'; }
     const abs = Math.abs(n);
     if (abs < 1000) {
-        return Number.isInteger(n) ? n.toString() : n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+        if (Number.isInteger(n)) { return n.toString(); }
+        // Sub-1 magnitudes use significant digits, not a fixed 2-decimal cap, so a
+        // genuinely small value (e.g. 0.004) shows its size instead of rounding to
+        // "0" — which would be indistinguishable from an empty bin's absent bubble.
+        if (abs < 1) { return n.toLocaleString(undefined, { maximumSignificantDigits: 3 }); }
+        return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
     }
     const units: Array<[number, string]> = [
         [1e12, 'T'], [1e9, 'B'], [1e6, 'M'], [1e3, 'K'],
