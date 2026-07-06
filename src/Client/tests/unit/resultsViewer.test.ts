@@ -26,4 +26,14 @@ describe('WebViewAdapter', () => {
 
         view.dispose();
     });
+
+    it('separates accumulated setup fragments with newlines', () => {
+        const adapter = new WebViewAdapter(createMockVsCodeWebview());
+
+        adapter.setup('<meta name="first">', '<script>first();</script>');
+        adapter.setup('<meta name="second">', '<script>second();</script>');
+
+        expect(adapter.headHtml).toBe('<meta name="first">\n<meta name="second">');
+        expect(adapter.scriptsHtml).toBe('<script>first();</script>\n<script>second();</script>');
+    });
 });

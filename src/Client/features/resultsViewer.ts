@@ -56,8 +56,8 @@ export class WebViewAdapter implements IWebView {
     }
 
     setup(headHtml: string, scriptsHtml: string): void {
-        this.headHtml += headHtml;
-        this.scriptsHtml += scriptsHtml;
+        this.headHtml += this.headHtml && headHtml ? `\n${headHtml}` : headHtml;
+        this.scriptsHtml += this.scriptsHtml && scriptsHtml ? `\n${scriptsHtml}` : scriptsHtml;
     }
 
     setContent(html: string): void {
