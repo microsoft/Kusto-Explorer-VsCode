@@ -423,6 +423,8 @@ export class QueryEditor {
                 await this.resultsViewer.displayErrorInBottomView({
                     message: 'No saved results were found for this query.',
                     details: 'Run the query again to generate results.'
+                    details: 'Run the query again to generate results.'
+
                 });
                 return;
             }
