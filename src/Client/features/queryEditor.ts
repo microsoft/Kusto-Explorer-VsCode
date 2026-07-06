@@ -422,11 +422,7 @@ export class QueryEditor {
             if (!entry) {
                 await this.resultsViewer.displayErrorInBottomView({
                     message: 'No saved results were found for this query.',
-
                     details: 'Run the query again to generate results.'
-
-                    details: 'Run the query again to generate results.'
-
                 });
                 return;
             }
@@ -972,11 +968,11 @@ function activateSemanticColoring(context: vscode.ExtensionContext, server: ISer
         );
     }
 }
-    void Promise.resolve(
-        vscode.commands.executeCommand('vscode.executeDocumentSemanticTokensProvider', document.uri)
-    ).catch(() => undefined);
-        .executeCommand('vscode.executeDocumentSemanticTokensProvider', document.uri)
-        .then(undefined, () => { });
+
+function requestSemanticTokens(document: vscode.TextDocument): void {
+    void Promise.resolve(
+        vscode.commands.executeCommand('vscode.executeDocumentSemanticTokensProvider', document.uri)
+    ).catch(() => undefined);
 }
 
 /**

@@ -12,7 +12,8 @@
     "url": "https://github.com/microsoft/Kusto-Explorer-VsCode"
   },
   "engines": {
-    "vscode": "^1.90.0"
+    "vscode": "^1.90.0",
+    "node": ">=22"
   },
   "categories": [
     "Programming Languages"
