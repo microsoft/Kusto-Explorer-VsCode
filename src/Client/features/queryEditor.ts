@@ -421,8 +421,8 @@ export class QueryEditor {
             const entry = await this.history.getMatchingEntry(queryText);
             if (!entry) {
                 await this.resultsViewer.displayErrorInBottomView({
-                    message: 'This query has changed since it was last run.',
-                    details: 'Run the query again to update the results.'
+                    message: 'No saved results were found for this query.',
+                    details: 'Run the query again to generate results.'
                 });
                 return;
             }
