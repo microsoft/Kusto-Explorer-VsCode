@@ -34,7 +34,7 @@ export type ResultViewMode = 'chart' | 'data' | 'detail' | 'all';
  * Stores page-level setup content (headHtml, scriptsHtml) for the page builder to read.
  * `setContent()` posts the given `contentCommand` message to the page handler.
  */
-class WebViewAdapter implements IWebView {
+export class WebViewAdapter implements IWebView {
     private readonly webview: vscode.Webview;
     private readonly contentCommand: string;
     headHtml = '';
@@ -56,8 +56,8 @@ class WebViewAdapter implements IWebView {
     }
 
     setup(headHtml: string, scriptsHtml: string): void {
-        this.headHtml = headHtml;
-        this.scriptsHtml = scriptsHtml;
+        this.headHtml += headHtml;
+        this.scriptsHtml += scriptsHtml;
     }
 
     setContent(html: string): void {
