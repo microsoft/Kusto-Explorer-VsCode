@@ -419,7 +419,15 @@ export class QueryEditor {
             ));
 
             const entry = await this.history.getMatchingEntry(queryText);
-            const data = entry ? await this.history.getEntryData(entry) : undefined;
+            if (!entry) {
+                await this.resultsViewer.displayErrorInBottomView({
+                    message: 'This query has changed since it was last run.',
+                    details: 'Run the query again to update the results.'
+                });
+                return;
+            }
+
+            const data = await this.history.getEntryData(entry);
             if (data) {
                 await this.resultsViewer.displayResults(data);
                 this.historyPanel.revealEntry(entry);
@@ -939,8 +947,7 @@ function activateSemanticColoring(context: vscode.ExtensionContext, server: ISer
                     // Find visible editor for this document and trigger refresh
                     const editor = vscode.window.visibleTextEditors.find(e => e.document === doc);
                     if (editor) {
-                        // Trigger semantic token refresh
-                        vscode.commands.executeCommand('vscode.executeDocumentSemanticTokensProvider', doc.uri);
+                        requestSemanticTokens(doc);
                     }
                 }
             });
@@ -954,12 +961,18 @@ function activateSemanticColoring(context: vscode.ExtensionContext, server: ISer
                 if (doc.languageId === 'kusto') {
                     // Small delay to ensure document is fully loaded
                     setTimeout(() => {
-                        vscode.commands.executeCommand('vscode.executeDocumentSemanticTokensProvider', doc.uri);
+                        requestSemanticTokens(doc);
                     }, 100);
                 }
             })
         );
     }
+}
+
+function requestSemanticTokens(document: vscode.TextDocument): void {
+    void vscode.commands
+        .executeCommand('vscode.executeDocumentSemanticTokensProvider', document.uri)
+        .then(undefined, () => { });
 }
 
 /**
