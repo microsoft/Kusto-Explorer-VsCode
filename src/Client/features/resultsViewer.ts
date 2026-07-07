@@ -37,6 +37,8 @@ export type ResultViewMode = 'chart' | 'data' | 'detail' | 'all';
 export class WebViewAdapter implements IWebView {
     private readonly webview: vscode.Webview;
     private readonly contentCommand: string;
+    private readonly headFragments = new Set<string>();
+    private readonly scriptFragments = new Set<string>();
     headHtml = '';
     scriptsHtml = '';
     contentHtml = '';
@@ -56,8 +58,16 @@ export class WebViewAdapter implements IWebView {
     }
 
     setup(headHtml: string, scriptsHtml: string): void {
-        this.headHtml += this.headHtml && headHtml ? `\n${headHtml}` : headHtml;
-        this.scriptsHtml += this.scriptsHtml && scriptsHtml ? `\n${scriptsHtml}` : scriptsHtml;
+        this.headHtml = this.appendSetupFragment(this.headHtml, this.headFragments, headHtml);
+        this.scriptsHtml = this.appendSetupFragment(this.scriptsHtml, this.scriptFragments, scriptsHtml);
+    }
+
+    private appendSetupFragment(current: string, fragments: Set<string>, fragment: string): string {
+        if (!fragment || fragments.has(fragment)) {
+            return current;
+        }
+        fragments.add(fragment);
+        return current ? `${current}\n${fragment}` : fragment;
     }
 
     setContent(html: string): void {

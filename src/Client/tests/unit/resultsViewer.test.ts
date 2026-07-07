@@ -36,4 +36,14 @@ describe('WebViewAdapter', () => {
         expect(adapter.headHtml).toBe('<meta name="first">\n<meta name="second">');
         expect(adapter.scriptsHtml).toBe('<script>first();</script>\n<script>second();</script>');
     });
+
+    it('does not duplicate identical setup fragments', () => {
+        const adapter = new WebViewAdapter(createMockVsCodeWebview());
+
+        adapter.setup('<meta name="same">', '<script>same();</script>');
+        adapter.setup('<meta name="same">', '<script>same();</script>');
+
+        expect(adapter.headHtml).toBe('<meta name="same">');
+        expect(adapter.scriptsHtml).toBe('<script>same();</script>');
+    });
 });
