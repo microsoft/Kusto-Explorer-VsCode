@@ -441,7 +441,7 @@ async function runQuery(input: { query: string; cluster?: string; database?: str
  */
 async function handleChatRequest(
     request: vscode.ChatRequest,
-    context: vscode.ChatContext,
+    _context: vscode.ChatContext,
     stream: vscode.ChatResponseStream,
     token: vscode.CancellationToken
 ): Promise<vscode.ChatResult> {

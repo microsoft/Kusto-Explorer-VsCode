@@ -1583,7 +1583,7 @@ class KustoDragAndDropController implements vscode.TreeDragAndDropController<Kus
 
     constructor(private readonly connections: ConnectionManager, private readonly onDragStart: () => void) {}
 
-    async handleDrag(source: readonly KustoTreeItem[], dataTransfer: vscode.DataTransfer, token: vscode.CancellationToken): Promise<void> {
+    async handleDrag(source: readonly KustoTreeItem[], dataTransfer: vscode.DataTransfer, _token: vscode.CancellationToken): Promise<void> {
         // Suppress selection changes during drag
         this.onDragStart();
 
@@ -1619,7 +1619,7 @@ class KustoDragAndDropController implements vscode.TreeDragAndDropController<Kus
         }
     }
 
-    async handleDrop(target: KustoTreeItem | undefined, dataTransfer: vscode.DataTransfer, token: vscode.CancellationToken): Promise<void> {
+    async handleDrop(target: KustoTreeItem | undefined, dataTransfer: vscode.DataTransfer, _token: vscode.CancellationToken): Promise<void> {
         const transferItem = dataTransfer.get('application/vnd.code.tree.mskustoexplorer_connections');
         if (!transferItem) {
             return;
@@ -1661,7 +1661,7 @@ class KustoDocumentDropEditProvider implements vscode.DocumentDropEditProvider {
 
     async provideDocumentDropEdits(
         document: vscode.TextDocument,
-        position: vscode.Position,
+        _position: vscode.Position,
         dataTransfer: vscode.DataTransfer,
         token: vscode.CancellationToken
     ): Promise<vscode.DocumentDropEdit | undefined> {

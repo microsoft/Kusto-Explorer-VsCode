@@ -6,7 +6,6 @@ import { CancellationToken, Disposable, ExtensionContext } from 'vscode';
 import {
     acquireMicrosoftAuthenticationToken,
     GetAuthenticationTokenParams,
-    GetAuthenticationTokenResult,
 } from './authentication';
 
 /**
@@ -743,12 +742,12 @@ export interface DocumentReadyNotification {
 }
 
 /** Parameters for the server's getData request. */
-export interface GetDataParams {
+interface GetDataParams {
     key: string;
 }
 
 /** Parameters for the server's setData request. */
-export interface SetDataParams {
+interface SetDataParams {
     key: string;
     data: object | undefined;
 }

@@ -41,7 +41,7 @@
     "build-release-server": "dotnet publish ../Server/Server.csproj -c Release -o ./server",
     "build-debug-server": "dotnet publish ../Server/Server.csproj -c Debug -o ./server",
     "prepackage": "node -e \"require('fs').copyFileSync('../../LICENSE','./LICENSE')\" && npm run compile && npm run build-release-server",
-    "package": "npm run prepackage && vsce package",
+    "package": "vsce package",
     "package:version": "npm run prepackage && vsce package --no-update-package-json $VERSION",
     "publish": "vsce publish"
   },
@@ -1098,43 +1098,81 @@
           },
           "msKustoExplorer.format.generalSpacing": {
             "type": "string",
-            "enum": ["asIs", "minimal", "one"],
+            "enum": [
+              "asIs",
+              "minimal",
+              "one"
+            ],
             "default": "one",
             "description": "Whitespace between adjacent tokens when no other spacing rule applies"
           },
           "msKustoExplorer.format.prefixOperatorSpacing": {
             "type": "string",
-            "enum": ["asIs", "minimal", "one"],
+            "enum": [
+              "asIs",
+              "minimal",
+              "one"
+            ],
             "default": "minimal",
             "description": "Whitespace between a prefix unary operator and its operand: -a, - a"
           },
           "msKustoExplorer.format.infixOperatorSpacing": {
             "type": "string",
-            "enum": ["asIs", "neither", "before", "after", "both"],
+            "enum": [
+              "asIs",
+              "neither",
+              "before",
+              "after",
+              "both"
+            ],
             "default": "both",
             "description": "Whitespace before and after a binary operator and its operands: a+b, a +b, a+ b, or a + b"
           },
           "msKustoExplorer.format.assignmentSpacing": {
             "type": "string",
-            "enum": ["asIs", "neither", "before", "after", "both"],
+            "enum": [
+              "asIs",
+              "neither",
+              "before",
+              "after",
+              "both"
+            ],
             "default": "both",
             "description": "Whitespace before and after assignment operators (=):  a=b, a= b, a =b, a = b"
           },
           "msKustoExplorer.format.rangeOperatorSpacing": {
             "type": "string",
-            "enum": ["asIs", "neither", "before", "after", "both"],
+            "enum": [
+              "asIs",
+              "neither",
+              "before",
+              "after",
+              "both"
+            ],
             "default": "both",
             "description": "Whitespace before and/or after the range operator (..): a..b, a ..b, a.. b, or a .. b"
           },
           "msKustoExplorer.format.commaSpacing": {
             "type": "string",
-            "enum": ["asIs", "neither", "before", "after", "both"],
+            "enum": [
+              "asIs",
+              "neither",
+              "before",
+              "after",
+              "both"
+            ],
             "default": "after",
             "description": "Whitespace before and/or after commas: a,b | a, b | a ,b | a , b"
           },
           "msKustoExplorer.format.colonSpacing": {
             "type": "string",
-            "enum": ["asIs", "neither", "before", "after", "both"],
+            "enum": [
+              "asIs",
+              "neither",
+              "before",
+              "after",
+              "both"
+            ],
             "default": "after",
             "description": "Whitespace before and/or after colons: a:b, a: b, a :b, a : b"
           },
@@ -1157,7 +1195,13 @@
           },
           "msKustoExplorer.format.pipeOperatorSpacing": {
             "type": "string",
-            "enum": ["asIs", "neither", "before", "after", "both"],
+            "enum": [
+              "asIs",
+              "neither",
+              "before",
+              "after",
+              "both"
+            ],
             "default": "both",
             "description": "Whitespace before and/or after the pipe operator (|): a|b, a |b, a| b, or a | b"
           },
@@ -1180,7 +1224,13 @@
           },
           "msKustoExplorer.format.semicolonSpacing": {
             "type": "string",
-            "enum": ["asIs", "neither", "before", "after", "both"],
+            "enum": [
+              "asIs",
+              "neither",
+              "before",
+              "after",
+              "both"
+            ],
             "default": "after",
             "description": "Whitespace before and/or after semicolons: a;b, a; b, a ;b, a ; b"
           },
@@ -1250,19 +1300,31 @@
           },
           "msKustoExplorer.format.beforeDataTableValueSpacing": {
             "type": "string",
-            "enum": ["asIs", "minimal", "one"],
+            "enum": [
+              "asIs",
+              "minimal",
+              "one"
+            ],
             "default": "one",
             "description": "Whitespace before a data table value's opening bracket"
           },
           "msKustoExplorer.format.dataTableValueSpacing": {
             "type": "string",
-            "enum": ["asIs", "minimal", "one"],
+            "enum": [
+              "asIs",
+              "minimal",
+              "one"
+            ],
             "default": "minimal",
             "description": "Whitespace inside a non-empty data table value's brackets"
           },
           "msKustoExplorer.format.emptyDataTableValueSpacing": {
             "type": "string",
-            "enum": ["asIs", "minimal", "one"],
+            "enum": [
+              "asIs",
+              "minimal",
+              "one"
+            ],
             "default": "minimal",
             "description": "Whitespace between brackets of an empty data table value"
           },
@@ -1278,19 +1340,31 @@
           },
           "msKustoExplorer.format.beforeFunctionBodySpacing": {
             "type": "string",
-            "enum": ["asIs", "minimal", "one"],
+            "enum": [
+              "asIs",
+              "minimal",
+              "one"
+            ],
             "default": "one",
             "description": "Whitespace before a function body's opening brace"
           },
           "msKustoExplorer.format.functionBodySpacing": {
             "type": "string",
-            "enum": ["asIs", "minimal", "one"],
+            "enum": [
+              "asIs",
+              "minimal",
+              "one"
+            ],
             "default": "one",
             "description": "Whitespace inside a non-empty function body's braces"
           },
           "msKustoExplorer.format.emptyFunctionBodySpacing": {
             "type": "string",
-            "enum": ["asIs", "minimal", "one"],
+            "enum": [
+              "asIs",
+              "minimal",
+              "one"
+            ],
             "default": "one",
             "description": "Whitespace between braces of an empty function body"
           },
@@ -1306,19 +1380,31 @@
           },
           "msKustoExplorer.format.beforeParameterListSpacing": {
             "type": "string",
-            "enum": ["asIs", "minimal", "one"],
+            "enum": [
+              "asIs",
+              "minimal",
+              "one"
+            ],
             "default": "minimal",
             "description": "Whitespace before a parameter list's opening parenthesis"
           },
           "msKustoExplorer.format.parameterListSpacing": {
             "type": "string",
-            "enum": ["asIs", "minimal", "one"],
+            "enum": [
+              "asIs",
+              "minimal",
+              "one"
+            ],
             "default": "minimal",
             "description": "Whitespace inside a non-empty parameter list's parentheses"
           },
           "msKustoExplorer.format.emptyParameterListSpacing": {
             "type": "string",
-            "enum": ["asIs", "minimal", "one"],
+            "enum": [
+              "asIs",
+              "minimal",
+              "one"
+            ],
             "default": "minimal",
             "description": "Whitespace between parentheses of an empty parameter list"
           },
@@ -1334,49 +1420,81 @@
           },
           "msKustoExplorer.format.beforeArgumentListSpacing": {
             "type": "string",
-            "enum": ["asIs", "minimal", "one"],
+            "enum": [
+              "asIs",
+              "minimal",
+              "one"
+            ],
             "default": "minimal",
             "description": "Whitespace before an argument list's opening parenthesis"
           },
           "msKustoExplorer.format.argumentListSpacing": {
             "type": "string",
-            "enum": ["asIs", "minimal", "one"],
+            "enum": [
+              "asIs",
+              "minimal",
+              "one"
+            ],
             "default": "minimal",
             "description": "Whitespace inside a non-empty argument list's parentheses"
           },
           "msKustoExplorer.format.emptyArgumentListSpacing": {
             "type": "string",
-            "enum": ["asIs", "minimal", "one"],
+            "enum": [
+              "asIs",
+              "minimal",
+              "one"
+            ],
             "default": "minimal",
             "description": "Whitespace between parentheses of an empty argument list"
           },
           "msKustoExplorer.format.parenthesizedExpressionSpacing": {
             "type": "string",
-            "enum": ["asIs", "minimal", "one"],
+            "enum": [
+              "asIs",
+              "minimal",
+              "one"
+            ],
             "default": "minimal",
             "description": "Whitespace inside a parenthesized expression's parentheses"
           },
           "msKustoExplorer.format.jsonArraySpacing": {
             "type": "string",
-            "enum": ["asIs", "minimal", "one"],
+            "enum": [
+              "asIs",
+              "minimal",
+              "one"
+            ],
             "default": "minimal",
             "description": "Whitespace inside a non-empty dynamic array's brackets: dynamic([1]) or dynamic([ 1 ])"
           },
           "msKustoExplorer.format.emptyJsonArraySpacing": {
             "type": "string",
-            "enum": ["asIs", "minimal", "one"],
+            "enum": [
+              "asIs",
+              "minimal",
+              "one"
+            ],
             "default": "minimal",
             "description": "Whitespace between brackets of an empty dynamic array: dynamic([]) or dynamic([ ])"
           },
           "msKustoExplorer.format.jsonObjectSpacing": {
             "type": "string",
-            "enum": ["asIs", "minimal", "one"],
+            "enum": [
+              "asIs",
+              "minimal",
+              "one"
+            ],
             "default": "minimal",
             "description": "Whitespace inside a non-empty dynamic object's braces: dynamic({\"key\": \"value\"}) or dynamic({ \"key\": \"value\" })"
           },
           "msKustoExplorer.format.emptyJsonObjectSpacing": {
             "type": "string",
-            "enum": ["asIs", "minimal", "one"],
+            "enum": [
+              "asIs",
+              "minimal",
+              "one"
+            ],
             "default": "minimal",
             "description": "Whitespace between braces of an empty dynamic object: dynamic({}) or dynamic({ })"
           }
@@ -2226,8 +2344,6 @@
     "@types/mocha": "^10.0.10",
     "@types/node": "^18.0.0",
     "@types/vscode": "^1.90.0",
-    "@typescript-eslint/eslint-plugin": "^8.62.0",
-    "@typescript-eslint/parser": "^8.62.0",
     "@vscode/test-cli": "^0.0.15",
     "@vscode/test-electron": "^2.5.2",
     "esbuild": "^0.28.1",
