@@ -14,8 +14,8 @@ import type { IServer, DatabaseInfo } from './server';
 // Storage Keys
 // =============================================================================
 
-export const SERVERS_STORAGE_KEY = 'kusto.serversAndGroups';
-export const DOCUMENT_CONNECTIONS_KEY = 'kusto.documentConnections';
+const SERVERS_STORAGE_KEY = 'kusto.serversAndGroups';
+const DOCUMENT_CONNECTIONS_KEY = 'kusto.documentConnections';
 
 // =============================================================================
 // Data Types

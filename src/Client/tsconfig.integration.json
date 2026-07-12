@@ -8,6 +8,8 @@
     "types": [ "node", "mocha" ],
     "sourceMap": true,
     "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "isolatedModules": true,
     "skipLibCheck": true,
     "esModuleInterop": true,

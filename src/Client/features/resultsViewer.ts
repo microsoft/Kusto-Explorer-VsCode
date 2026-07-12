@@ -97,7 +97,7 @@ interface ResultViewerState {
 /**
  * Determines if VS Code is currently using a dark color theme.
  */
-export function isDarkMode(): boolean {
+function isDarkMode(): boolean {
     const colorTheme = vscode.window.activeColorTheme;
     return colorTheme.kind === vscode.ColorThemeKind.Dark ||
            colorTheme.kind === vscode.ColorThemeKind.HighContrast;
@@ -432,7 +432,6 @@ export class ResultsViewer {
     // ─── Bottom view state ──────────────────────────────────────────────
     private resultsPanel: vscode.WebviewView | undefined;
     private lastPanelResultData: server.ResultData | undefined;
-    private lastPanelTableNames: string[] = [];
     private panelActiveTabIndex = 0;
     private panelActiveView: string = 'table-0';
     private panelHasChart = false;
@@ -489,7 +488,7 @@ export class ResultsViewer {
         this.chartProvider = chartProvider;
         this.chartEditorProvider = chartEditorProvider;
         this.dataTableProvider = dataTableProvider;
-        this.htmlBuilder = new DocumentViewProvider(this.createPanelStateAccessor(), server, chartProvider, chartEditorProvider, dataTableProvider);
+        this.htmlBuilder = new DocumentViewProvider(this.createPanelStateAccessor(), chartProvider, chartEditorProvider, dataTableProvider);
 
         context.subscriptions.push(
             vscode.window.registerCustomEditorProvider(
@@ -671,7 +670,6 @@ export class ResultsViewer {
         vscode.commands.executeCommand('setContext', 'msKustoExplorer.panelHasChart', hasChart);
         vscode.commands.executeCommand('setContext', 'msKustoExplorer.panelChartActive', hasChart);
         const hasTable = !!resultData.tables.length;
-        this.lastPanelTableNames = resultData.tables.map(t => t.name);
 
         if (!hasTable && !hasChart) {
             await this.showPanelHtml('<html><body>no results</body></html>');
@@ -726,7 +724,7 @@ export class ResultsViewer {
             this.panelEditorView?.setOptions(rawChartOptions, columnNames, chartDefaults, resultData.tables.map(t => ({ name: t.name, columns: t.columns.map(c => c.name) })), chartTable?.name);
         }
 
-        const html = this.htmlBuilder.BuildMultiTabbedHtml(hasChart, mode, this.panelWebView, this.panelEditorWebView, chartOptions, columnNames,
+        const html = this.htmlBuilder.BuildMultiTabbedHtml(hasChart, mode, this.panelWebView, this.panelEditorWebView, chartOptions,
             resultData.query, resultData.cluster, resultData.database, resultData.tables, this.panelTableWebViews);
 
         const totalRows = resultData.tables.reduce((sum, t) => sum + t.rows.length, 0);
@@ -880,7 +878,7 @@ export class ResultsViewer {
             if (editorAdapter) { editorAdapter.suppressMessages = priorEditorSuppress; }
         }
 
-        const html = this.htmlBuilder.BuildMultiTabbedHtml(hasChart, mode, this.singletonWebView, this.singletonEditorWebView, chartOptions, columnNames,
+        const html = this.htmlBuilder.BuildMultiTabbedHtml(hasChart, mode, this.singletonWebView, this.singletonEditorWebView, chartOptions,
             resultData.query, resultData.cluster, resultData.database, resultData.tables, this.singletonTableWebViews);
 
         this.showSingletonView(injectMessageHandlerScripts(html), resultData, resultData.tables.map(t => t.name), singletonLocation, mode);
@@ -1011,7 +1009,6 @@ export class ResultsViewer {
             this.resultsPanel.badge = undefined;
         }
         this.lastPanelResultData = undefined;
-        this.lastPanelTableNames = [];
         this.panelHasChart = false;
         this.panelActiveView = 'table-0';
         vscode.commands.executeCommand('setContext', 'msKustoExplorer.panelHasChart', false);
@@ -1231,8 +1228,7 @@ export class ResultsViewer {
             } else {
                 // Re-render without the chart
                 const tableNames = updated.tables.map(t => t.name);
-                const columnNames = updated.tables[0]?.columns?.map(c => c.name) ?? [];
-                const html = this.htmlBuilder.BuildMultiTabbedHtml(false, this.singletonMode ?? 'all', this.singletonWebView, this.singletonEditorWebView, undefined, columnNames,
+                const html = this.htmlBuilder.BuildMultiTabbedHtml(false, this.singletonMode ?? 'all', this.singletonWebView, this.singletonEditorWebView, undefined,
                     updated.query, updated.cluster, updated.database, updated.tables, this.singletonTableWebViews);
                 this.singletonView!.webview.html = injectMessageHandlerScripts(html);
 
@@ -1312,14 +1308,6 @@ export class ResultsViewer {
         return this.dataTableViews.get(panel);
     }
 
-    private getActiveTableName(state: ResultViewerState): string | undefined {
-        const match = state.activeView.match(/^table-(\d+)$/);
-        if (match) {
-            const idx = parseInt(match[1]!, 10);
-            return state.tableNames[idx];
-        }
-        return state.tableNames[0];
-    }
 
     /**
      * Default \"Copy\" / Ctrl+C: TSV plain text + CF_HTML rich text.
@@ -1616,7 +1604,7 @@ class DocumentViewProvider implements vscode.CustomTextEditorProvider {
         return next;
     }
 
-    constructor(private readonly viewer: IViewerPanelState, private readonly server: IServer, private readonly chartProvider: IChartProvider, private readonly chartEditorProvider: IChartEditorProvider, private readonly dataTableProvider: IDataTableProvider) {
+    constructor(private readonly viewer: IViewerPanelState, private readonly chartProvider: IChartProvider, private readonly chartEditorProvider: IChartEditorProvider, private readonly dataTableProvider: IDataTableProvider) {
     }
 
     async resolveCustomTextEditor(
@@ -1871,7 +1859,7 @@ class DocumentViewProvider implements vscode.CustomTextEditorProvider {
             editorView?.setOptions(rawChartOptions, columnNames, chartDefaults, resultData.tables.map(t => ({ name: t.name, columns: t.columns.map(c => c.name) })), chartTable?.name);
         }
 
-        const html = this.BuildMultiTabbedHtml(hasChart, 'all', docWebView, docEditorWebView, chartOptions, columnNames,
+        const html = this.BuildMultiTabbedHtml(hasChart, 'all', docWebView, docEditorWebView, chartOptions,
             resultData.query, resultData.cluster, resultData.database, resultData.tables, docTableWebViews);
         webviewPanel.webview.html = injectMessageHandlerScripts(html);
     }
@@ -1899,7 +1887,6 @@ class DocumentViewProvider implements vscode.CustomTextEditorProvider {
         webview: WebViewAdapter | undefined,
         editorWebView: WebViewAdapter | undefined,
         chartOptions?: server.ChartOptions,
-        columnNames?: string[],
         queryText?: string,
         cluster?: string,
         database?: string,

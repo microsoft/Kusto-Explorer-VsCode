@@ -13,8 +13,7 @@ import { ResultsViewer } from './resultsViewer';
 import { HistoryManager } from './historyManager';
 import type { HistoryEntry } from './historyManager';
 import type { HistoryPanel } from './historyPanel';
-import type { IClipboard } from './clipboard';
-import type { ClipboardItem } from './clipboard';
+import { formatCfHtml, type ClipboardItem, type IClipboard } from './clipboard';
 import { ENTITY_DEFINITION_SCHEME } from './entityDefinitionProvider';
 
 const PASTE_KIND = vscode.DocumentDropOrPasteEditKind.Text.append('kusto');
@@ -515,7 +514,7 @@ export class QueryEditor {
 
                 // Place both HTML and plain text on the clipboard
                 const items: ClipboardItem[] = [
-                    { format: 'HTML Format', data: wrapHtmlForClipboard(result.html) },
+                    { format: 'HTML Format', data: formatCfHtml(result.html) },
                     { format: 'Text', data: plainText, encoding: 'text' }
                 ];
 
@@ -752,8 +751,8 @@ class KustoPasteEditProvider implements vscode.DocumentPasteEditProvider {
         document: vscode.TextDocument,
         ranges: readonly vscode.Range[],
         dataTransfer: vscode.DataTransfer,
-        context: vscode.DocumentPasteEditContext,
-        token: vscode.CancellationToken
+        _context: vscode.DocumentPasteEditContext,
+        _token: vscode.CancellationToken
     ): Promise<vscode.DocumentPasteEdit[] | undefined> {
         const clipboardContext = this.clipboard.getContext();
         if (!clipboardContext) {
@@ -975,39 +974,6 @@ function requestSemanticTokens(document: vscode.TextDocument): void {
     ).catch(() => undefined);
 }
 
-/**
- * Wraps HTML content in the CF_HTML clipboard format header required by Windows.
- */
-function wrapHtmlForClipboard(html: string): string {
-    // CF_HTML format requires specific headers with byte offsets
-    const header = 'Version:0.9\r\nStartHTML:SSSSSSSSSS\r\nEndHTML:EEEEEEEEEE\r\nStartFragment:FFFFFFFFFF\r\nEndFragment:GGGGGGGGGG\r\n';
-    const startFragment = '<!--StartFragment-->';
-    const endFragment = '<!--EndFragment-->';
-    const body = `<!DOCTYPE html><html><body>${startFragment}${html}${endFragment}</body></html>`;
-    const full = header + body;
-
-    // Calculate byte offsets (CF_HTML uses byte positions)
-    const encoder = new TextEncoder();
-    const headerBytes = encoder.encode(header).length;
-    const startFragOffset = headerBytes + encoder.encode(`<!DOCTYPE html><html><body>${startFragment}`).length - encoder.encode(startFragment).length + encoder.encode(startFragment).length;
-    const fullBytes = encoder.encode(full).length;
-
-    // Simpler: compute offsets by measuring
-    const beforeFragment = header + `<!DOCTYPE html><html><body>`;
-    const afterStartFragment = beforeFragment + startFragment;
-    const beforeEndFragment = afterStartFragment + html;
-    
-    const startHtml = encoder.encode(header).length;
-    const endHtml = encoder.encode(full).length;
-    const startFrag = encoder.encode(afterStartFragment).length;
-    const endFrag = encoder.encode(beforeEndFragment).length;
-
-    return full
-        .replace('SSSSSSSSSS', startHtml.toString().padStart(10, '0'))
-        .replace('EEEEEEEEEE', endHtml.toString().padStart(10, '0'))
-        .replace('FFFFFFFFFF', startFrag.toString().padStart(10, '0'))
-        .replace('GGGGGGGGGG', endFrag.toString().padStart(10, '0'));
-}
 
 /**
  * Forces VS Code to invalidate semantic token cache by making a real edit on all visible Kusto editors.

@@ -2907,7 +2907,7 @@ export class PlotlyChartProvider implements IChartProvider {
             }
             builder = builder.addSecondaryYAxis('yaxis2', {
                 overlaying: 'y',
-                side: 'right',
+                side: PlotlyAxisSides.Right,
                 showgrid: false,
             });
         } else if (options.yLayout === ChartYLayout.SeparatePanels && yColumns.length > 1) {
