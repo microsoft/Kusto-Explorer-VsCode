@@ -34,9 +34,11 @@ export type ResultViewMode = 'chart' | 'data' | 'detail' | 'all';
  * Stores page-level setup content (headHtml, scriptsHtml) for the page builder to read.
  * `setContent()` posts the given `contentCommand` message to the page handler.
  */
-class WebViewAdapter implements IWebView {
+export class WebViewAdapter implements IWebView {
     private readonly webview: vscode.Webview;
     private readonly contentCommand: string;
+    private readonly headFragments = new Set<string>();
+    private readonly scriptFragments = new Set<string>();
     headHtml = '';
     scriptsHtml = '';
     contentHtml = '';
@@ -56,8 +58,16 @@ class WebViewAdapter implements IWebView {
     }
 
     setup(headHtml: string, scriptsHtml: string): void {
-        this.headHtml = headHtml;
-        this.scriptsHtml = scriptsHtml;
+        this.headHtml = this.appendSetupFragment(this.headHtml, this.headFragments, headHtml);
+        this.scriptsHtml = this.appendSetupFragment(this.scriptsHtml, this.scriptFragments, scriptsHtml);
+    }
+
+    private appendSetupFragment(current: string, fragments: Set<string>, fragment: string): string {
+        if (!fragment || fragments.has(fragment)) {
+            return current;
+        }
+        fragments.add(fragment);
+        return current ? `${current}\n${fragment}` : fragment;
     }
 
     setContent(html: string): void {

@@ -14,13 +14,16 @@
 /**
  * Abstraction for a region within a webview page.
  *
- * A controller calls `setup()` once to declare page-level dependencies
- * (scripts, styles), then uses `setContent()` to push HTML into its
- * region of the page.  `invoke()` / `handle()` provide bidirectional
+ * Controllers may call `setup()` multiple times during region construction to
+ * declare page-level dependencies (scripts, styles); implementations should
+ * accumulate those fragments rather than replacing earlier ones. Re-registering
+ * the same fragment should be idempotent so repeated construction attempts do
+ * not duplicate page scripts. Controllers then use `setContent()` to push HTML
+ * into their region of the page. `invoke()` / `handle()` provide bidirectional
  * messaging between the extension and the webview page scripts.
  */
 export interface IWebView {
-    /** One-time setup: provide HTML for the page &lt;head&gt; and end-of-body scripts. */
+    /** Setup: add HTML for the page &lt;head&gt; and end-of-body scripts. */
     setup(headHtml: string, scriptsHtml: string): void;
     /** Push HTML content into the controller's region of the page. */
     setContent(html: string): void;
