@@ -419,15 +419,7 @@ export class QueryEditor {
             ));
 
             const entry = await this.history.getMatchingEntry(queryText);
-            if (!entry) {
-                await this.resultsViewer.displayErrorInBottomView({
-                    message: 'No saved results were found for this query.',
-                    details: 'Run the query again to generate results.'
-                });
-                return;
-            }
-
-            const data = await this.history.getEntryData(entry);
+            const data = entry ? await this.history.getEntryData(entry) : undefined;
             if (data) {
                 await this.resultsViewer.displayResults(data);
                 this.historyPanel.revealEntry(entry);
@@ -947,7 +939,8 @@ function activateSemanticColoring(context: vscode.ExtensionContext, server: ISer
                     // Find visible editor for this document and trigger refresh
                     const editor = vscode.window.visibleTextEditors.find(e => e.document === doc);
                     if (editor) {
-                        requestSemanticTokens(doc);
+                        // Trigger semantic token refresh
+                        vscode.commands.executeCommand('vscode.executeDocumentSemanticTokensProvider', doc.uri);
                     }
                 }
             });
@@ -961,18 +954,12 @@ function activateSemanticColoring(context: vscode.ExtensionContext, server: ISer
                 if (doc.languageId === 'kusto') {
                     // Small delay to ensure document is fully loaded
                     setTimeout(() => {
-                        requestSemanticTokens(doc);
+                        vscode.commands.executeCommand('vscode.executeDocumentSemanticTokensProvider', doc.uri);
                     }, 100);
                 }
             })
         );
     }
-}
-
-function requestSemanticTokens(document: vscode.TextDocument): void {
-    void Promise.resolve(
-        vscode.commands.executeCommand('vscode.executeDocumentSemanticTokensProvider', document.uri)
-    ).catch(() => undefined);
 }
 
 /**

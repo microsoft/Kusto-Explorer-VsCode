@@ -178,7 +178,7 @@ export async function acquireMicrosoftAuthenticationToken(
             return session;
         })();
         inFlightSessions.set(scope, pending);
-        void pending.finally(() => inFlightSessions.delete(scope));
+        pending.finally(() => inFlightSessions.delete(scope));
     }
 
     try {

@@ -109,7 +109,7 @@ The Server is written in C# to interact with the .NET version of the Kusto parse
 ### Prerequisites
 
 - [.NET 10 SDK](https://dotnet.microsoft.com/download)
-- [Node.js](https://nodejs.org/) current LTS, Node 22 or later
+- [Node.js](https://nodejs.org/) (LTS version recommended)
 - [Visual Studio Code](https://code.visualstudio.com/)
 
 ### Building the Language Server
