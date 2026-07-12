@@ -2,7 +2,7 @@
   "name": "kusto-explorer-vscode",
   "displayName": "Microsoft Kusto Explorer",
   "description": "Edit, run and chart Kusto queries (KQL).",
-  "version": "0.2.0",
+  "version": "1.0.1",
   "publisher": "ms-kusto",
   "author": "Microsoft",
   "license": "MIT",
