@@ -92,6 +92,7 @@ describe('GraphChartProvider', () => {
             expect(m.webview.setup).toHaveBeenCalledTimes(1);
             const head = m.webview.setup.mock.calls[0]?.[0] as string;
             expect(head).toContain('cytoscape');
+            expect(head).toContain('defer');
         });
     });
 

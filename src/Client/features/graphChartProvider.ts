@@ -214,7 +214,7 @@ export class GraphChartProvider implements IChartProvider {
 
     createView(webview: IWebView): IChartView {
         webview.setup(
-            `<script src="${CytoscapeJsCdn}" charset="utf-8"></script>`,
+            `<script defer src="${CytoscapeJsCdn}" charset="utf-8"></script>`,
             ''
         );
         return new GraphChartView(webview, (data, options, darkMode, ctx, positions, token, seed) => this.renderGraphHtml(data, options, darkMode, ctx, positions, token, seed));
