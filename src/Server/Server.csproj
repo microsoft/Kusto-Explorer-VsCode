@@ -12,7 +12,8 @@
     <PackageReference Include="Microsoft.Azure.Kusto.Language" Version="12.4.0" />
     <PackageReference Include="Microsoft.VisualStudio.LanguageServer.Protocol" Version="17.2.8" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
-    <PackageReference Include="StreamJsonRpc" Version="2.25.29" />
+    <PackageReference Include="StreamJsonRpc" Version="2.22.23" />
+    <PackageReference Include="MessagePack" Version="2.5.302" />
   </ItemGroup>
 
 </Project>
