@@ -7,7 +7,7 @@
 
 import * as vscode from 'vscode';
 import * as crypto from 'crypto';
-import type { IServer, SelectionRange, Range } from './server';
+import type { IServer, SelectionRange, Range, QueryRangesResult } from './server';
 import type { ConnectionManager } from './connectionManager';
 import { ResultsViewer } from './resultsViewer';
 import { HistoryManager } from './historyManager';
@@ -21,7 +21,12 @@ const PASTE_KIND = vscode.DocumentDropOrPasteEditKind.Text.append('kusto');
 const QUERY_RUNNING_CONTEXT_KEY = 'msKustoExplorer.queryRunning';
 const MIN_QUERY_RUNNING_INDICATOR_MS = 500;
 const CODE_LENS_SCOPE_SETTING = 'editor.showCodeLensForActiveQueryOnly';
-const CODE_LENS_REFRESH_DEBOUNCE_MS = 100;
+
+/** Query ranges cached for one document version. */
+interface CachedQueryRanges {
+    version: number;
+    result: Promise<QueryRangesResult | null>;
+}
 
 /** True when query action CodeLens entries should be limited to the query holding the cursor. */
 function isCodeLensScopedToActiveQuery(): boolean {
@@ -162,51 +167,39 @@ export class QueryEditor {
         // Register CodeLens provider for queries
         this.codeLensProvider = new KustoCodeLensProvider(this.server, this.history);
         context.subscriptions.push(
+            this.codeLensProvider,
             vscode.languages.registerCodeLensProvider(
                 { language: 'kusto' },
                 this.codeLensProvider
             )
         );
 
-        // When the CodeLens is scoped to the active query, the lenses depend on the cursor,
-        // so refresh them (debounced) as the cursor or active editor moves.
-        let codeLensRefreshTimer: NodeJS.Timeout | undefined;
-        const scheduleCodeLensRefresh = () => {
+        // When the CodeLens is scoped to the active query, the lenses depend on the cursor, so
+        // refresh them as the cursor or active editor moves. The refresh is immediate: query ranges
+        // are cached per document version, so this is local work rather than a server round-trip.
+        const refreshCodeLensForActiveQuery = () => {
             if (!isCodeLensScopedToActiveQuery()) {
                 return;
             }
 
-            if (codeLensRefreshTimer) {
-                clearTimeout(codeLensRefreshTimer);
-            }
-
-            codeLensRefreshTimer = setTimeout(() => {
-                codeLensRefreshTimer = undefined;
-                this.codeLensProvider.refresh();
-            }, CODE_LENS_REFRESH_DEBOUNCE_MS);
+            this.codeLensProvider.refresh();
         };
 
         context.subscriptions.push(
             vscode.window.onDidChangeActiveTextEditor(() => {
                 // Refresh on every active editor change, including moving away from a Kusto
                 // document, so a still-visible query set doesn't keep stale scoped lenses.
-                scheduleCodeLensRefresh();
+                refreshCodeLensForActiveQuery();
             }),
             vscode.window.onDidChangeTextEditorSelection(event => {
                 if (event.textEditor.document.languageId === 'kusto') {
-                    scheduleCodeLensRefresh();
+                    refreshCodeLensForActiveQuery();
                 }
             }),
             // Applying the setting takes effect immediately; no window reload required.
             vscode.workspace.onDidChangeConfiguration(event => {
                 if (event.affectsConfiguration(`msKustoExplorer.${CODE_LENS_SCOPE_SETTING}`)) {
                     this.codeLensProvider.refresh();
-                }
-            }),
-            new vscode.Disposable(() => {
-                if (codeLensRefreshTimer) {
-                    clearTimeout(codeLensRefreshTimer);
-                    codeLensRefreshTimer = undefined;
                 }
             })
         );
@@ -672,12 +665,31 @@ export class QueryEditor {
 // CodeLens Provider
 // =============================================================================
 
-class KustoCodeLensProvider implements vscode.CodeLensProvider {
+/**
+ * Provides the query action CodeLens entries for query set documents.
+ * Exported for unit testing.
+ */
+export class KustoCodeLensProvider implements vscode.CodeLensProvider, vscode.Disposable {
     private _onDidChangeCodeLenses = new vscode.EventEmitter<void>();
     readonly onDidChangeCodeLenses = this._onDidChangeCodeLenses.event;
     private readonly runningQueryRangeKeys = new Set<string>();
+    private readonly queryRangesCache = new Map<string, CachedQueryRanges>();
+    private readonly disposables: vscode.Disposable[] = [];
 
     constructor(private readonly server: IServer, private readonly history: HistoryManager) {
+        this.disposables.push(
+            vscode.workspace.onDidCloseTextDocument(document => {
+                this.queryRangesCache.delete(document.uri.toString());
+            })
+        );
+    }
+
+    dispose(): void {
+        this.queryRangesCache.clear();
+        for (const disposable of this.disposables) {
+            disposable.dispose();
+        }
+        this.disposables.length = 0;
     }
 
     refresh(): void {
@@ -698,10 +710,43 @@ class KustoCodeLensProvider implements vscode.CodeLensProvider {
         this.refresh();
     }
 
+    /**
+     * Gets the document's query ranges, reusing the cached result while the document version
+     * is unchanged.
+     *
+     * Query ranges are a pure function of document content, so they cannot change without the
+     * version changing. Caching keeps the cross-process call off the cursor-movement path, which
+     * matters when the CodeLens is scoped to the active query and every cursor move re-provides.
+     */
+    private getQueryRanges(document: vscode.TextDocument): Promise<QueryRangesResult | null> {
+        // The URI string carries the scheme, so entity definition documents get their own entries.
+        const uri = document.uri.toString();
+        const version = document.version;
+
+        const cached = this.queryRangesCache.get(uri);
+        if (cached && cached.version === version) {
+            return cached.result;
+        }
+
+        // Setting the entry also drops the now-stale one for the previous version.
+        const result = this.server.getQueryRanges(uri);
+        const entry: CachedQueryRanges = { version, result };
+        this.queryRangesCache.set(uri, entry);
+
+        result.catch(() => {
+            // Never leave a rejected request cached; the next request should retry.
+            if (this.queryRangesCache.get(uri) === entry) {
+                this.queryRangesCache.delete(uri);
+            }
+        });
+
+        return result;
+    }
+
     async provideCodeLenses(document: vscode.TextDocument): Promise<vscode.CodeLens[]> {
         const isEntityDefinition = document.uri.scheme === ENTITY_DEFINITION_SCHEME;
 
-        const result = await this.server.getQueryRanges(document.uri.toString());
+        const result = await this.getQueryRanges(document);
         if (!result || !result.ranges.length) {
             return [];
         }
