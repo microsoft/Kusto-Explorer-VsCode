@@ -80,8 +80,19 @@ public class ConnectionManager : IConnectionManager
             var cluster = info.Connection.Cluster;
             ImmutableInterlocked.GetOrAdd(ref _clusterToInfoMap, cluster, info);
 
+            // A resource-scoped proxy cluster is keyed by its full URI, so also key it by the
+            // bare host. Lookups that were normalized to a host name - cluster() references in
+            // a query, connections stored by an older version - then still resolve.
+            var hostName = KustoFacts.GetHostName(cluster);
+            if (!string.IsNullOrEmpty(hostName) && hostName != cluster)
+            {
+                ImmutableInterlocked.GetOrAdd(ref _clusterToInfoMap, hostName, info);
+            }
+
+            // GetShortHostName returns null for any host outside the default domain
+            // (e.g. ade.loganalytics.io), which is not a usable dictionary key.
             var shortName = KustoFacts.GetShortHostName(cluster, _defaultDomain);
-            if (shortName != cluster)
+            if (!string.IsNullOrEmpty(shortName) && shortName != cluster)
             {
                 ImmutableInterlocked.GetOrAdd(ref _clusterToInfoMap, shortName, info);
             }
@@ -241,7 +252,14 @@ public class ConnectionManager : IConnectionManager
             return _fallbackBuilder;
         }
 
-        public string Cluster => _primaryBuilder.Hostname;
+        // The routing identity of the connection. For an ordinary cluster this is the host
+        // name; for an Azure Data Explorer proxy endpoint (Log Analytics / Application
+        // Insights) the workspace or component is selected by the URI path, so the whole
+        // resource-scoped URI is the identity.
+        public string Cluster =>
+            ConnectionFacts.TryGetResourceScopedClusterUri(_primaryBuilder.DataSource)
+            ?? _primaryBuilder.Hostname;
+
         public string? Database => _primaryBuilder.InitialCatalog;
 
         public IConnection WithCluster(string clusterName)

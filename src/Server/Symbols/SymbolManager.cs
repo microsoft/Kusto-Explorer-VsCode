@@ -94,7 +94,7 @@ public class SymbolManager : ISymbolManager
                     await _schemaManager.ClearCachedClusterAsync(clusterName, useThisCancellationToken).ConfigureAwait(false);
 
                     // replace with new empty/open cluster 
-                    newGlobals = this.Globals.AddOrReplaceCluster(new ClusterSymbol(clusterName, [], isOpen: true));
+                    newGlobals = this.Globals.AddOrReplaceCluster(new ClusterSymbol(ConnectionFacts.GetClusterSymbolName(clusterName), [], isOpen: true));
                     newGlobals = await this.AddClusterAsync(newGlobals, clusterName, contextCluster: null, useThisCancellationToken).ConfigureAwait(false);
 
                     // re-add previously loaded databases
@@ -176,7 +176,10 @@ public class SymbolManager : ISymbolManager
             if (clusterInfo != null)
             {
                 var openDatabases = clusterInfo.Databases.Select(db => new DatabaseSymbol(db.Name, db.AlternateName, null, isOpen: true)).ToList();
-                var newCluster = new ClusterSymbol(clusterName, openDatabases);
+                // Schema is fetched with the full routing name (which may be a resource-scoped
+                // proxy URI), but the symbol is named by host - see GetClusterSymbolName for the
+                // GlobalState.GetCluster constraint that forces this and its known consequence.
+                var newCluster = new ClusterSymbol(ConnectionFacts.GetClusterSymbolName(clusterName), openDatabases);
                 globals = globals.AddOrReplaceCluster(newCluster);
 
                 _logger?.Log($"SymbolManager: Added cluster symbol: {clusterName} databases: {openDatabases.Count}");
