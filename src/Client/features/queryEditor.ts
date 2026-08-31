@@ -690,6 +690,7 @@ export class KustoCodeLensProvider implements vscode.CodeLensProvider, vscode.Di
             disposable.dispose();
         }
         this.disposables.length = 0;
+        this._onDidChangeCodeLenses.dispose();
     }
 
     refresh(): void {
