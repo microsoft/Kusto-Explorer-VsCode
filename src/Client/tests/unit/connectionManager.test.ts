@@ -37,10 +37,12 @@ function createMockContext(): vscode.ExtensionContext {
 function createMockServer(overrides?: Partial<Server>): Server {
     return {
         decodeConnectionString: vi.fn(async (conn: string) => {
-            // Simple: treat as URL or hostname
+            // Mirrors the real language server: the host name identifies an ordinary
+            // cluster, but a resource-scoped proxy URI keeps its whole path.
             try {
                 const url = new URL(conn.startsWith('https://') ? conn : `https://${conn}`);
-                return { cluster: url.hostname };
+                const path = url.pathname.replace(/^\/+|\/+$/g, '');
+                return { cluster: path.includes('/') ? `${url.protocol}//${url.host}/${path}` : url.hostname };
             } catch {
                 return { cluster: conn };
             }
@@ -97,6 +99,16 @@ describe('getDisplayName', () => {
 
     it('returns undefined when cluster is just the domain', () => {
         expect(getDisplayName('.kusto.windows.net')).toBeUndefined();
+    });
+
+    it('returns the workspace name for a Log Analytics cluster URI', () => {
+        expect(getDisplayName('https://ade.loganalytics.io/subscriptions/sub-1/resourcegroups/rg-1/providers/microsoft.operationalinsights/workspaces/my-workspace'))
+            .toBe('my-workspace');
+    });
+
+    it('returns the component name for an Application Insights cluster URI', () => {
+        expect(getDisplayName('https://ade.applicationinsights.io/subscriptions/sub-1/resourcegroups/rg-1/providers/microsoft.insights/components/my-app'))
+            .toBe('my-app');
     });
 });
 
@@ -432,6 +444,92 @@ describe('ConnectionManager', () => {
 
             const name = await failMgr.getHostName('https://fallback.kusto.windows.net');
             expect(name).toBe('fallback.kusto.windows.net');
+        });
+    });
+
+    // ─── Resource-scoped proxy cluster URIs (issue #139) ─────────────
+    //
+    // These exercise the simple-parsing fallback directly, because it is the path
+    // that truncated the proxy URI to its front-door host name.
+
+    describe('getHostName simple parsing', () => {
+        const workspaceUri = 'https://ade.loganalytics.io/subscriptions/sub-1/resourcegroups/rg-1/providers/microsoft.operationalinsights/workspaces/my-workspace';
+        let fallbackMgr: ConnectionManager;
+
+        beforeEach(() => {
+            fallbackMgr = new ConnectionManager(createMockContext(), createMockServer({
+                decodeConnectionString: vi.fn(async () => { throw new Error('no server'); }),
+            }));
+        });
+
+        it('preserves the full Log Analytics workspace URI', async () => {
+            expect(await fallbackMgr.getHostName(workspaceUri)).toBe(workspaceUri);
+        });
+
+        it('preserves the full Application Insights component URI', async () => {
+            const uri = 'https://ade.applicationinsights.io/subscriptions/sub-1/resourcegroups/rg-1/providers/microsoft.insights/components/my-app';
+            expect(await fallbackMgr.getHostName(uri)).toBe(uri);
+        });
+
+        it('reduces a plain cluster URI to its hostname', async () => {
+            expect(await fallbackMgr.getHostName('https://mycluster.kusto.windows.net')).toBe('mycluster.kusto.windows.net');
+        });
+
+        it('treats a single path segment as a database, not a resource path', async () => {
+            expect(await fallbackMgr.getHostName('https://help.kusto.windows.net/Samples')).toBe('help.kusto.windows.net');
+        });
+
+        it('handles a bare hostname with no scheme', async () => {
+            expect(await fallbackMgr.getHostName('mycluster.kusto.windows.net')).toBe('mycluster.kusto.windows.net');
+        });
+
+        // URL schemes are case-insensitive. A case-sensitive check prepends a second
+        // scheme, and `new URL('https://HTTPS://host')` parses without throwing and
+        // reports a hostname of 'https', so the failure is silent rather than caught.
+        it('handles an uppercase scheme', async () => {
+            expect(await fallbackMgr.getHostName('HTTPS://mycluster.kusto.windows.net'))
+                .toBe('mycluster.kusto.windows.net');
+        });
+
+        it('handles an http scheme without rewriting it to https', async () => {
+            expect(await fallbackMgr.getHostName('http://localhost:8080')).toBe('localhost');
+        });
+
+        it('preserves a resource-scoped URI given with an uppercase scheme', async () => {
+            // The URL parser normalizes the scheme, so the round-trip lowercases it.
+            expect(await fallbackMgr.getHostName(workspaceUri.replace('https://', 'HTTPS://')))
+                .toBe(workspaceUri);
+        });
+
+        it('extracts the data source from a connection string', async () => {
+            expect(await fallbackMgr.getHostName('Data Source=https://mycluster.kusto.windows.net;Initial Catalog=mydb'))
+                .toBe('mycluster.kusto.windows.net');
+        });
+
+        it('preserves a resource-scoped data source in a connection string', async () => {
+            expect(await fallbackMgr.getHostName(`Data Source=${workspaceUri};Initial Catalog=my-workspace`)).toBe(workspaceUri);
+        });
+
+        it('adds a resource-scoped URI as a first-class connection', async () => {
+            await fallbackMgr.ensureServer(workspaceUri);
+
+            const info = fallbackMgr.findServerInfo(workspaceUri);
+            expect(info).toBeDefined();
+            expect(info!.connection).toBe(workspaceUri);
+            expect(info!.displayName).toBe('my-workspace');
+            expect(fallbackMgr.getConfiguredConnections()).toContain(workspaceUri);
+        });
+
+        it('keeps two workspaces behind the same proxy host as separate connections', async () => {
+            const otherUri = workspaceUri.replace('my-workspace', 'other-workspace');
+            await fallbackMgr.ensureServer(workspaceUri);
+            await fallbackMgr.ensureServer(otherUri);
+
+            expect(fallbackMgr.findServerInfo(workspaceUri)?.displayName).toBe('my-workspace');
+            expect(fallbackMgr.findServerInfo(otherUri)?.displayName).toBe('other-workspace');
+            expect(fallbackMgr.getConfiguredConnections()).toEqual(
+                expect.arrayContaining([workspaceUri, otherUri])
+            );
         });
     });
 
