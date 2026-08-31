@@ -121,6 +121,31 @@ describe('computeSelectionStats', () => {
         expect(stats?.max).toBe(Number('9223372036854775807'));
         expect(stats?.min).toBe(1);
     });
+
+    it('accepts bigint cell values', () => {
+        const table: ResultTable = {
+            name: 'T',
+            columns: [{ name: 'V', type: 'long' }],
+            rows: [[10n], [20n]],
+        };
+        expect(computeSelectionStats(table, [0, 1], [0])).toEqual({
+            cellCount: 2, numericCount: 2, sum: 30, avg: 15, min: 10, max: 20,
+        });
+    });
+
+    // A bigint beyond the double range converts to Infinity; skip it like the
+    // number and string paths do, so it cannot poison sum/min/max and leave a
+    // labelled-but-empty aggregate in the status bar.
+    it('excludes bigints too large to represent as a finite double', () => {
+        const table: ResultTable = {
+            name: 'T',
+            columns: [{ name: 'V', type: 'long' }],
+            rows: [[(10n ** 400n)], [5n]],
+        };
+        expect(computeSelectionStats(table, [0, 1], [0])).toEqual({
+            cellCount: 2, numericCount: 1, sum: 5, avg: 5, min: 5, max: 5,
+        });
+    });
 });
 
 describe('formatStatValue', () => {

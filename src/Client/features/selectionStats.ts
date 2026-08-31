@@ -62,7 +62,11 @@ function toNumericValue(value: unknown): number | undefined {
         return Number.isFinite(parsed) ? parsed : undefined;
     }
     if (typeof value === 'bigint') {
-        return Number(value);
+        // Mirror the number/string paths: a bigint beyond the double range
+        // converts to Infinity, which would poison sum/min/max and render a
+        // labelled-but-empty aggregate ("Sum:") once formatStatValue drops it.
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : undefined;
     }
     return undefined;
 }
@@ -113,7 +117,7 @@ export function computeSelectionStats(
 
 /**
  * Formats an aggregate for display. Integral results render without a
- * decimal point; fractional results are capped at six significant decimals
+ * decimal point; fractional results are rounded to six decimal places
  * and trimmed of trailing zeros so Avg stays readable without inventing
  * precision. Magnitudes beyond the readable fixed range fall back to
  * exponential notation.
