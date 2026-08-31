@@ -574,6 +574,72 @@ describe('SimpleDataTableProvider', () => {
         });
     });
 
+    // ─── selection statistics ───────────────────────────────────────────
+
+    describe('selection statistics', () => {
+        function tokenOf(webview: ReturnType<typeof createMockWebView>): string {
+            const html: string = webview.setContent.mock.calls[0]![0];
+            return html.match(/var token = '(dt-[a-z0-9]+)'/)![1]!;
+        }
+
+        function lastStats(webview: ReturnType<typeof createMockWebView>): string | undefined {
+            const calls = webview.invoke.mock.calls.filter(c => c[0] === 'setSelectionStats');
+            const last = calls[calls.length - 1];
+            return last ? (last[1] as { text: string }).text : undefined;
+        }
+
+        it('publishes aggregates when a numeric selection is reported', () => {
+            const webview = createMockWebView();
+            provider.createView(webview, make2dTable());
+
+            webview.simulateMessage({
+                command: 'setSelection',
+                _token: tokenOf(webview),
+                selection: { rows: [0, 1, 2], cols: [1] },
+            });
+
+            const text = lastStats(webview)!;
+            expect(text).toContain('Count: 3');
+            expect(text).toContain('Sum: 60');
+            expect(text).toContain('Avg: 20');
+            expect(text).toContain('Min: 10');
+            expect(text).toContain('Max: 30');
+        });
+
+        it('publishes count only for a non-numeric selection', () => {
+            const webview = createMockWebView();
+            provider.createView(webview, make2dTable());
+
+            webview.simulateMessage({
+                command: 'setSelection',
+                _token: tokenOf(webview),
+                selection: { rows: [0, 1], cols: [0] },
+            });
+
+            expect(lastStats(webview)).toBe('Count: 2');
+        });
+
+        it('publishes empty text when the selection is cleared', () => {
+            const webview = createMockWebView();
+            provider.createView(webview, make2dTable());
+            const token = tokenOf(webview);
+
+            webview.simulateMessage({ command: 'setSelection', _token: token, selection: { rows: [0], cols: [1] } });
+            webview.simulateMessage({ command: 'setSelection', _token: token, selection: null });
+
+            expect(lastStats(webview)).toBe('');
+        });
+
+        it('renders the status bar element and handler in the page', () => {
+            const webview = createMockWebView();
+            provider.createView(webview, make2dTable());
+            const html: string = webview.setContent.mock.calls[0]![0];
+
+            expect(html).toContain('class="selection-stats"');
+            expect(html).toContain('setSelectionStats');
+        });
+    });
+
     // ─── token uniqueness ───────────────────────────────────────────────
 
     describe('token scoping', () => {

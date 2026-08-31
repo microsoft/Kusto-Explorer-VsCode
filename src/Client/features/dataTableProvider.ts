@@ -19,6 +19,7 @@ import { formatCfHtml } from './clipboard';
 import { resultTableToHtml } from './html';
 import { resultTableToMarkdown } from './markdown';
 import { resultTableToTsv, formatCellValue } from './tsv';
+import { computeSelectionStats, formatSelectionStats } from './selectionStats';
 
 // ─── Interfaces ─────────────────────────────────────────────────────────────
 
@@ -126,6 +127,7 @@ class DataTableView implements IDataTableView {
                 const sel = msg.selection as { rows: number[]; cols: number[] } | null | undefined;
                 this.currentSelection = sel ?? null;
                 this.resolveExpression();
+                this.publishSelectionStats();
             }
             if (msg.command === 'setColumnView') {
                 this.applyColumnViewFromWebview(msg.columns);
@@ -144,7 +146,7 @@ class DataTableView implements IDataTableView {
         };
         const json = JSON.stringify(data).replace(/<\//g, '<\\/');
         const viewJson = JSON.stringify(this.viewState ?? null).replace(/<\//g, '<\\/');
-        webview.setContent(`<table></table>${this.buildInitScript(json, viewJson)}`);
+        webview.setContent(`<table></table><div class="selection-stats" hidden></div>${this.buildInitScript(json, viewJson)}`);
         this.resolveExpression();
     }
 
@@ -302,6 +304,18 @@ class DataTableView implements IDataTableView {
     }
 
     /**
+     * Computes aggregates for the current selection and pushes them to the
+     * webview's status bar. The webview only holds display strings, so the
+     * math runs here against the raw typed values. An empty selection sends
+     * empty text, which hides the bar.
+     */
+    private publishSelectionStats(): void {
+        const sel = this.currentSelection;
+        const stats = sel ? computeSelectionStats(this.table, sel.rows, sel.cols) : undefined;
+        this.webview.invoke('setSelectionStats', { text: formatSelectionStats(stats) });
+    }
+
+    /**
      * Returns a sub-`ResultTable` reflecting the current selection (specific
      * row + column indices into the original data), or the whole table when
      * no selection is active. Row order matches the order indices were
@@ -335,6 +349,9 @@ class DataTableView implements IDataTableView {
             display: flex;
             flex-direction: column;
             height: 100%;
+            /* Allow the wrapper to shrink below its content height so the
+               selection status bar below it stays visible. */
+            min-height: 0;
         }
         .datatable-top {
             padding: 4px 8px;
@@ -452,6 +469,22 @@ class DataTableView implements IDataTableView {
             outline: none !important;
             box-shadow: none !important;
         }
+        /* Selection statistics status bar. Pinned to the bottom of the view
+           and only shown while a selection is active. */
+        .selection-stats {
+            flex: 0 0 auto;
+            padding: 2px 8px;
+            font-size: 0.9em;
+            text-align: right;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            user-select: text;
+            color: var(--vscode-foreground);
+            background: var(--vscode-editorWidget-background, transparent);
+            border-top: 1px solid var(--vscode-panel-border, transparent);
+        }
+        .selection-stats[hidden] { display: none; }
         /* Cell selection (single cell on click; expanded by later steps). */
         tbody td.cell-selected {
             background: var(--vscode-list-activeSelectionBackground, #094771) !important;
@@ -1782,6 +1815,18 @@ class DataTableView implements IDataTableView {
             if (searchVisible) {
                 var input = container.querySelector('.datatable-input');
                 if (input) input.focus();
+            }
+            return;
+        }
+
+        if (msg.command === 'setSelectionStats') {
+            var statsEl = container.querySelector('.selection-stats');
+            if (statsEl) {
+                var statsText = (typeof msg.text === 'string') ? msg.text : '';
+                // textContent, never innerHTML — the text is host-generated
+                // but the grid never injects markup into the page.
+                statsEl.textContent = statsText;
+                statsEl.hidden = statsText === '';
             }
             return;
         }
