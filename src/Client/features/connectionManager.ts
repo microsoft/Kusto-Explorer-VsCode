@@ -73,6 +73,18 @@ export function isServer(item: ServerOrGroup): item is ServerInfo {
 // =============================================================================
 
 /**
+ * Matches a connection string that already carries an http(s) scheme.
+ *
+ * URL schemes are case-insensitive, so `HTTPS://cluster` is as valid as the lowercase
+ * form. Testing with `startsWith('https://')` misses those and misses `http://` entirely,
+ * and the consequence is silent rather than loud: prepending a second scheme yields
+ * `https://HTTPS://cluster`, which `new URL()` parses without throwing and reports a
+ * hostname of `https`. The catch-block fallback never fires, so the caller receives a
+ * confidently wrong cluster name.
+ */
+const HAS_URL_SCHEME = /^https?:\/\//i;
+
+/**
  * Simple synchronous cluster URI extraction for fallback scenarios.
  *
  * Returns the bare host name for an ordinary cluster, but preserves the whole
@@ -110,7 +122,7 @@ function getHostNameSimple(connection: string): string {
         dataSource = connectionParts[0].trim();
     }
     try {
-        const url = new URL(dataSource.startsWith('https://') ? dataSource : `https://${dataSource}`);
+        const url = new URL(HAS_URL_SCHEME.test(dataSource) ? dataSource : `https://${dataSource}`);
         // A single path segment is a database (https://cluster/mydb), not a resource path,
         // so only multi-segment paths identify a proxy-routed resource.
         const path = url.pathname.replace(/^\/+|\/+$/g, '');
@@ -129,7 +141,7 @@ function getHostNameSimple(connection: string): string {
  * or undefined when the cluster is an ordinary host name.
  */
 function getResourceScopedName(cluster: string): string | undefined {
-    if (!cluster.startsWith('https://') && !cluster.startsWith('http://')) {
+    if (!HAS_URL_SCHEME.test(cluster)) {
         return undefined;
     }
     try {

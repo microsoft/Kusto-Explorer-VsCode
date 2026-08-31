@@ -483,6 +483,24 @@ describe('ConnectionManager', () => {
             expect(await fallbackMgr.getHostName('mycluster.kusto.windows.net')).toBe('mycluster.kusto.windows.net');
         });
 
+        // URL schemes are case-insensitive. A case-sensitive check prepends a second
+        // scheme, and `new URL('https://HTTPS://host')` parses without throwing and
+        // reports a hostname of 'https', so the failure is silent rather than caught.
+        it('handles an uppercase scheme', async () => {
+            expect(await fallbackMgr.getHostName('HTTPS://mycluster.kusto.windows.net'))
+                .toBe('mycluster.kusto.windows.net');
+        });
+
+        it('handles an http scheme without rewriting it to https', async () => {
+            expect(await fallbackMgr.getHostName('http://localhost:8080')).toBe('localhost');
+        });
+
+        it('preserves a resource-scoped URI given with an uppercase scheme', async () => {
+            // The URL parser normalizes the scheme, so the round-trip lowercases it.
+            expect(await fallbackMgr.getHostName(workspaceUri.replace('https://', 'HTTPS://')))
+                .toBe(workspaceUri);
+        });
+
         it('extracts the data source from a connection string', async () => {
             expect(await fallbackMgr.getHostName('Data Source=https://mycluster.kusto.windows.net;Initial Catalog=mydb'))
                 .toBe('mycluster.kusto.windows.net');
