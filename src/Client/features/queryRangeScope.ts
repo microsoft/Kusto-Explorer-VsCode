@@ -42,6 +42,19 @@ function normalizeRange(range: SelectionRange): SelectionRange {
         : { start: range.end, end: range.start };
 }
 
+/**
+ * Whether a position falls within a range, treating BOTH ends as inclusive.
+ *
+ * The inclusive end is deliberate and this helper is only ever reached for an empty
+ * selection — a bare caret. A caret resting at the very end of a query is "in" that
+ * query from the user's point of view: they have just finished typing it and expect
+ * the Run lens to still be there. Applying the end-exclusive convention that LSP uses
+ * for text spans would hide the lens at exactly that moment.
+ *
+ * Non-empty selections do not come through here; they use `intersectsRange`, which is
+ * strictly exclusive at both ends so a selection abutting a query boundary does not
+ * pull that query into scope.
+ */
 function containsPosition(range: Range, position: Position): boolean {
     return comparePositions(position, range.start) >= 0
         && comparePositions(position, range.end) <= 0;
