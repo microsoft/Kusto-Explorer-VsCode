@@ -46,29 +46,25 @@ export interface SelectionStats {
  * Only cells in numeric columns are considered, so a numeric-looking string
  * in a `string` column is deliberately ignored. Kusto's `decimal` and 64-bit
  * `long` values can arrive as strings to avoid precision loss in JSON, so
- * numeric columns accept a string that parses cleanly. `null` (and the empty
- * string that represents it) is skipped rather than counted as zero, which
- * would drag Avg and Min toward zero.
+ * numeric columns accept a string that parses cleanly.
+ *
+ * There is no built-in that does this: `Number()` coerces `null`, `''`,
+ * `'   '`, `false` and `[]` all to `0`, and those are exactly the values that
+ * must be skipped rather than counted as zero — a null counted as zero would
+ * drag Avg and Min toward zero. (`parseFloat` is worse still: it accepts the
+ * leading digits of `'10abc'`.) So the accepted types are allow-listed and
+ * blank strings rejected first, and only then is `Number()` used for the one
+ * coercion, which already trims surrounding whitespace itself.
  */
 function toNumericValue(value: unknown): number | undefined {
-    if (value === null || value === undefined) return undefined;
-    if (typeof value === 'number') {
-        return Number.isFinite(value) ? value : undefined;
-    }
     if (typeof value === 'string') {
-        const trimmed = value.trim();
-        if (trimmed === '') return undefined;
-        const parsed = Number(trimmed);
-        return Number.isFinite(parsed) ? parsed : undefined;
+        if (value.trim() === '') return undefined;
+    } else if (typeof value !== 'number' && typeof value !== 'bigint') {
+        return undefined;
     }
-    if (typeof value === 'bigint') {
-        // Mirror the number/string paths: a bigint beyond the double range
-        // converts to Infinity, which would poison sum/min/max and render a
-        // labelled-but-empty aggregate ("Sum:") once formatStatValue drops it.
-        const parsed = Number(value);
-        return Number.isFinite(parsed) ? parsed : undefined;
-    }
-    return undefined;
+
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 /**
