@@ -7,7 +7,7 @@
 
 import * as vscode from 'vscode';
 import * as crypto from 'crypto';
-import type { IServer, SelectionRange, Range } from './server';
+import type { IServer, SelectionRange, Range, QueryRangesResult } from './server';
 import type { ConnectionManager } from './connectionManager';
 import { ResultsViewer } from './resultsViewer';
 import { HistoryManager } from './historyManager';
@@ -15,10 +15,23 @@ import type { HistoryEntry } from './historyManager';
 import type { HistoryPanel } from './historyPanel';
 import { formatCfHtml, type ClipboardItem, type IClipboard } from './clipboard';
 import { ENTITY_DEFINITION_SCHEME } from './entityDefinitionProvider';
+import { getQueryLensVisibility } from './queryRangeScope';
 
 const PASTE_KIND = vscode.DocumentDropOrPasteEditKind.Text.append('kusto');
 const QUERY_RUNNING_CONTEXT_KEY = 'msKustoExplorer.queryRunning';
 const MIN_QUERY_RUNNING_INDICATOR_MS = 500;
+const CODE_LENS_SCOPE_SETTING = 'editor.showCodeLensForActiveQueryOnly';
+
+/** Query ranges cached for one document version. */
+interface CachedQueryRanges {
+    version: number;
+    result: Promise<QueryRangesResult | null>;
+}
+
+/** True when query action CodeLens entries should be limited to the query holding the cursor. */
+function isCodeLensScopedToActiveQuery(): boolean {
+    return vscode.workspace.getConfiguration('msKustoExplorer').get<boolean>(CODE_LENS_SCOPE_SETTING, false);
+}
 
 /**
  * Builds a SelectionRange from optional CodeLens arguments.
@@ -154,10 +167,41 @@ export class QueryEditor {
         // Register CodeLens provider for queries
         this.codeLensProvider = new KustoCodeLensProvider(this.server, this.history);
         context.subscriptions.push(
+            this.codeLensProvider,
             vscode.languages.registerCodeLensProvider(
                 { language: 'kusto' },
                 this.codeLensProvider
             )
+        );
+
+        // When the CodeLens is scoped to the active query, the lenses depend on the cursor, so
+        // refresh them as the cursor or active editor moves. The refresh is immediate: query ranges
+        // are cached per document version, so this is local work rather than a server round-trip.
+        const refreshCodeLensForActiveQuery = () => {
+            if (!isCodeLensScopedToActiveQuery()) {
+                return;
+            }
+
+            this.codeLensProvider.refresh();
+        };
+
+        context.subscriptions.push(
+            vscode.window.onDidChangeActiveTextEditor(() => {
+                // Refresh on every active editor change, including moving away from a Kusto
+                // document, so a still-visible query set doesn't keep stale scoped lenses.
+                refreshCodeLensForActiveQuery();
+            }),
+            vscode.window.onDidChangeTextEditorSelection(event => {
+                if (event.textEditor.document.languageId === 'kusto') {
+                    refreshCodeLensForActiveQuery();
+                }
+            }),
+            // Applying the setting takes effect immediately; no window reload required.
+            vscode.workspace.onDidChangeConfiguration(event => {
+                if (event.affectsConfiguration(`msKustoExplorer.${CODE_LENS_SCOPE_SETTING}`)) {
+                    this.codeLensProvider.refresh();
+                }
+            })
         );
 
         // Register paste provider for clipboard context
@@ -621,12 +665,32 @@ export class QueryEditor {
 // CodeLens Provider
 // =============================================================================
 
-class KustoCodeLensProvider implements vscode.CodeLensProvider {
+/**
+ * Provides the query action CodeLens entries for query set documents.
+ * Exported for unit testing.
+ */
+export class KustoCodeLensProvider implements vscode.CodeLensProvider, vscode.Disposable {
     private _onDidChangeCodeLenses = new vscode.EventEmitter<void>();
     readonly onDidChangeCodeLenses = this._onDidChangeCodeLenses.event;
     private readonly runningQueryRangeKeys = new Set<string>();
+    private readonly queryRangesCache = new Map<string, CachedQueryRanges>();
+    private readonly disposables: vscode.Disposable[] = [];
 
     constructor(private readonly server: IServer, private readonly history: HistoryManager) {
+        this.disposables.push(
+            vscode.workspace.onDidCloseTextDocument(document => {
+                this.queryRangesCache.delete(document.uri.toString());
+            })
+        );
+    }
+
+    dispose(): void {
+        this.queryRangesCache.clear();
+        for (const disposable of this.disposables) {
+            disposable.dispose();
+        }
+        this.disposables.length = 0;
+        this._onDidChangeCodeLenses.dispose();
     }
 
     refresh(): void {
@@ -647,14 +711,49 @@ class KustoCodeLensProvider implements vscode.CodeLensProvider {
         this.refresh();
     }
 
+    /**
+     * Gets the document's query ranges, reusing the cached result while the document version
+     * is unchanged.
+     *
+     * Query ranges are a pure function of document content, so they cannot change without the
+     * version changing. Caching keeps the cross-process call off the cursor-movement path, which
+     * matters when the CodeLens is scoped to the active query and every cursor move re-provides.
+     */
+    private getQueryRanges(document: vscode.TextDocument): Promise<QueryRangesResult | null> {
+        // The URI string carries the scheme, so entity definition documents get their own entries.
+        const uri = document.uri.toString();
+        const version = document.version;
+
+        const cached = this.queryRangesCache.get(uri);
+        if (cached && cached.version === version) {
+            return cached.result;
+        }
+
+        // Setting the entry also drops the now-stale one for the previous version.
+        const result = this.server.getQueryRanges(uri);
+        const entry: CachedQueryRanges = { version, result };
+        this.queryRangesCache.set(uri, entry);
+
+        result.catch(() => {
+            // Never leave a rejected request cached; the next request should retry.
+            if (this.queryRangesCache.get(uri) === entry) {
+                this.queryRangesCache.delete(uri);
+            }
+        });
+
+        return result;
+    }
+
     async provideCodeLenses(document: vscode.TextDocument): Promise<vscode.CodeLens[]> {
         const isEntityDefinition = document.uri.scheme === ENTITY_DEFINITION_SCHEME;
 
-        const result = await this.server.getQueryRanges(document.uri.toString());
+        const result = await this.getQueryRanges(document);
         if (!result || !result.ranges.length) {
             return [];
         }
 
+        const scopeToActiveQuery = isCodeLensScopedToActiveQuery();
+        const activeSelections = scopeToActiveQuery ? getActiveSelectionRanges(document) : [];
         const lenses: vscode.CodeLens[] = [];
 
         for (const range of result.ranges) {
@@ -662,6 +761,24 @@ class KustoCodeLensProvider implements vscode.CodeLensProvider {
                 range.start.line, range.start.character,
                 range.end.line, range.end.character
             );
+
+            const isQueryRangeRunning = !isEntityDefinition
+                && this.runningQueryRangeKeys.has(getQueryRangeKey(document.uri.toString(), range));
+            const visibility = getQueryLensVisibility(range, activeSelections, {
+                scopeToActiveQuery,
+                isRunning: isQueryRangeRunning
+            });
+
+            if (visibility.showRunningLens) {
+                // The cursor moved away from a query that is still running; keep just the indicator
+                // so the user doesn't lose sight of the running query.
+                lenses.push(new vscode.CodeLens(vsRange, createRunLensCommand(range, true)));
+                continue;
+            }
+
+            if (!visibility.showQueryLenses) {
+                continue;
+            }
 
             const queryText = document.getText(vsRange);
 
@@ -679,13 +796,7 @@ class KustoCodeLensProvider implements vscode.CodeLensProvider {
 
             // Hide Run, Format, and Results lenses in entity definition documents
             if (!isEntityDefinition) {
-                const isQueryRangeRunning = this.runningQueryRangeKeys.has(getQueryRangeKey(document.uri.toString(), range));
-                lenses.push(new vscode.CodeLens(vsRange, {
-                    title: isQueryRangeRunning ? '$(sync~spin) Running' : '▶ Run',
-                    command: isQueryRangeRunning ? 'msKustoExplorer.runQuery.running' : 'msKustoExplorer.runQuery',
-                    tooltip: isQueryRangeRunning ? 'This Kusto query is running' : 'Run this query',
-                    arguments: [range.start.line, range.start.character, range.end.line, range.end.character]
-                }));
+                lenses.push(new vscode.CodeLens(vsRange, createRunLensCommand(range, isQueryRangeRunning)));
             }
 
             lenses.push(new vscode.CodeLens(vsRange, {
@@ -736,6 +847,29 @@ class KustoCodeLensProvider implements vscode.CodeLensProvider {
 
         return lenses;
     }
+}
+
+/** Builds the Run / Running indicator lens command for a query range. */
+function createRunLensCommand(range: Range, isRunning: boolean): vscode.Command {
+    return {
+        title: isRunning ? '$(sync~spin) Running' : '▶ Run',
+        command: isRunning ? 'msKustoExplorer.runQuery.running' : 'msKustoExplorer.runQuery',
+        tooltip: isRunning ? 'This Kusto query is running' : 'Run this query',
+        arguments: [range.start.line, range.start.character, range.end.line, range.end.character]
+    };
+}
+
+/** Cursors and selections in the active editor, or none when the document isn't the active one. */
+function getActiveSelectionRanges(document: vscode.TextDocument): SelectionRange[] {
+    const activeEditor = vscode.window.activeTextEditor;
+    if (!activeEditor || activeEditor.document.uri.toString() !== document.uri.toString()) {
+        return [];
+    }
+
+    return activeEditor.selections.map(selection => ({
+        start: { line: selection.start.line, character: selection.start.character },
+        end: { line: selection.end.line, character: selection.end.character }
+    }));
 }
 
 // =============================================================================
