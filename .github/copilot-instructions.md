@@ -57,7 +57,9 @@ Client commands run from `src/Client`:
 Server commands run from `src/Server` (build) and `ServerTests` (tests):
 
 - Build the server: `dotnet build`
-- Run server tests: `dotnet test` from the `ServerTests` project.
+- Run server tests: `dotnet run` from the `ServerTests` project. The project uses
+  Microsoft.Testing.Platform on .NET 10, so `dotnet test` through the legacy VSTest target fails
+  before tests execute. CI likewise runs the built test executable directly.
 
 Always run the relevant tests and ensure the build passes before considering a change done.
 
