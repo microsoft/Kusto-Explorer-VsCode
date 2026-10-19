@@ -21,9 +21,12 @@ import type { ScratchPadManager } from '../../features/scratchPadManager';
 function createMockConnectionManager(overrides?: Partial<ConnectionManager>): ConnectionManager {
     return {
         getHostName: vi.fn(async (conn: string) => {
+            // Mirrors the real ConnectionManager: the host name identifies an ordinary
+            // cluster, but a resource-scoped proxy URI keeps its whole path.
             try {
                 const url = new URL(conn.startsWith('https://') ? conn : `https://${conn}`);
-                return url.hostname;
+                const path = url.pathname.replace(/^\/+|\/+$/g, '');
+                return path.includes('/') ? `${url.protocol}//${url.host}/${path}` : url.hostname;
             } catch {
                 return conn;
             }

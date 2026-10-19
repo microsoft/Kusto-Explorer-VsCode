@@ -1194,11 +1194,7 @@ class KustoConnectionsProvider implements vscode.TreeDataProvider<KustoTreeItem>
         if (newCluster === cluster) {
             newDisplayName = displayName;
         } else {
-            if (newCluster.endsWith('.kusto.windows.net')) {
-                newDisplayName = newCluster.substring(0, newCluster.indexOf('.kusto.windows.net'));
-            } else {
-                newDisplayName = newCluster;
-            }
+            newDisplayName = getDisplayName(newCluster) ?? newCluster;
         }
 
         // Fetch server kind from the language server
