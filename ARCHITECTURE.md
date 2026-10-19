@@ -370,6 +370,8 @@ Both build and release YAML live in this repository. GitHub Actions builds the r
 Azure DevOps runs the OneBranch pipeline that downloads it, skips already-published versions,
 signs and validates the package, and publishes only after Production approval. Signing and
 managed-identity credentials remain in Azure DevOps, not GitHub Actions or this repository.
+The pipeline reads release VSIXes anonymously from this public repository, so it needs no GitHub
+download credential.
 The release pipeline does not depend on Azure-Kusto-Service source or its shared variables template.
 See [Marketplace Releases](CONTRIBUTING.md#marketplace-releases-maintainers) for configuration and
 cutover requirements; committing the YAML does not activate a pipeline.

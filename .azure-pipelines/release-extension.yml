@@ -21,8 +21,8 @@ parameters:
     type: string
     default: 'latest'
 
-# Configure GITHUB_RELEASE_SERVICE_CONNECTION and MI_SERVICE_CONNECTION on the
-# Azure DevOps pipeline, not in this public repository. See CONTRIBUTING.md.
+# Configure MI_SERVICE_CONNECTION on the Azure DevOps pipeline, not in this public
+# repository. See CONTRIBUTING.md.
 variables:
   - name: system.debug
     value: ${{ parameters.debug }}
@@ -66,18 +66,39 @@ extends:
               ob_git_checkout: false
 
             steps:
-              - task: DownloadGitHubRelease@0
+              # Keep this step identical to the one in SignExtension except for its env.
+              - task: PowerShell@2
+                name: githubRelease
                 displayName: 'Download VS Code Extension Release'
+                env:
+                  RELEASE_TAG: '${{ parameters.releaseTag }}'
+                  DOWNLOAD_PATH: '$(Agent.TempDirectory)\release-check'
                 inputs:
-                  connection: '$(GITHUB_RELEASE_SERVICE_CONNECTION)'
-                  userRepository: 'microsoft/Kusto-Explorer-VsCode'
-                  ${{ if eq(parameters.releaseTag, 'latest') }}:
-                    defaultVersionType: 'latest'
-                  ${{ else }}:
-                    defaultVersionType: 'specificTag'
-                    version: '${{ parameters.releaseTag }}'
-                  itemPattern: '*.vsix'
-                  downloadPath: '$(Agent.TempDirectory)\release-check'
+                  targetType: 'inline'
+                  pwsh: true
+                  script: |
+                    $ErrorActionPreference = 'Stop'
+
+                    # The repository is public, so its releases are read without a GitHub credential.
+                    $api = 'https://api.github.com/repos/microsoft/Kusto-Explorer-VsCode/releases'
+                    $uri = if ($env:RELEASE_TAG -eq 'latest') { "$api/latest" } else { "$api/tags/$([uri]::EscapeDataString($env:RELEASE_TAG))" }
+                    # Anonymous API calls share a per-IP hourly limit with other jobs on the agent's address.
+                    $retry = @{ MaximumRetryCount = 4; RetryIntervalSec = 30 }
+
+                    $release = Invoke-RestMethod -Uri $uri -Headers @{ Accept = 'application/vnd.github+json' } @retry
+                    if (-not $release.tag_name) { throw "Unexpected response from $uri" }
+                    $assets = @($release.assets | Where-Object { $_.name -like '*.vsix' })
+                    if ($assets.Count -ne 1) { throw "GitHub release $($release.tag_name) has $($assets.Count) VSIX assets; expected exactly one" }
+                    $asset = $assets[0]
+
+                    New-Item -ItemType Directory -Path $env:DOWNLOAD_PATH -Force | Out-Null
+                    $path = Join-Path $env:DOWNLOAD_PATH $asset.name
+                    Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $path @retry
+                    $size = (Get-Item -LiteralPath $path).Length
+                    if ($size -ne $asset.size) { throw "Downloaded $size bytes of $($asset.name); GitHub reports $($asset.size)" }
+
+                    Write-Host "Downloaded $($asset.name) ($size bytes) from GitHub release $($release.tag_name)"
+                    Write-Host "##vso[task.setvariable variable=ReleaseTag;isOutput=true]$($release.tag_name)"
 
               - task: PowerShell@2
                 name: releaseCheck
@@ -149,20 +170,42 @@ extends:
               ob_outputDirectory: '$(Build.SourcesDirectory)\out'
               ob_sdl_binskim_scanOutputDirectoryOnly: true
               ob_git_checkout: false
+              # Sign the release CheckRelease approved, even if a newer one was published since.
+              ReleaseTag: $[ dependencies.CheckRelease.outputs['githubRelease.ReleaseTag'] ]
 
             steps:
-              - task: DownloadGitHubRelease@0
+              - task: PowerShell@2
+                name: githubRelease
                 displayName: 'Download VS Code Extension Release'
+                env:
+                  RELEASE_TAG: '$(ReleaseTag)'
+                  DOWNLOAD_PATH: '$(Build.SourcesDirectory)\out\kusto-explorer-vscode'
                 inputs:
-                  connection: '$(GITHUB_RELEASE_SERVICE_CONNECTION)'
-                  userRepository: 'microsoft/Kusto-Explorer-VsCode'
-                  ${{ if eq(parameters.releaseTag, 'latest') }}:
-                    defaultVersionType: 'latest'
-                  ${{ else }}:
-                    defaultVersionType: 'specificTag'
-                    version: '${{ parameters.releaseTag }}'
-                  itemPattern: '*.vsix'
-                  downloadPath: '$(Build.SourcesDirectory)/out/kusto-explorer-vscode'
+                  targetType: 'inline'
+                  pwsh: true
+                  script: |
+                    $ErrorActionPreference = 'Stop'
+
+                    # The repository is public, so its releases are read without a GitHub credential.
+                    $api = 'https://api.github.com/repos/microsoft/Kusto-Explorer-VsCode/releases'
+                    $uri = if ($env:RELEASE_TAG -eq 'latest') { "$api/latest" } else { "$api/tags/$([uri]::EscapeDataString($env:RELEASE_TAG))" }
+                    # Anonymous API calls share a per-IP hourly limit with other jobs on the agent's address.
+                    $retry = @{ MaximumRetryCount = 4; RetryIntervalSec = 30 }
+
+                    $release = Invoke-RestMethod -Uri $uri -Headers @{ Accept = 'application/vnd.github+json' } @retry
+                    if (-not $release.tag_name) { throw "Unexpected response from $uri" }
+                    $assets = @($release.assets | Where-Object { $_.name -like '*.vsix' })
+                    if ($assets.Count -ne 1) { throw "GitHub release $($release.tag_name) has $($assets.Count) VSIX assets; expected exactly one" }
+                    $asset = $assets[0]
+
+                    New-Item -ItemType Directory -Path $env:DOWNLOAD_PATH -Force | Out-Null
+                    $path = Join-Path $env:DOWNLOAD_PATH $asset.name
+                    Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $path @retry
+                    $size = (Get-Item -LiteralPath $path).Length
+                    if ($size -ne $asset.size) { throw "Downloaded $size bytes of $($asset.name); GitHub reports $($asset.size)" }
+
+                    Write-Host "Downloaded $($asset.name) ($size bytes) from GitHub release $($release.tag_name)"
+                    Write-Host "##vso[task.setvariable variable=ReleaseTag;isOutput=true]$($release.tag_name)"
 
               - task: PowerShell@2
                 displayName: 'Extract VSIX Contents'

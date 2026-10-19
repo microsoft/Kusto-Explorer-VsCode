@@ -175,7 +175,10 @@ triggers are disabled. It reads the downloaded VSIX's version and skips signing
 and publication if that version is already on the Marketplace. Otherwise it signs
 the extension and its publish manifest, runs OneBranch SDL validation, and waits
 for **Production release approval** before publishing with a managed identity.
-No Marketplace PAT or GitHub-to-Azure-DevOps trigger credential is needed.
+No Marketplace PAT or GitHub-to-Azure-DevOps trigger credential is needed, and the
+release VSIX is downloaded anonymously from this public repository's GitHub API.
+Anonymous requests are rate limited per IP address; the download retries, and a
+run that still fails can be rerun or left to the next scheduled check.
 
 The scheduled overlap check covers earlier active runs of the **same pipeline
 definition**. It is best effort: a lookup failure produces a warning and the run
@@ -190,14 +193,14 @@ to GitHub alone neither creates a pipeline nor grants any permissions.
 1. Create a OneBranch Official pipeline in `msazure/One`, using this GitHub
    repository and `.azure-pipelines/release-extension.yml`. Set its default branch
    to `refs/heads/main`. Use a team-managed GitHub source connection and keep the
-   new pipeline disabled while configuring it.
-2. Set the following non-secret variables in the pipeline's Azure DevOps
-   configuration, without queue-time overrides. Their values are service-connection
-   names, not credentials. Authorize those connections for this specific pipeline.
+   new pipeline disabled while configuring it. The source connection only reads the
+   YAML; release downloads do not use it.
+2. Set the following non-secret variable in the pipeline's Azure DevOps
+   configuration, without queue-time overrides. Its value is a service-connection
+   name, not a credential. Authorize that connection for this specific pipeline.
 
    | Variable | Required connection |
    |---|---|
-   | `GITHUB_RELEASE_SERVICE_CONNECTION` | A team-managed GitHub service connection supported by `DownloadGitHubRelease@0`, with read access to this repo's release assets |
    | `MI_SERVICE_CONNECTION` | The federated managed-identity connection authorized to publish under the `ms-kusto` Marketplace publisher |
 
 3. Authorize the OneBranch governed templates, Windows pool/container, ESRP signing
