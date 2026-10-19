@@ -1,0 +1,413 @@
+trigger: none # Runs on the schedule below or manually
+pr: none # Pull requests must not run the signing or publishing pipeline
+
+# Picks up new GitHub releases. Runs whose release is already on the Marketplace finish
+# without signing or publishing; publishing always waits for release approval.
+schedules:
+  - cron: '0 6 * * *'
+    displayName: 'Daily check for a new GitHub release'
+    branches:
+      include:
+        - main
+    always: true # Check GitHub releases even when the YAML has not changed
+
+parameters:
+  - name: 'debug'
+    displayName: 'Enable debug output'
+    type: boolean
+    default: false
+  - name: 'releaseTag'
+    displayName: 'GitHub Release Tag (e.g., v1.0.0)'
+    type: string
+    default: 'latest'
+
+# Configure MI_SERVICE_CONNECTION on the Azure DevOps pipeline, not in this public
+# repository. See CONTRIBUTING.md.
+variables:
+  - name: system.debug
+    value: ${{ parameters.debug }}
+  - name: WindowsContainerImage
+    value: 'onebranch.azurecr.io/windows/ltsc2025/vse2026:latest'
+  - name: WinVersion
+    value: '2025'
+
+resources:
+  repositories:
+    - repository: templates
+      type: git
+      name: OneBranch.Pipelines/GovernedTemplates
+      ref: refs/heads/main
+
+extends:
+  template: v2/OneBranch.Official.CrossPlat.yml@templates # https://aka.ms/obpipelines/templates
+  parameters:
+    featureFlags:
+      WindowsHostVersion:
+        Version: ${{ variables.WinVersion }}
+    globalSdl: # https://aka.ms/obpipelines/sdl
+      tsa:
+        enabled: false # No extension-owned TSA mapping
+      binskim:
+        break: true # TSA being disabled does not itself enforce this gate
+    release:
+      category: NonAzure
+
+    stages:
+      - stage: DownloadAndSign
+        displayName: 'Download and Sign Kusto Explorer VS Code Extension'
+        jobs:
+          - job: CheckRelease
+            displayName: 'Check whether the release needs publishing'
+            pool:
+              type: windows
+            variables:
+              ob_outputDirectory: '$(Build.ArtifactStagingDirectory)\ONEBRANCH_ARTIFACT'
+              ob_pipelineartifacts_enabled: false
+              ob_git_checkout: false
+
+            steps:
+              # Keep this step identical to the one in SignExtension except for its env.
+              - task: PowerShell@2
+                name: githubRelease
+                displayName: 'Download VS Code Extension Release'
+                env:
+                  RELEASE_TAG: '${{ parameters.releaseTag }}'
+                  DOWNLOAD_PATH: '$(Agent.TempDirectory)\release-check'
+                inputs:
+                  targetType: 'inline'
+                  pwsh: true
+                  script: |
+                    $ErrorActionPreference = 'Stop'
+
+                    # The repository is public, so its releases are read without a GitHub credential.
+                    $api = 'https://api.github.com/repos/microsoft/Kusto-Explorer-VsCode/releases'
+                    $uri = if ($env:RELEASE_TAG -eq 'latest') { "$api/latest" } else { "$api/tags/$([uri]::EscapeDataString($env:RELEASE_TAG))" }
+                    # Anonymous API calls share a per-IP hourly limit with other jobs on the agent's address.
+                    $retry = @{ MaximumRetryCount = 4; RetryIntervalSec = 30 }
+
+                    $release = Invoke-RestMethod -Uri $uri -Headers @{ Accept = 'application/vnd.github+json' } @retry
+                    if (-not $release.tag_name) { throw "Unexpected response from $uri" }
+                    $assets = @($release.assets | Where-Object { $_.name -like '*.vsix' })
+                    if ($assets.Count -ne 1) { throw "GitHub release $($release.tag_name) has $($assets.Count) VSIX assets; expected exactly one" }
+                    $asset = $assets[0]
+
+                    New-Item -ItemType Directory -Path $env:DOWNLOAD_PATH -Force | Out-Null
+                    $path = Join-Path $env:DOWNLOAD_PATH $asset.name
+                    Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $path @retry
+                    $size = (Get-Item -LiteralPath $path).Length
+                    if ($size -ne $asset.size) { throw "Downloaded $size bytes of $($asset.name); GitHub reports $($asset.size)" }
+
+                    Write-Host "Downloaded $($asset.name) ($size bytes) from GitHub release $($release.tag_name)"
+                    Write-Host "##vso[task.setvariable variable=ReleaseTag;isOutput=true]$($release.tag_name)"
+
+              - task: PowerShell@2
+                name: releaseCheck
+                displayName: 'Check the Marketplace for this version'
+                env:
+                  SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+                inputs:
+                  targetType: 'inline'
+                  pwsh: true
+                  script: |
+                    $ErrorActionPreference = 'Stop'
+
+                    $vsix = Get-ChildItem -Path "$env:AGENT_TEMPDIRECTORY\release-check" -Filter '*.vsix' | Select-Object -First 1
+                    if (-not $vsix) { throw 'The GitHub release has no VSIX asset' }
+
+                    Add-Type -AssemblyName System.IO.Compression.FileSystem
+                    $zip = [System.IO.Compression.ZipFile]::OpenRead($vsix.FullName)
+                    try {
+                      $entry = $zip.GetEntry('extension/package.json')
+                      if (-not $entry) { throw "$($vsix.Name) has no extension/package.json" }
+                      $reader = [System.IO.StreamReader]::new($entry.Open())
+                      try { $package = $reader.ReadToEnd() | ConvertFrom-Json } finally { $reader.Dispose() }
+                    }
+                    finally { $zip.Dispose() }
+
+                    $extensionId = "$($package.publisher).$($package.name)"
+                    $version = $package.version
+                    Write-Host "Release asset $($vsix.Name) is $extensionId v$version"
+
+                    $query = '{"filters":[{"criteria":[{"filterType":7,"value":"' + $extensionId + '"}],"pageNumber":1,"pageSize":1}],"flags":1}'
+                    $response = Invoke-RestMethod -Method Post -Uri 'https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery' `
+                      -Headers @{ Accept = 'application/json;api-version=3.0-preview.1' } -ContentType 'application/json' -Body $query
+                    if ($response.results -isnot [array]) { throw 'Unexpected response from the Marketplace extension query' }
+                    $published = @($response.results[0].extensions | ForEach-Object { $_.versions } | ForEach-Object { $_.version })
+
+                    $shouldPublish = $published -notcontains $version
+                    if (-not $shouldPublish) {
+                      Write-Host "v$version is already on the Marketplace; nothing to publish."
+                    }
+                    elseif ($env:BUILD_REASON -eq 'Schedule') {
+                      # An earlier run may still be waiting for release approval; don't stack another request.
+                      # Best effort: if the lookup fails, publishing proceeds.
+                      try {
+                        $runs = Invoke-RestMethod -Headers @{ Authorization = "Bearer $env:SYSTEM_ACCESSTOKEN" } `
+                          -Uri "$($env:SYSTEM_COLLECTIONURI)$($env:SYSTEM_TEAMPROJECTID)/_apis/build/builds?definitions=$($env:SYSTEM_DEFINITIONID)&statusFilter=inProgress,notStarted&api-version=7.1"
+                        # A rejected token yields an HTML sign-in page rather than an HTTP error.
+                        if ($runs.value -isnot [array]) { throw 'unexpected response from the builds API' }
+                        $earlier = @($runs.value | Where-Object { $_.status -ne 'completed' -and [long]$_.id -lt [long]$env:BUILD_BUILDID })
+                        if ($earlier.Count -gt 0) {
+                          Write-Host "Earlier run(s) $($earlier.id -join ', ') are still in progress (possibly awaiting release approval); skipping."
+                          $shouldPublish = $false
+                        }
+                      }
+                      catch {
+                        Write-Host "##vso[task.logissue type=warning]Could not check for earlier in-progress runs: $($_.Exception.Message)"
+                      }
+                    }
+
+                    if ($shouldPublish) { Write-Host "v$version is not on the Marketplace; it will be signed and offered for release approval." }
+                    Write-Host "##vso[task.setvariable variable=ShouldPublish;isOutput=true]$("$shouldPublish".ToLowerInvariant())"
+
+          - job: SignExtension
+            dependsOn:
+              - CheckRelease
+            condition: and(succeeded(), eq(dependencies.CheckRelease.outputs['releaseCheck.ShouldPublish'], 'true'))
+            pool:
+              type: windows
+            variables:
+              ob_outputDirectory: '$(Build.SourcesDirectory)\out'
+              ob_sdl_binskim_scanOutputDirectoryOnly: true
+              ob_git_checkout: false
+              # Sign the release CheckRelease approved, even if a newer one was published since.
+              ReleaseTag: $[ dependencies.CheckRelease.outputs['githubRelease.ReleaseTag'] ]
+
+            steps:
+              - task: PowerShell@2
+                name: githubRelease
+                displayName: 'Download VS Code Extension Release'
+                env:
+                  RELEASE_TAG: '$(ReleaseTag)'
+                  DOWNLOAD_PATH: '$(Build.SourcesDirectory)\out\kusto-explorer-vscode'
+                inputs:
+                  targetType: 'inline'
+                  pwsh: true
+                  script: |
+                    $ErrorActionPreference = 'Stop'
+
+                    # The repository is public, so its releases are read without a GitHub credential.
+                    $api = 'https://api.github.com/repos/microsoft/Kusto-Explorer-VsCode/releases'
+                    $uri = if ($env:RELEASE_TAG -eq 'latest') { "$api/latest" } else { "$api/tags/$([uri]::EscapeDataString($env:RELEASE_TAG))" }
+                    # Anonymous API calls share a per-IP hourly limit with other jobs on the agent's address.
+                    $retry = @{ MaximumRetryCount = 4; RetryIntervalSec = 30 }
+
+                    $release = Invoke-RestMethod -Uri $uri -Headers @{ Accept = 'application/vnd.github+json' } @retry
+                    if (-not $release.tag_name) { throw "Unexpected response from $uri" }
+                    $assets = @($release.assets | Where-Object { $_.name -like '*.vsix' })
+                    if ($assets.Count -ne 1) { throw "GitHub release $($release.tag_name) has $($assets.Count) VSIX assets; expected exactly one" }
+                    $asset = $assets[0]
+
+                    New-Item -ItemType Directory -Path $env:DOWNLOAD_PATH -Force | Out-Null
+                    $path = Join-Path $env:DOWNLOAD_PATH $asset.name
+                    Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $path @retry
+                    $size = (Get-Item -LiteralPath $path).Length
+                    if ($size -ne $asset.size) { throw "Downloaded $size bytes of $($asset.name); GitHub reports $($asset.size)" }
+
+                    Write-Host "Downloaded $($asset.name) ($size bytes) from GitHub release $($release.tag_name)"
+                    Write-Host "##vso[task.setvariable variable=ReleaseTag;isOutput=true]$($release.tag_name)"
+
+              - task: PowerShell@2
+                displayName: 'Extract VSIX Contents'
+                inputs:
+                  targetType: 'inline'
+                  script: |
+                    $outputDir = "$(Build.SourcesDirectory)\out\kusto-explorer-vscode"
+
+                    # Find the downloaded VSIX file
+                    $vsixFiles = Get-ChildItem -Path $outputDir -Filter "*.vsix"
+
+                    if ($vsixFiles.Count -eq 0) {
+                      Write-Error "No VSIX files found after download"
+                      exit 1
+                    }
+                    $vsixFile = $vsixFiles[0].Name
+                    Write-Host "##vso[task.setvariable variable=OriginalFileName]$vsixFile"
+
+                    # Create extraction directory
+                    $extractDir = "$outputDir\extracted"
+                    New-Item -ItemType Directory -Path $extractDir -Force
+
+                    Write-Host "Extracting VSIX: $vsixFile"
+
+                    # VSIX is a ZIP file, but Expand-Archive needs .zip extension
+                    # Create a temporary copy with .zip extension
+                    $tempZipFile = "$outputDir\temp-vsix.zip"
+                    Copy-Item -Path "$outputDir\$vsixFile" -Destination $tempZipFile -Force
+
+                    # Extract using the .zip copy
+                    Expand-Archive -Path $tempZipFile -DestinationPath $extractDir -Force
+
+                    # Remove temporary .zip file
+                    Remove-Item -Path $tempZipFile -Force
+
+                    Write-Host "VSIX extracted to: $extractDir"
+
+                    # List contents for debugging
+                    Write-Host "Extracted contents:"
+                    Get-ChildItem -Path $extractDir -Recurse | ForEach-Object {
+                      Write-Host "  $($_.FullName.Replace($extractDir, ''))"
+                    }
+
+                    # Set variables for subsequent steps
+                    Write-Host "##vso[task.setvariable variable=ExtractedDir]$extractDir"
+
+              - task: onebranch.pipeline.signing@1
+                displayName: 'Sign Server.dll'
+                inputs:
+                  command: 'sign'
+                  signing_profile: 'external_distribution'
+                  files_to_sign: '**/Server.dll;'
+                  search_root: '$(ExtractedDir)'
+
+              - task: onebranch.pipeline.signing@1
+                inputs:
+                  command: 'sign'
+                  signing_profile: '400'
+                  files_to_sign: '**/extension.js'
+                  search_root: '$(ExtractedDir)'
+
+              - task: onebranch.pipeline.signing@1
+                displayName: 'Sign Third Party Libraries'
+                inputs:
+                  command: 'sign'
+                  signing_profile: '143360006'
+                  files_to_sign: |
+                    **/Nerdbank.Streams.dll;
+                    **/Newtonsoft.Json.dll;
+                    **/MessagePack.Annotations.dll;
+                    **/MessagePack.dll;
+                  search_root: '$(ExtractedDir)'
+
+              - task: PowerShell@2
+                displayName: 'Repack Signed VSIX'
+                inputs:
+                  targetType: 'inline'
+                  script: |
+                    $originalFileName = "$(OriginalFileName)"
+                    $outputDir = "$(Build.SourcesDirectory)\out\kusto-explorer-vscode"
+                    $extractDir = "$(ExtractedDir)"
+                    $repackedPath = Join-Path $outputDir $originalFileName
+
+                    Write-Host "Repacking signed contents into: $repackedPath"
+
+                    # Remove original VSIX to avoid confusion
+                    if (Test-Path $repackedPath) {
+                      Remove-Item -Path $repackedPath -Force
+                      Write-Host "Removed original VSIX: $repackedPath"
+                    }
+
+                    Add-Type -AssemblyName System.IO.Compression
+                    Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+                    $sourceDir = (Resolve-Path $extractDir).Path
+
+                    $zip = [System.IO.Compression.ZipFile]::Open(
+                        $repackedPath,
+                        [System.IO.Compression.ZipArchiveMode]::Create
+                    )
+
+                    $files = Get-ChildItem $sourceDir -Recurse -File
+                    if ($files.Count -eq 0) {
+                        throw "No files found in $sourceDir"
+                    }
+
+                    foreach ($file in $files) {
+                        $relativePath = $file.FullName.Substring($sourceDir.Length).TrimStart('\','/')
+                        $zipEntryPath = $relativePath -replace '\\','/'  # critical: forward slashes
+
+                        [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+                            $zip,
+                            $file.FullName,
+                            $zipEntryPath
+                        ) | Out-Null
+                    }
+
+                    $zip.Dispose()
+
+                    Write-Host "Repacked VSIX: $repackedPath"
+                    Write-Host "File size: $([math]::Round((Get-Item $repackedPath).Length / 1MB, 2)) MB"
+
+              - task: PowerShell@2
+                displayName: Create .npmrc
+                inputs:
+                  targetType: inline
+                  script: |
+                    $npmrcFolder = "$(Build.SourcesDirectory)"
+                    Push-Location $npmrcFolder
+                    Write-Host "NPMRC_FOLDER_PATH-$npmrcFolder/.npmrc"
+                    $npmrcPath = (Join-Path (Get-Location) ".npmrc")
+                    Write-Host "NPMRC_PATH-$npmrcPath"
+
+                    npm config set userconfig $npmrcPath
+                    npm config get userconfig
+                    npm config ls -l
+
+                    Set-Content -Path $npmrcPath -Value "registry=https://msazure.pkgs.visualstudio.com/One/_packaging/One_PublicPackages/npm/registry/"
+                    Add-Content -Path $npmrcPath -Value "always-auth=true"
+                    Pop-Location
+
+              - task: npmAuthenticate@0
+                inputs:
+                  workingFile: '$(Build.SourcesDirectory)/.npmrc'
+
+              - task: NodeTool@0
+                inputs:
+                  versionSpec: '20.x'
+
+              - task: PowerShell@2
+                name: generateManifest
+                displayName: 'Generate extension manifest'
+                inputs:
+                  targetType: 'inline'
+                  script: |
+                    $outputDir = "$(Build.SourcesDirectory)\out\kusto-explorer-vscode"
+                    $ExtensionName = [System.IO.Path]::GetFileNameWithoutExtension("$(OriginalFileName)")
+                    Write-Host "##vso[task.setvariable variable=ExtensionName;isOutput=true]$ExtensionName"
+                    npx @vscode/vsce@latest generate-manifest -i $outputDir\$ExtensionName.vsix -o $outputDir\$ExtensionName.manifest
+                    cp $outputDir\$ExtensionName.manifest $outputDir\$ExtensionName.signature.p7s
+
+              - task: onebranch.pipeline.signing@1
+                displayName: 'Sign extension manifest'
+                inputs:
+                  command: sign
+                  cp_code: CP-401405-VSCodePublisherSign
+                  files_to_sign: '**/*.signature.p7s'
+                  search_root: $(Build.SourcesDirectory)\out\kusto-explorer-vscode
+
+      # Publishes only after the signed build passes SDL validation, and only once a
+      # release approver approves the run (OneBranch Production release stage).
+      - stage: Publish
+        displayName: 'Publish Kusto Explorer VS Code Extension to the Marketplace'
+        dependsOn:
+          - DownloadAndSign
+        condition: and(succeeded(), eq(dependencies.DownloadAndSign.outputs['CheckRelease.releaseCheck.ShouldPublish'], 'true'))
+        variables:
+          ob_release_environment: Production
+        jobs:
+          - job: PublishExtension
+            displayName: 'Publish with Managed Identity'
+            pool:
+              type: release
+            variables:
+              - name: ExtensionName
+                value: $[ stageDependencies.DownloadAndSign.SignExtension.outputs['generateManifest.ExtensionName'] ]
+            templateContext:
+              inputs:
+                - input: pipelineArtifact
+                  artifactName: drop_DownloadAndSign_SignExtension
+                  targetPath: $(Pipeline.Workspace)/signed
+              workflow: vsce
+              vsce:
+                serviceConnection: $(MI_SERVICE_CONNECTION)
+                vsixPath: '$(Pipeline.Workspace)/signed/kusto-explorer-vscode/$(ExtensionName).vsix'
+                manifestPath: '$(Pipeline.Workspace)/signed/kusto-explorer-vscode/$(ExtensionName).manifest'
+                signaturePath: '$(Pipeline.Workspace)/signed/kusto-explorer-vscode/$(ExtensionName).signature.p7s'
+                useCustomVSCE: true
+                feed:
+                  organization: msazure
+                  project: One
+                  feedName: One_PublicPackages
+            steps:
+              - script: echo Published $(ExtensionName) to the VS Code Marketplace.
+                displayName: 'Confirm publication'
