@@ -159,6 +159,69 @@ npm run package
 
 This will create a `.vsix` file that can be installed in VS Code.
 
+### Marketplace Releases (Maintainers)
+
+The [GitHub CI workflow](.github/workflows/ci.yml) builds and tests the extension.
+On a published GitHub release it attaches a VSIX to that release. Signing and
+Marketplace publication are a separate **Azure DevOps OneBranch pipeline**, defined
+in this repository at
+[`.azure-pipelines/release-extension.yml`](.azure-pipelines/release-extension.yml).
+The YAML belongs here; its runner, signing permissions, and service connections
+belong to Azure DevOps. It does not use Azure-Kusto-Service source or templates.
+
+The release pipeline checks daily at 06:00 UTC on `main`, or runs manually with
+`releaseTag` set to `latest` or a specific GitHub release tag. CI and pull-request
+triggers are disabled. It reads the downloaded VSIX's version and skips signing
+and publication if that version is already on the Marketplace. Otherwise it signs
+the extension and its publish manifest, runs OneBranch SDL validation, and waits
+for **Production release approval** before publishing with a managed identity.
+No Marketplace PAT or GitHub-to-Azure-DevOps trigger credential is needed.
+
+The scheduled overlap check covers earlier active runs of the **same pipeline
+definition**. It is best effort: a lookup failure produces a warning and the run
+can still reach approval. A rejected or expired approval can be requested again
+by the next scheduled run. Do not enable two release publishers for this extension.
+
+#### Azure DevOps Setup and Cutover
+
+An Azure DevOps pipeline owner must perform the following setup. Adding the YAML
+to GitHub alone neither creates a pipeline nor grants any permissions.
+
+1. Create a OneBranch Official pipeline in `msazure/One`, using this GitHub
+   repository and `.azure-pipelines/release-extension.yml`. Set its default branch
+   to `refs/heads/main`. Use a team-managed GitHub source connection and keep the
+   new pipeline disabled while configuring it.
+2. Set the following non-secret variables in the pipeline's Azure DevOps
+   configuration, without queue-time overrides. Their values are service-connection
+   names, not credentials. Authorize those connections for this specific pipeline.
+
+   | Variable | Required connection |
+   |---|---|
+   | `GITHUB_RELEASE_SERVICE_CONNECTION` | A team-managed GitHub service connection supported by `DownloadGitHubRelease@0`, with read access to this repo's release assets |
+   | `MI_SERVICE_CONNECTION` | The federated managed-identity connection authorized to publish under the `ms-kusto` Marketplace publisher |
+
+3. Authorize the OneBranch governed templates, Windows pool/container, ESRP signing
+   profiles named in the YAML, and read access to the `One_PublicPackages` feed.
+   The pipeline build identity also needs permission to view builds of its own
+   definition for the scheduled overlap check. Configure the extension's OneBranch
+   Production approvers and release-compliance ownership. The YAML does not import
+   Azure-Kusto-Service's TSA mapping: TSA upload is disabled and BinSkim is
+   explicitly configured to break on findings rather than relying on TSA settings.
+4. Validate the YAML through Azure DevOps preview without queueing a run, including
+   the effective BinSkim failure gate and Production approval dependencies. Before
+   enabling the new pipeline, disable scheduling on any previous release pipeline
+   and finish or cancel its pending release runs. Inspect both pipelines' Azure
+   DevOps schedule settings; UI-defined schedules can override YAML schedules.
+5. Enable the new pipeline and manually run it with an explicit GitHub release tag
+   whose embedded VSIX version is already on the Marketplace. Confirm that both
+   signing and publishing are skipped. For the first unpublished version, review
+   the signed artifact and SDL results before approving its Production release.
+   Verify the resulting Marketplace package before retiring the old definition.
+
+Changing the YAML's repository does not change which third-party DLLs are signed
+or authorize additional signing profiles. Keep signing-policy changes separate
+from this pipeline's ownership and scheduling.
+
 ### Manual Install / Uninstall
 
 ```bash
