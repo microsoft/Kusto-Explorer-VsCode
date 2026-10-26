@@ -2,6 +2,7 @@
 // Licensed under the MIT license.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { runInNewContext } from 'node:vm';
 import { DataTableProvider } from '../../features/dataTableProvider';
 import type { IDataTableView } from '../../features/dataTableProvider';
 import type { IWebView } from '../../features/webview';
@@ -637,6 +638,109 @@ describe('SimpleDataTableProvider', () => {
 
             expect(html).toContain('class="selection-stats"');
             expect(html).toContain('setSelectionStats');
+        });
+    });
+
+    describe.each([
+        ['Ctrl+C', { ctrlKey: true, metaKey: false }],
+        ['Cmd+C', { ctrlKey: false, metaKey: true }],
+    ])('%s in the webview', (_shortcut, modifiers) => {
+        const statsText = {};
+        const otherStatsText = {};
+        const gridText = {};
+        let selection: {
+            anchorNode: object | null;
+            focusNode: object | null;
+            isCollapsed: boolean;
+            toString: () => string;
+        } | null;
+        let active: boolean;
+        let activeElement: { tagName: string } | null;
+        let statsElement: { contains: (node: object | null) => boolean } | null;
+        let onKeyDown: string;
+        let token: string;
+        let postMessage: ReturnType<typeof vi.fn>;
+
+        beforeEach(() => {
+            const webview = createMockWebView();
+            provider.createView(webview, make2dTable());
+            const html: string = webview.setContent.mock.calls[0]![0];
+            const handler = html.match(/function onKeyDown\(e\) \{[\s\S]*?\n    \}/);
+            expect(handler).not.toBeNull();
+            onKeyDown = handler![0];
+            token = html.match(/var token = '(dt-[a-z0-9]+)'/)![1]!;
+            selection = null;
+            active = true;
+            activeElement = null;
+            statsElement = { contains: node => node === statsText };
+            postMessage = vi.fn();
+        });
+
+        function selectText(anchorNode = statsText, focusNode = anchorNode): void {
+            selection = { anchorNode, focusNode, isCollapsed: false, toString: () => 'Sum: 60' };
+        }
+
+        function pressCopy(overrides: Record<string, unknown> = {}): ReturnType<typeof vi.fn> {
+            const preventDefault = vi.fn();
+            runInNewContext(`${onKeyDown}\nonKeyDown(event);`, {
+                container: {
+                    classList: { contains: () => active },
+                    querySelector: (selector: string) => selector === '.selection-stats' ? statsElement : null,
+                },
+                document: { activeElement },
+                window: { getSelection: () => selection, _vscodeApi: { postMessage } },
+                token,
+                event: { ...modifiers, shiftKey: false, altKey: false, key: 'c', preventDefault, ...overrides },
+            });
+            return preventDefault;
+        }
+
+        it('leaves selected statistics text to native copy', () => {
+            selectText();
+            expect(pressCopy()).not.toHaveBeenCalled();
+            expect(postMessage).not.toHaveBeenCalled();
+        });
+
+        it.each(['INPUT', 'TEXTAREA'])('preserves native copy in a %s', tagName => {
+            activeElement = { tagName };
+            expect(pressCopy()).not.toHaveBeenCalled();
+            expect(postMessage).not.toHaveBeenCalled();
+        });
+
+        it.each([
+            'no selection', 'collapsed selection', 'empty text', 'grid text',
+            'another table statistics', 'selection ending outside statistics',
+            'selection starting outside statistics', 'missing statistics element',
+        ])('copies grid data with %s', scenario => {
+            selectText();
+            switch (scenario) {
+                case 'no selection': selection = null; break;
+                case 'collapsed selection': selection!.isCollapsed = true; break;
+                case 'empty text': selection!.toString = () => ''; break;
+                case 'grid text': selectText(gridText); break;
+                case 'another table statistics': selectText(otherStatsText); break;
+                case 'selection ending outside statistics': selectText(statsText, gridText); break;
+                case 'selection starting outside statistics': selectText(gridText, statsText); break;
+                case 'missing statistics element': statsElement = null; break;
+            }
+            expect(pressCopy()).toHaveBeenCalledOnce();
+            expect(postMessage).toHaveBeenCalledExactlyOnceWith({ command: 'copyTable', _token: token });
+        });
+
+        it('ignores inactive tables', () => {
+            active = false;
+            expect(pressCopy()).not.toHaveBeenCalled();
+            expect(postMessage).not.toHaveBeenCalled();
+        });
+
+        it('handles uppercase C as grid copy', () => {
+            expect(pressCopy({ key: 'C' })).toHaveBeenCalledOnce();
+            expect(postMessage).toHaveBeenCalledExactlyOnceWith({ command: 'copyTable', _token: token });
+        });
+
+        it.each([{ shiftKey: true }, { altKey: true }, { key: 'x' }])('ignores other shortcuts: %j', overrides => {
+            expect(pressCopy(overrides)).not.toHaveBeenCalled();
+            expect(postMessage).not.toHaveBeenCalled();
         });
     });
 

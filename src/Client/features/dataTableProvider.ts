@@ -1861,6 +1861,13 @@ class DataTableView implements IDataTableView {
             // box) so they can still copy text from those.
             var ae = document.activeElement;
             if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) return;
+            // Statistics are selectable text, not part of the grid selection.
+            var textSelection = window.getSelection();
+            var statsEl = container.querySelector('.selection-stats');
+            if (statsEl && textSelection && !textSelection.isCollapsed &&
+                textSelection.toString() !== '' &&
+                statsEl.contains(textSelection.anchorNode) &&
+                statsEl.contains(textSelection.focusNode)) return;
             if (window._vscodeApi) {
                 window._vscodeApi.postMessage({ command: 'copyTable', _token: token });
             }
