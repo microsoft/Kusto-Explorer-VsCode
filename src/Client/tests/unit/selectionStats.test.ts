@@ -163,11 +163,24 @@ describe('formatStatValue', () => {
 describe('formatSelectionStats', () => {
     it('renders all aggregates for a numeric selection', () => {
         const text = formatSelectionStats({ cellCount: 3, numericCount: 3, sum: 60, avg: 20, min: 10, max: 30 });
-        expect(text).toContain('Count: 3');
-        expect(text).toContain('Sum: 60');
-        expect(text).toContain('Avg: 20');
-        expect(text).toContain('Min: 10');
-        expect(text).toContain('Max: 30');
+        expect(text).toBe('Count: 3\u2003Sum: 60\u2003Avg: 20\u2003Min: 10\u2003Max: 30');
+    });
+
+    it.each([Number.MAX_VALUE, -Number.MAX_VALUE])('renders count alone when summing %s overflows', value => {
+        const table: ResultTable = {
+            name: 'T',
+            columns: [{ name: 'V', type: 'real' }],
+            rows: [[value], [value]],
+        };
+        const stats = computeSelectionStats(table, [0, 1], [0]);
+        expect(stats?.numericCount).toBe(2);
+        expect(Number.isFinite(stats?.sum)).toBe(false);
+        expect(formatSelectionStats(stats)).toBe('Count: 2');
+    });
+
+    it.each(['sum', 'avg', 'min', 'max'])('renders count alone when %s cannot be formatted', aggregate => {
+        const stats = { cellCount: 3, numericCount: 3, sum: 60, avg: 20, min: 10, max: 30 };
+        expect(formatSelectionStats({ ...stats, [aggregate]: Number.NaN })).toBe('Count: 3');
     });
 
     it('renders count alone when nothing numeric is selected', () => {

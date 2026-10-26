@@ -129,17 +129,23 @@ export function formatStatValue(value: number): string {
 
 /**
  * Renders the status bar text, e.g. `Count: 6  Sum: 60  Avg: 10  Min: 5  Max: 15`.
- * A selection with no numeric cells reports Count alone. Returns an empty
- * string when there is nothing to show.
+ * A selection with no numeric cells or any unformattable aggregate reports
+ * Count alone. Returns an empty string when there is nothing to show.
  */
 export function formatSelectionStats(stats: SelectionStats | undefined): string {
     if (!stats || stats.cellCount === 0) return '';
     const parts = [`Count: ${stats.cellCount}`];
     if (stats.numericCount > 0) {
-        parts.push(`Sum: ${formatStatValue(stats.sum!)}`);
-        parts.push(`Avg: ${formatStatValue(stats.avg!)}`);
-        parts.push(`Min: ${formatStatValue(stats.min!)}`);
-        parts.push(`Max: ${formatStatValue(stats.max!)}`);
+        const sum = formatStatValue(stats.sum!);
+        const avg = formatStatValue(stats.avg!);
+        const min = formatStatValue(stats.min!);
+        const max = formatStatValue(stats.max!);
+        if (sum !== '' && avg !== '' && min !== '' && max !== '') {
+            parts.push(`Sum: ${sum}`);
+            parts.push(`Avg: ${avg}`);
+            parts.push(`Min: ${min}`);
+            parts.push(`Max: ${max}`);
+        }
     }
     return parts.join('\u2003');
 }
