@@ -140,6 +140,8 @@ its own way rather than for portability's sake.
 | `src/Server` | C# LSP server — Kusto parser integration and language/query services |
 | `src/ServerTests` | C# tests for the server |
 | `src/Client/tests` | TypeScript unit (`vitest`) and integration tests |
+| `.github/workflows/ci.yml` | Tests and builds the VSIX, attaching it to published GitHub releases |
+| `.azure-pipelines/release-extension.yml` | Azure DevOps OneBranch signing and approval-gated Marketplace release |
 
 The client `package.json` declares all VS Code contributions (commands, menus, views, settings,
 the `kusto` language, the scratch-pad/entity-definition URI schemes). The build (`npm run compile`)
@@ -361,6 +363,18 @@ concurrent edits/loads don't race.
   passing + document-level event delegation; CDN libraries, no bundler for webview content.
 - **Read-only by default.** The extension runs the queries the user asks for and never auto-crawls or
   mutates a cluster on its own; any automated/profiling queries are bounded and explicitly user-driven.
+
+### Release ownership
+
+Both build and release YAML live in this repository. GitHub Actions builds the release VSIX;
+Azure DevOps runs the OneBranch pipeline that downloads it, skips already-published versions,
+signs and validates the package, and publishes only after Production approval. Signing and
+managed-identity credentials remain in Azure DevOps, not GitHub Actions or this repository.
+The pipeline reads release VSIXes anonymously from this public repository, so it needs no GitHub
+download credential.
+The release pipeline does not depend on Azure-Kusto-Service source or its shared variables template.
+See [Marketplace Releases](CONTRIBUTING.md#marketplace-releases-maintainers) for configuration and
+cutover requirements; committing the YAML does not activate a pipeline.
 
 ---
 
