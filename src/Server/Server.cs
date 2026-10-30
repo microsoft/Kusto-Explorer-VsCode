@@ -223,6 +223,7 @@ public class Server : LspServer, ILogger, ISettingSource, IStorage, IAuthenticat
                 {
                     TriggerCharacters = ["(", ","]
                 },
+                DocumentSymbolProvider = true,
                 //ExecuteCommandProvider = new LSP.ExecuteCommandOptions
                 //{
                 //    Commands = 
@@ -232,7 +233,6 @@ public class Server : LspServer, ILogger, ISettingSource, IStorage, IAuthenticat
                 //    ]
                 //},
 #if false
-                //DocumentSymbolProvider = true,  // mabye?
                 //WorkspaceSymbolProvider = true,  // maybe?
                 //CodeLensProvider = new CodeLensOptions { ResolveProvider = true },
                 //DocumentOnTypeFormattingProvider = new DocumentOnTypeFormattingOptions
@@ -800,6 +800,74 @@ public class Server : LspServer, ILogger, ISettingSource, IStorage, IAuthenticat
 
     private static LSP.SumType<string, LSP.MarkupContent>? ToLspDocumentation(string? text) =>
         text != null ? new LSP.SumType<string, LSP.MarkupContent>(text) : (LSP.SumType<string, LSP.MarkupContent>?)null;
+
+    #endregion
+
+    #region Document Symbols
+
+    public override Task<LSP.SumType<LSP.DocumentSymbol[], LSP.SymbolInformation[]>?> OnTextDocumentSymbolAsync(LSP.DocumentSymbolParams @params, CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (_documentManager.TryGetDocument(@params.TextDocument.Uri, out var document))
+            {
+                var symbols = new List<LSP.DocumentSymbol>();
+
+                foreach (var section in document.GetSectionRanges())
+                {
+                    if (!document.TryGetSectionCode(section.Start, cancellationToken, out var code, out var sectionStart))
+                        continue;
+
+                    var result = DocumentSymbolFeatures.GetDocumentSymbols(code, cancellationToken);
+                    if (result.Error != null)
+                    {
+                        var _ = this.SendWindowLogMessageAsync($"Document symbols failed: {result.Error}", LSP.MessageType.Error);
+                    }
+                    else if (result.Value is { } infos)
+                    {
+                        symbols.AddRange(infos.Select(info => ToLspDocumentSymbol(document.Text, sectionStart, info)));
+                    }
+                }
+
+                return Task.FromResult<LSP.SumType<LSP.DocumentSymbol[], LSP.SymbolInformation[]>?>(symbols.ToArray());
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            var _ = this.SendWindowLogMessageAsync(ex);
+        }
+
+        return base.OnTextDocumentSymbolAsync(@params, cancellationToken);
+    }
+
+    private static LSP.DocumentSymbol ToLspDocumentSymbol(string text, int sectionStart, DocumentSymbolInfo info)
+    {
+        return new LSP.DocumentSymbol
+        {
+            Name = info.Name,
+            Detail = info.Detail ?? "",
+            Kind = ToLspSymbolKind(info.Kind),
+            Range = GetLspRange(text, new TextRange(sectionStart + info.Start, info.Length)),
+            SelectionRange = GetLspRange(text, new TextRange(sectionStart + info.NameStart, info.NameLength)),
+            Children = info.Children.Select(child => ToLspDocumentSymbol(text, sectionStart, child)).ToArray()
+        };
+    }
+
+    private static LSP.SymbolKind ToLspSymbolKind(DocumentSymbolKind kind) =>
+        kind switch
+        {
+            DocumentSymbolKind.Function => LSP.SymbolKind.Function,
+            DocumentSymbolKind.View => LSP.SymbolKind.Function,
+            DocumentSymbolKind.Pattern => LSP.SymbolKind.Function,
+            DocumentSymbolKind.QueryParameter => LSP.SymbolKind.Constant,
+            DocumentSymbolKind.Table => LSP.SymbolKind.Class,
+            DocumentSymbolKind.MaterializedView => LSP.SymbolKind.Class,
+            _ => LSP.SymbolKind.Variable
+        };
 
     #endregion
 
