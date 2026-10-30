@@ -677,16 +677,18 @@ class DataTableView implements IDataTableView {
         }
     });
 
-    // Clear the cell selection whenever the table is sorted. After a sort
-    // the row order changes and the saved selection coordinates would
-    // highlight unrelated cells, so we drop the selection entirely.
-    grid.on('datatable.sort', function() {
+    // Clear the cell selection when sorting, paging, or searching changes
+    // the visible rows, so saved coordinates and statistics cannot go stale.
+    function clearSelectionOnViewChange() {
         if (selectedCells.size === 0 && !selAnchor) return;
         selectedCells.clear();
         selAnchor = null;
         applySelection();
         postSelectionChange();
-    });
+    }
+    grid.on('datatable.sort', clearSelectionOnViewChange);
+    grid.on('datatable.page', clearSelectionOnViewChange);
+    grid.on('datatable.search', clearSelectionOnViewChange);
 
     // After every internal re-render the library rebuilds tbody (and may
     // touch thead). Re-apply our column order so reorder survives sort,

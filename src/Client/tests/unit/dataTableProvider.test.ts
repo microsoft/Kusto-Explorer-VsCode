@@ -641,6 +641,74 @@ describe('SimpleDataTableProvider', () => {
         });
     });
 
+    describe.each(['datatable.sort', 'datatable.page', 'datatable.search'])('%s selection reset', eventName => {
+        it('clears selected cells and anchor, hides statistics, and restores whole-table copy', async () => {
+            const webview = createMockWebView();
+            const view = provider.createView(webview, make2dTable());
+            const html: string = webview.setContent.mock.calls[0]![0];
+            const token = html.match(/var token = '(dt-[a-z0-9]+)'/)![1]!;
+            webview.simulateMessage({
+                command: 'setSelection', _token: token, selection: { rows: [0], cols: [1] },
+            });
+            expect(webview.invoke).toHaveBeenCalledWith('setSelectionStats', { text: expect.stringContaining('Sum: 10') });
+            webview.invoke.mockClear();
+
+            const registrations = html.match(/    \/\/ Clear the cell selection[\s\S]*?grid\.on\('datatable\.refresh', reapplyColOrder\);/);
+            expect(registrations).not.toBeNull();
+            const functions = ['currentSelectionIndices', 'postSelectionChange'].map(name => {
+                const match = html.match(new RegExp(`function ${name}\\(\\) \\{[\\s\\S]*?\\n    \\}`));
+                expect(match).not.toBeNull();
+                return match![0];
+            });
+            const handlers = new Map<string, (() => void)[]>();
+            const applySelection = vi.fn();
+            const stampOriginalColIndex = vi.fn();
+            const applyColOrder = vi.fn();
+            const postMessage = vi.fn((message: Record<string, unknown>) => webview.simulateMessage(message));
+            const context = {
+                grid: {
+                    on: (name: string, handler: () => void) => {
+                        handlers.set(name, [...(handlers.get(name) ?? []), handler]);
+                    },
+                },
+                selectedCells: new Set(['0:2']),
+                selAnchor: { r: 0, c: 2 },
+                applySelection,
+                stampOriginalColIndex,
+                applyColOrder,
+                cachedExpression: 'stale expression',
+                cachedHtml: 'stale HTML',
+                tableEl: { querySelector: () => ({ rows: [] }) },
+                window: { _vscodeApi: { postMessage } },
+                token,
+                handlers,
+                eventName,
+            };
+            const state = runInNewContext(`
+                ${registrations![0]}
+                ${functions.join('\n')}
+                handlers.get(eventName).forEach(function(handler) { handler(); });
+                ({ selAnchor: selAnchor, cachedExpression: cachedExpression, cachedHtml: cachedHtml });
+            `, context);
+
+            expect(context.selectedCells.size).toBe(0);
+            expect(state).toEqual({ selAnchor: null, cachedExpression: '', cachedHtml: '' });
+            expect(applySelection).toHaveBeenCalledOnce();
+            expect(postMessage).toHaveBeenCalledExactlyOnceWith({ command: 'setSelection', selection: null, _token: token });
+            expect(webview.invoke).toHaveBeenCalledWith('setSelectionStats', { text: '' });
+            if (eventName !== 'datatable.sort') {
+                expect(stampOriginalColIndex).toHaveBeenCalledOnce();
+                expect(applyColOrder).toHaveBeenCalledOnce();
+            }
+
+            await view.copyTableAsText();
+            expect(clipboard.copyText).not.toHaveBeenCalled();
+            expect(clipboard.copyItems).toHaveBeenCalledWith(expect.arrayContaining([
+                expect.objectContaining({ format: 'Text', data: 'Category\tValue\nA\t10\nB\t20\nC\t30' }),
+            ]));
+        });
+    });
+
     describe.each([
         ['Ctrl+C', { ctrlKey: true, metaKey: false }],
         ['Cmd+C', { ctrlKey: false, metaKey: true }],
