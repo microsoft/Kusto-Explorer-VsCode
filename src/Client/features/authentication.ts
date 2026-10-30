@@ -11,7 +11,9 @@
  * in the language-server child process.
  */
 
-import { authentication, AuthenticationSession, Disposable, window } from 'vscode';
+import { authentication, AuthenticationSession, commands, Disposable, window, workspace } from 'vscode';
+import { KustoAuthMetadataCache, resolveKustoAuthTargetFromTable } from './kustoEndpoints';
+import type { KustoAuthTarget } from './kustoEndpoints';
 
 /** Parameters for the server's getAuthenticationToken request. */
 export interface GetAuthenticationTokenParams {
@@ -48,7 +50,7 @@ function ensureSessionChangeListener(): void {
         return;
     }
     sessionChangeListener = authentication.onDidChangeSessions(e => {
-        if (e.provider.id === 'microsoft') {
+        if (e.provider.id === 'microsoft' || e.provider.id === 'microsoft-sovereign-cloud') {
             // Any change to Microsoft sessions (sign-in, sign-out, switch account)
             // invalidates our cache; the next token request will re-acquire.
             cachedSessions.clear();
@@ -85,65 +87,64 @@ function isTokenExpiringSoon(accessToken: string): boolean {
 }
 
 /**
- * Returns the AAD resource scope for the cloud that hosts the given Kusto
- * cluster, or null if the URI cannot be parsed. The convention for Kusto
- * first-party AAD resources is `kusto.<cloud-apex>`:
+ * Returns the AAD scope for a Kusto cluster from the static table of known
+ * Kusto domains (no network), or null for a non-https or unparsable URI. All
+ * clusters of a cloud share one resource, so one sign-in covers them all:
  *
- *   *.kusto.windows.net          → https://kusto.kusto.windows.net/.default
+ *   *.kusto.windows.net, *.kusto.fabric.microsoft.com → https://kusto.kusto.windows.net/.default
  *   *.kusto.usgovcloudapi.net    → https://kusto.kusto.usgovcloudapi.net/.default
  *   *.kusto.chinacloudapi.cn     → https://kusto.kusto.chinacloudapi.cn/.default
- *   *.kusto.cloudapi.de          → https://kusto.kusto.cloudapi.de/.default
  *
- * For any other host (custom DNS / non-public cluster) we fall back to the
- * cluster's own URI as the scope - that still works for that cluster, the
- * user just may be prompted more than once.
+ * Any other host (custom DNS) gets a per-cluster scope. Token requests prefer
+ * the cluster's auth metadata over this table; see kustoEndpoints.ts.
  */
 export function getKustoScope(clusterUri: string): string | null {
-    let hostname: string;
-    try {
-        // hostname (not host) deliberately excludes any :port suffix — AAD
-        // resource URIs for Kusto never include a port.
-        hostname = new URL(clusterUri).hostname.toLowerCase();
-    } catch {
-        return null;
+    return resolveKustoAuthTargetFromTable(clusterUri)?.scope ?? null;
+}
+
+const SOVEREIGN_ENVIRONMENT_SETTING = 'microsoft-sovereign-cloud.environment';
+
+const authMetadata = new KustoAuthMetadataCache();
+
+/**
+ * Returns false, after telling the user which setting to change, when a
+ * sovereign-cloud cluster needs VS Code's Microsoft Sovereign Cloud sign-in
+ * set to a different environment than the configured one.
+ */
+function checkSovereignEnvironment(target: KustoAuthTarget, clusterUri: string): boolean {
+    if (target.authProvider !== 'microsoft-sovereign-cloud' || !target.sovereignEnvironment) {
+        return true;
     }
-    // Match the public Kusto host shape "*.kusto.<apex>" (apex may have one
-    // or more labels, e.g. "windows.net" or "usgovcloudapi.net").
-    const match = hostname.match(/\.kusto\.([^/]+)$/);
-    if (match) {
-        return `https://kusto.kusto.${match[1]}/.default`;
+    const configured = workspace.getConfiguration().get<string>(SOVEREIGN_ENVIRONMENT_SETTING);
+    if (configured === target.sovereignEnvironment) {
+        return true;
     }
-    // Unknown host shape: fall back to a per-cluster scope (port stripped).
-    // Restrict the fallback to https — public Kusto and any sane on-prem /
-    // sovereign / private-link deployment is HTTPS, and refusing to derive
-    // a scope from an http:// URI prevents a malicious or misconfigured
-    // connection string from coaxing AAD into issuing a token bound to a
-    // plaintext resource. AAD itself only issues tokens for resources
-    // registered in the user's tenant, but blocking http here is a cheap
-    // additional guard with no legitimate-user impact.
-    try {
-        const u = new URL(clusterUri);
-        if (u.protocol !== 'https:') {
-            return null;
+    const openSettings = 'Open Settings';
+    void window.showErrorMessage(
+        `Kusto: ${clusterUri} is in ${target.cloudName ?? 'a sovereign cloud'}. To sign in, set "${SOVEREIGN_ENVIRONMENT_SETTING}" to "${target.sovereignEnvironment}".`,
+        openSettings,
+    ).then(choice => {
+        if (choice === openSettings) {
+            void commands.executeCommand('workbench.action.openSettings', SOVEREIGN_ENVIRONMENT_SETTING);
         }
-        return `${u.protocol}//${u.hostname}/.default`;
-    } catch {
-        return null;
-    }
+    });
+    return false;
 }
 
 /**
  * Acquires an AAD access token for a Kusto cluster using VS Code's built-in
- * Microsoft authentication provider. Returns a result whose accessToken is
+ * Microsoft (or Microsoft Sovereign Cloud) authentication provider. Returns a result whose accessToken is
  * null if the user cancelled or no session could be obtained.
  */
 export async function acquireMicrosoftAuthenticationToken(
     clusterUri: string
 ): Promise<GetAuthenticationTokenResult> {
-    const scope = getKustoScope(clusterUri);
-    if (!scope) {
+    const target = await authMetadata.resolve(clusterUri);
+    if (!target || !checkSovereignEnvironment(target, clusterUri)) {
         return { accessToken: null };
     }
+    const { scope, authProvider } = target;
+    const cacheKey = `${authProvider} ${scope}`;
 
     ensureSessionChangeListener();
 
@@ -154,21 +155,21 @@ export async function acquireMicrosoftAuthenticationToken(
     // return null even when a valid session exists, and `createIfNone` would
     // then re-prompt the user. The cache is cleared whenever VS Code reports
     // a session change (sign-out, account switch).
-    const cached = cachedSessions.get(scope);
+    const cached = cachedSessions.get(cacheKey);
     if (cached && !isTokenExpiringSoon(cached.accessToken)) {
         return { accessToken: cached.accessToken };
     }
 
-    let pending = inFlightSessions.get(scope);
+    let pending = inFlightSessions.get(cacheKey);
     if (!pending) {
         pending = (async () => {
             // Silent first: returns a fresh access token from VS Code's persistent
             // session cache without showing UI. Survives VS Code restarts.
-            let session = await authentication.getSession('microsoft', [scope], { silent: true });
+            let session = await authentication.getSession(authProvider, [scope], { silent: true });
             if (!session && !cached) {
                 // First-ever request for this scope and no persisted session:
                 // prompt the user via VS Code's Accounts UI.
-                session = await authentication.getSession('microsoft', [scope], { createIfNone: true });
+                session = await authentication.getSession(authProvider, [scope], { createIfNone: true });
             }
             // If silent unexpectedly fails but we still have a cached session
             // whose token has not yet expired, fall back to the cached session.
@@ -177,14 +178,14 @@ export async function acquireMicrosoftAuthenticationToken(
             }
             return session;
         })();
-        inFlightSessions.set(scope, pending);
-        void pending.finally(() => inFlightSessions.delete(scope));
+        inFlightSessions.set(cacheKey, pending);
+        void pending.finally(() => inFlightSessions.delete(cacheKey));
     }
 
     try {
         const session = await pending;
         if (session) {
-            cachedSessions.set(scope, session);
+            cachedSessions.set(cacheKey, session);
         }
         return { accessToken: session?.accessToken ?? null };
     } catch (error) {

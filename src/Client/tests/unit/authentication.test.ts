@@ -69,6 +69,11 @@ describe('getKustoScope', () => {
             expect(getKustoScope('https://mycluster.eastus.kusto.windows.net'))
                 .toBe('https://kusto.kusto.windows.net/.default');
         });
+
+        it('maps a Fabric Eventhouse to the public Kusto resource', () => {
+            expect(getKustoScope('https://trd-abc123.z0.kusto.fabric.microsoft.com'))
+                .toBe('https://kusto.kusto.windows.net/.default');
+        });
     });
 
     describe('custom DNS / non-public hosts', () => {

@@ -31,6 +31,7 @@ Edit, run, and chart Kusto queries (KQL) right from VS Code. Explore databases a
 - Maintain a list of Kusto clusters you connect to
 - Select a cluster and database to set the defaults for your active query document
 - Explore database entities — tables, functions, materialized views, and more
+- Connect to Azure Data Explorer clusters, Microsoft Fabric Eventhouses (`*.kusto.fabric.microsoft.com`), and US Government or China cloud clusters. For a sovereign cloud, set VS Code's `microsoft-sovereign-cloud.environment` setting to that cloud so you can sign in.
 
 ### Scratch Pads (sidebar)
 
