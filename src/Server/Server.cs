@@ -2286,6 +2286,50 @@ public class Server : LspServer, ILogger, ISettingSource, IStorage, IAuthenticat
         public RunQueryDiagnostic? Error { get; init; }
     }
 
+    [JsonRpcMethod("kusto/cancelQuery", UseSingleObjectParameterDeserialization = true)]
+    public async Task<CancelQueryResponse?> OnCancelQueryAsync(CancelQueryParams @params, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await _queryManager.CancelQueryAsync(@params.ClientRequestId, cancellationToken).ConfigureAwait(false);
+            return new CancelQueryResponse
+            {
+                Found = result.Found,
+                CancelledClientRequestId = result.CancelledClientRequestId,
+                Error = result.Error
+            };
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _ = this.SendWindowLogMessageAsync(ex.Message);
+            return new CancelQueryResponse { Error = ex.Message };
+        }
+    }
+
+    [DataContract]
+    public class CancelQueryParams
+    {
+        [DataMember(Name = "clientRequestId")]
+        public required string ClientRequestId { get; init; }
+    }
+
+    [DataContract]
+    public class CancelQueryResponse
+    {
+        [DataMember(Name = "found")]
+        public bool Found { get; init; }
+
+        [DataMember(Name = "cancelledClientRequestId")]
+        public string? CancelledClientRequestId { get; init; }
+
+        [DataMember(Name = "error")]
+        public string? Error { get; init; }
+    }
+
     #endregion
 
     #region Html
