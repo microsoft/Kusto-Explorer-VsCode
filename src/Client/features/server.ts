@@ -58,15 +58,15 @@ export interface IServer {
 export class NullServer implements IServer {
     protected static readonly noopDisposable: Disposable = { dispose() {} };
 
-    runQuery(): Promise<RunQueryResult | null> { return Promise.resolve(null); }
+    runQuery(_query: string, _cluster?: string, _database?: string, _isReadOnly?: boolean, _maxRows?: number, _clientRequestId?: string): Promise<RunQueryResult | null> { return Promise.resolve(null); }
     getQueryResultType(): Promise<GetQueryResultTypeResult | null> { return Promise.resolve(null); }
     getFunctionResultType(): Promise<GetFunctionResultTypeResult | null> { return Promise.resolve(null); }
-    getQueryRanges(): Promise<QueryRangesResult | null> { return Promise.resolve(null); }
-    getQueryRange(): Promise<Range | null> { return Promise.resolve(null); }
-    getServerKind(): Promise<ServerKindResult | null> { return Promise.resolve(null); }
-    decodeConnectionString(): Promise<DecodeConnectionStringResult | null> { return Promise.resolve(null); }
-    getServerInfo(): Promise<ServerInfoResult | null> { return Promise.resolve(null); }
-    getDatabaseInfo(): Promise<DatabaseInfo | null> { return Promise.resolve(null); }
+    getQueryRanges(_uri: string): Promise<QueryRangesResult | null> { return Promise.resolve(null); }
+    getQueryRange(_uri: string, _position: Position): Promise<Range | null> { return Promise.resolve(null); }
+    getServerKind(_connection: string): Promise<ServerKindResult | null> { return Promise.resolve(null); }
+    decodeConnectionString(_connectionString: string): Promise<DecodeConnectionStringResult | null> { return Promise.resolve(null); }
+    getServerInfo(_connection: string, _serverKind: string | null): Promise<ServerInfoResult | null> { return Promise.resolve(null); }
+    getDatabaseInfo(_cluster: string, _database: string): Promise<DatabaseInfo | null> { return Promise.resolve(null); }
     getEntityAsCommand(): Promise<string | null> { return Promise.resolve(null); }
     getEntityAsExpression(): Promise<string | null> { return Promise.resolve(null); }
     getQueryAsHtml(): Promise<QueryAsHtmlResult | null> { return Promise.resolve(null); }
@@ -74,13 +74,13 @@ export class NullServer implements IServer {
     getTableAsExpression(_table: ResultTable): Promise<string | null> { return Promise.resolve(null); }
     getEntityDefinitionContent(): Promise<EntityDefinitionContentResult | null> { return Promise.resolve(null); }
     transformPaste(): Promise<string | null> { return Promise.resolve(null); }
-    refreshSchema(): Promise<void> { return Promise.resolve(); }
+    refreshSchema(_cluster: string, _database?: string): Promise<void> { return Promise.resolve(); }
     refreshDocumentSchema(): Promise<void> { return Promise.resolve(); }
     inferDocumentConnection(): Promise<InferDocumentConnectionResult | null> { return Promise.resolve(null); }
     ensureDocument(): Promise<void> { return Promise.resolve(); }
     validateQuery(): Promise<ValidateQueryResult | null> { return Promise.resolve(null); }
     getMinifiedQuery(): Promise<GetMinifiedQueryResult | null> { return Promise.resolve(null); }
-    sendConnectionsUpdated(): void {}
+    sendConnectionsUpdated(_connections: string[]): void {}
     sendDocumentConnectionChanged(): void {}
     onDocumentReady(): Disposable { return NullServer.noopDisposable; }
     onSemanticTokensRefresh(): Disposable { return NullServer.noopDisposable; }
