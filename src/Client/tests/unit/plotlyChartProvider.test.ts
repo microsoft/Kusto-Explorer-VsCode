@@ -38,21 +38,11 @@ function createMockWebView(): IWebView & {
 // ─── Test Data Helpers ──────────────────────────────────────────────────────
 
 /**
- * Reverses the encoding done by `escapeForJsStringLiteral` in plotlyChartProvider.ts
- * so tests can pull the JSON payload out of the rendered `JSON.parse('...')` literal.
- * Order matters: undo the backslash escape first, then the apostrophe, then `</`,
- * then the line/paragraph separator escapes (which never produce a sequence the
- * earlier rules can re-match).
- *
- * Keep this in lockstep with `escapeForJsStringLiteral` in the production source.
+ * Evaluates the single-quoted JS string literal that plotlyChartProvider.ts renders
+ * inside `JSON.parse('...')`, so tests get back the JSON payload the webview parses.
  */
 function decodeJsStringLiteral(encoded: string): string {
-    return encoded
-        .replace(/\\\\/g, '\\')
-        .replace(/\\'/g, "'")
-        .replace(/<\\\//g, '</')
-        .replace(/\\u2028/g, '\u2028')
-        .replace(/\\u2029/g, '\u2029');
+    return new Function(`return '${encoded}';`)() as string;
 }
 
 function makeTable(columns: { name: string; type: string }[], rows: unknown[][]): ResultTable {
@@ -94,13 +84,13 @@ describe('CompositeChartProvider', () => {
     });
 
     describe('createView', () => {
-        it('calls webview.setup() with Plotly CDN and scripts', () => {
+        it('calls webview.setup() with the bundled Plotly library and scripts', () => {
             const webview = createMockWebView();
             provider.createView(webview);
 
             // Composite provider sets up both Plotly and TimePivot views
             expect(webview.setup).toHaveBeenCalled();
-            // Plotly setup should include CDN script
+            // Plotly setup should reference the bundled library
             const plotlyCall = webview.setup.mock.calls.find(
                 (args: unknown[]) => typeof args[0] === 'string' && (args[0] as string).includes('plotly')
             );
