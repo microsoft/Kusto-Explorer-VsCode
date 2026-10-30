@@ -219,6 +219,10 @@ public class Server : LspServer, ILogger, ISettingSource, IStorage, IAuthenticat
                     ResolveProvider = true
                 },
                 RenameProvider = new LSP.RenameOptions { PrepareProvider = false },
+                SignatureHelpProvider = new LSP.SignatureHelpOptions
+                {
+                    TriggerCharacters = ["(", ","]
+                },
                 //ExecuteCommandProvider = new LSP.ExecuteCommandOptions
                 //{
                 //    Commands = 
@@ -230,10 +234,6 @@ public class Server : LspServer, ILogger, ISettingSource, IStorage, IAuthenticat
 #if false
                 //DocumentSymbolProvider = true,  // mabye?
                 //WorkspaceSymbolProvider = true,  // maybe?
-                //SignatureHelpProvider = new SignatureHelpOptions
-                //{
-                //    TriggerCharacters = new[] { "(", "," }
-                //},
                 //CodeLensProvider = new CodeLensOptions { ResolveProvider = true },
                 //DocumentOnTypeFormattingProvider = new DocumentOnTypeFormattingOptions
                 //{
@@ -735,6 +735,72 @@ public class Server : LspServer, ILogger, ISettingSource, IStorage, IAuthenticat
                 return classyText.Text;
         }
     }
+    #endregion
+
+    #region Signature Help
+
+    public override Task<LSP.SignatureHelp?> OnTextDocumentSignatureHelpAsync(LSP.SignatureHelpParams @params, CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (_documentManager.TryGetDocument(@params.TextDocument.Uri, out var document))
+            {
+                var position = GetTextPosition(document.Text, @params.Position);
+                if (document.TryGetSectionCode(position, cancellationToken, out var code, out var sectionStart))
+                {
+                    var result = SignatureHelpFeatures.GetSignatureHelp(code, position - sectionStart, cancellationToken);
+                    if (result.Error != null)
+                    {
+                        var _ = this.SendWindowLogMessageAsync($"Signature help failed: {result.Error}", LSP.MessageType.Error);
+                    }
+                    else if (result.Value is { } info)
+                    {
+                        return Task.FromResult<LSP.SignatureHelp?>(ToLspSignatureHelp(info));
+                    }
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            var _ = this.SendWindowLogMessageAsync(ex);
+        }
+
+        return base.OnTextDocumentSignatureHelpAsync(@params, cancellationToken);
+    }
+
+    private static LSP.SignatureHelp ToLspSignatureHelp(SignatureHelpInfo info)
+    {
+        var activeSignature = info.Signatures[info.ActiveSignature];
+        return new LSP.SignatureHelp
+        {
+            Signatures = info.Signatures.Select(ToLspSignature).ToArray(),
+            ActiveSignature = info.ActiveSignature,
+            // an out-of-range index highlights no parameter
+            ActiveParameter = info.ActiveParameter >= 0 ? info.ActiveParameter : activeSignature.Parameters.Count
+        };
+    }
+
+    private static LSP.SignatureInformation ToLspSignature(SignatureInfo signature)
+    {
+        return new LSP.SignatureInformation
+        {
+            Label = signature.Label,
+            Documentation = ToLspDocumentation(signature.Documentation),
+            Parameters = signature.Parameters.Select(p => new LSP.ParameterInformation
+            {
+                Label = new LSP.SumType<string, Tuple<int, int>>(Tuple.Create(p.LabelStart, p.LabelStart + p.LabelLength)),
+                Documentation = ToLspDocumentation(p.Documentation)
+            }).ToArray()
+        };
+    }
+
+    private static LSP.SumType<string, LSP.MarkupContent>? ToLspDocumentation(string? text) =>
+        text != null ? new LSP.SumType<string, LSP.MarkupContent>(text) : (LSP.SumType<string, LSP.MarkupContent>?)null;
+
     #endregion
 
     #region Folding Ranges (Outlining)

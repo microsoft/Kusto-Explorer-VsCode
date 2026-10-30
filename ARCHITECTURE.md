@@ -259,8 +259,9 @@ with `[JsonRpcMethod]`-attributed virtual methods mapped to LSP request names. `
 those handlers and also declares the custom `kusto/*` methods.
 
 `OnInitializeAsync` advertises the server's capabilities: semantic tokens, completion (with trigger
-characters), hover, folding, formatting, document highlight, references, definition, code actions,
-and rename — each one corresponds to a Kusto code service.
+characters), hover, signature help, folding, formatting, document highlight, references, definition,
+code actions, and rename. Most map to a Kusto code service; signature help has no `Kusto.Language`
+API, so it is computed in `LanguageFeatures/` (see below).
 
 ### 4.2 The manager layer — `Server.cs` as coordinator
 
@@ -271,6 +272,7 @@ concrete implementations). Responsibilities are split so each manager owns one c
 | Folder | Type(s) | Responsibility |
 |--------|---------|----------------|
 | `Documents/` | `DocumentManager`, `SectionedDocument`, `IDocument` | Track open documents; wrap `Kusto.Language.Editor.CodeScript`; expose per-section editor services (diagnostics, completion, hover, classification, code actions). |
+| `LanguageFeatures/` | `SignatureHelpFeatures`, `FeatureResult<T>` | Host-independent editor features that `Kusto.Language` lacks: static pure functions over one section's `KustoCode`, a position, and a `CancellationToken`, returning plain DTOs (character offsets, no LSP types). `Server.cs` maps them to LSP; tests target the DTOs. Kept free of host dependencies so a shared language core can adopt them. |
 | `Symbols/` | `SymbolManager` | Build and hold the shared `GlobalState` (cluster/database symbols) the parser needs; raise `GlobalsChanged`. |
 | `Schema/` | `SchemaManager`, `ServerSchemaSource`, `ISchemaSource` | Fetch live schema via `.show` commands and cache it (memory + `IStorage`), with background refresh. |
 | `Connections/` | `ConnectionManager`, `KustoConnection`, `IConnection` | Pool Kusto connections; execute queries/commands; handle auth fallback. |
