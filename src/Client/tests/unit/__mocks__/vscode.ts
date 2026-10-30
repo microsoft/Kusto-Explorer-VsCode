@@ -19,6 +19,7 @@ export const workspace = {
 };
 
 export const window = {
+    activeTextEditor: undefined as unknown,
     showInformationMessage: async () => undefined,
     showWarningMessage: async () => undefined,
     showErrorMessage: async () => undefined,
@@ -29,6 +30,27 @@ export const window = {
         show: () => {},
         dispose: () => {},
     }),
+};
+
+export class Position {
+    constructor(public readonly line: number, public readonly character: number) {}
+}
+
+export class Range {
+    readonly start: Position;
+    readonly end: Position;
+    constructor(startLine: number, startCharacter: number, endLine: number, endCharacter: number) {
+        this.start = new Position(startLine, startCharacter);
+        this.end = new Position(endLine, endCharacter);
+    }
+}
+
+export class CodeLens {
+    constructor(public readonly range: Range, public readonly command?: unknown) {}
+}
+
+export const DocumentDropOrPasteEditKind = {
+    Text: { append: (value: string) => ({ value }) },
 };
 
 export const Uri = {
