@@ -352,6 +352,16 @@ concurrent edits/loads don't race.
 - **Persistence boundaries.** The client owns storage; the server borrows it through
   `kusto/getData`/`kusto/setData` → `globalState`. Per-document state goes in `workspaceState`;
   cross-workspace state goes in `globalState`.
+- **Cluster identity: routing URI vs symbol name.** A cluster is normally identified by its host
+  name, but Azure Data Explorer *proxy* endpoints (Log Analytics, Application Insights) carry the
+  workspace/component in the URI **path**
+  (`https://ade.loganalytics.io/subscriptions/…/workspaces/{workspace}`), so the whole
+  resource-scoped URI is the routing identity and must be preserved end to end — stored connection,
+  tree, and query execution. Cluster *symbols* are the exception: `Kusto.Language`'s
+  `GlobalState.GetCluster()` normalizes its lookup key to a host name, so symbols are named by host
+  (see `ConnectionFacts.GetClusterSymbolName`). Consequence: workspaces sharing one proxy front door
+  share a cluster symbol, so their schema/IntelliSense collides even though query routing stays
+  per-connection.
 - **Custom URI schemes.** `kusto-scratchpad:` (unsaved query docs) and `kusto-entity:` (virtual
   entity-definition docs) are registered as `TextDocumentContentProvider`s and included in the LSP
   `documentSelector`, so language features work in them too.

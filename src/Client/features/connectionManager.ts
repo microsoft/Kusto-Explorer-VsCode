@@ -73,9 +73,33 @@ export function isServer(item: ServerOrGroup): item is ServerInfo {
 // =============================================================================
 
 /**
- * Simple synchronous hostname extraction for fallback scenarios.
+ * Matches a connection string that already carries an http(s) scheme.
+ *
+ * URL schemes are case-insensitive, so `HTTPS://cluster` is as valid as the lowercase
+ * form. Testing with `startsWith('https://')` misses those and misses `http://` entirely,
+ * and the consequence is silent rather than loud: prepending a second scheme yields
+ * `https://HTTPS://cluster`, which `new URL()` parses without throwing and reports a
+ * hostname of `https`. The catch-block fallback never fires, so the caller receives a
+ * confidently wrong cluster name.
+ */
+const HAS_URL_SCHEME = /^https?:\/\//i;
+
+/**
+ * Simple synchronous cluster URI extraction for fallback scenarios.
+ *
+ * Returns the bare host name for an ordinary cluster, but preserves the whole
+ * resource-scoped URI for an Azure Data Explorer proxy endpoint. Log Analytics and
+ * Application Insights are reached through that proxy, and the routing target lives in
+ * the URI path rather than the host:
+ *
+ *   https://ade.loganalytics.io/subscriptions/{sub}/resourcegroups/{rg}/providers/microsoft.operationalinsights/workspaces/{workspace}
+ *   https://ade.applicationinsights.io/subscriptions/{sub}/resourcegroups/{rg}/providers/microsoft.insights/components/{app}
+ *
+ * Reducing those to `ade.loganalytics.io` yields the proxy front door, which is not a
+ * routable cluster on its own.
+ *
  * @param connection The connection string (URL or hostname)
- * @returns The cluster hostname
+ * @returns The cluster host name, or the full resource-scoped cluster URI
  */
 function getHostNameSimple(connection: string): string {
     let dataSource = connection;
@@ -98,7 +122,13 @@ function getHostNameSimple(connection: string): string {
         dataSource = connectionParts[0].trim();
     }
     try {
-        const url = new URL(dataSource.startsWith('https://') ? dataSource : `https://${dataSource}`);
+        const url = new URL(HAS_URL_SCHEME.test(dataSource) ? dataSource : `https://${dataSource}`);
+        // A single path segment is a database (https://cluster/mydb), not a resource path,
+        // so only multi-segment paths identify a proxy-routed resource.
+        const path = url.pathname.replace(/^\/+|\/+$/g, '');
+        if (path.includes('/')) {
+            return `${url.protocol}//${url.host}/${path}`;
+        }
         return url.hostname;
     } catch {
         // If it's not a valid URL, return as-is (might already be just a hostname)
@@ -107,13 +137,35 @@ function getHostNameSimple(connection: string): string {
 }
 
 /**
+ * Returns the workspace/component name a resource-scoped proxy cluster URI ends with,
+ * or undefined when the cluster is an ordinary host name.
+ */
+function getResourceScopedName(cluster: string): string | undefined {
+    if (!HAS_URL_SCHEME.test(cluster)) {
+        return undefined;
+    }
+    try {
+        const segments = new URL(cluster).pathname.split('/').filter(segment => segment.length > 0);
+        return segments.length > 1 ? segments[segments.length - 1] : undefined;
+    } catch {
+        return undefined;
+    }
+}
+
+/**
  * Gets the suggested display name for a cluster.
- * If the cluster ends with the configured default domain, returns the short name;
- * otherwise returns undefined (meaning no special display name is needed).
- * @param cluster The cluster hostname
+ * For a resource-scoped proxy cluster URI, returns the workspace/component name, since the
+ * full resource path is unreadable in the connections tree.
+ * Otherwise, if the cluster ends with the configured default domain, returns the short name;
+ * failing that returns undefined (meaning no special display name is needed).
+ * @param cluster The cluster hostname or resource-scoped cluster URI
  * @returns The suggested display name, or undefined if the cluster name should be used as-is
  */
 export function getDisplayName(cluster: string): string | undefined {
+    const resourceScopedName = getResourceScopedName(cluster);
+    if (resourceScopedName) {
+        return resourceScopedName;
+    }
     const defaultDomain = vscode.workspace.getConfiguration('msKustoExplorer').get<string>('defaultDomain', '.kusto.windows.net');
     if (defaultDomain && cluster.endsWith(defaultDomain)) {
         const shortName = cluster.substring(0, cluster.length - defaultDomain.length);
@@ -148,10 +200,10 @@ export class ConnectionManager {
     // =========================================================================
 
     /**
-     * Extracts the cluster hostname from a connection string using the language server.
+     * Extracts the cluster identity from a connection string using the language server.
      * Falls back to simple parsing if the language client is not available.
      * @param connection The connection string (URL or hostname)
-     * @returns The cluster hostname
+     * @returns The cluster hostname, or the full resource-scoped cluster URI for a proxy endpoint
      */
     async getHostName(connection: string): Promise<string> {
         try {

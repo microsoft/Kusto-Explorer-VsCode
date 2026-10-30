@@ -61,6 +61,98 @@ public class ConnectionManagerTests
 
     #endregion
 
+    #region Resource-Scoped Proxy Cluster URI Tests (issue #139)
+
+    private const string WorkspaceUri =
+        "https://ade.loganalytics.io/subscriptions/sub-1/resourcegroups/rg-1/providers/microsoft.operationalinsights/workspaces/my-workspace";
+
+    private const string ComponentUri =
+        "https://ade.applicationinsights.io/subscriptions/sub-1/resourcegroups/rg-1/providers/microsoft.insights/components/my-app";
+
+    [TestMethod]
+    public void GetOrAddConnection_LogAnalyticsWorkspaceUri_PreservesResourcePath()
+    {
+        var manager = new ConnectionManager();
+
+        var connection = manager.GetOrAddConnection(WorkspaceUri);
+
+        Assert.AreEqual(WorkspaceUri, connection.Cluster);
+    }
+
+    [TestMethod]
+    public void GetOrAddConnection_ApplicationInsightsComponentUri_PreservesResourcePath()
+    {
+        var manager = new ConnectionManager();
+
+        var connection = manager.GetOrAddConnection(ComponentUri);
+
+        Assert.AreEqual(ComponentUri, connection.Cluster);
+    }
+
+    [TestMethod]
+    public void GetOrAddConnection_HostOutsideDefaultDomain_DoesNotThrow()
+    {
+        // KustoFacts.GetShortHostName returns null for any host outside the default
+        // domain, which used to be passed straight through as a dictionary key.
+        var manager = new ConnectionManager();
+
+        var connection = manager.GetOrAddConnection("https://ade.loganalytics.io");
+
+        Assert.AreEqual("ade.loganalytics.io", connection.Cluster);
+    }
+
+    [TestMethod]
+    public void TryGetConnection_ResourceScopedClusterUri_ResolvesByFullUri()
+    {
+        var manager = new ConnectionManager();
+        manager.GetOrAddConnection(WorkspaceUri);
+
+        var found = manager.TryGetConnection(WorkspaceUri, out var connection);
+
+        Assert.IsTrue(found);
+        Assert.AreEqual(WorkspaceUri, connection!.Cluster);
+    }
+
+    [TestMethod]
+    public void TryGetConnection_ResourceScopedClusterUri_AlsoResolvesByProxyHost()
+    {
+        // cluster() references in a query are normalized to a host name, so the
+        // front-door host must still resolve to a usable connection.
+        var manager = new ConnectionManager();
+        manager.GetOrAddConnection(WorkspaceUri);
+
+        var found = manager.TryGetConnection("ade.loganalytics.io", out var connection);
+
+        Assert.IsTrue(found);
+        Assert.AreEqual(WorkspaceUri, connection!.Cluster);
+    }
+
+    [TestMethod]
+    public void GetOrAddConnection_TwoWorkspacesOnSameProxyHost_RouteIndependently()
+    {
+        var manager = new ConnectionManager();
+        var otherUri = WorkspaceUri.Replace("my-workspace", "other-workspace");
+
+        var first = manager.GetOrAddConnection(WorkspaceUri);
+        var second = manager.GetOrAddConnection(otherUri);
+
+        Assert.AreEqual(WorkspaceUri, first.Cluster);
+        Assert.AreEqual(otherUri, second.Cluster);
+
+        // Each full URI resolves to its own connection - routing is per workspace.
+        Assert.IsTrue(manager.TryGetConnection(WorkspaceUri, out var foundFirst));
+        Assert.IsTrue(manager.TryGetConnection(otherUri, out var foundSecond));
+        Assert.AreEqual(WorkspaceUri, foundFirst!.Cluster);
+        Assert.AreEqual(otherUri, foundSecond!.Cluster);
+
+        // The shared front-door host is an ambiguous alias; it keeps the first
+        // registration rather than being overwritten by the second.
+        Assert.IsTrue(manager.TryGetConnection("ade.loganalytics.io", out var foundByHost));
+        Assert.AreEqual(WorkspaceUri, foundByHost!.Cluster);
+    }
+
+    #endregion
+
     #region TryGetConnection Tests
 
     [TestMethod]
