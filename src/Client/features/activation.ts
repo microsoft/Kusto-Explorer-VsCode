@@ -24,6 +24,7 @@ import { HistoryManager } from './historyManager';
 import { HistoryPanel } from './historyPanel';
 import { Importer } from './importer';
 import { ImportManager, type IKustoExplorerLocalData } from './importManager';
+import { DeepLinkHandler } from './deepLinkHandler';
 import { EntityDefinitionProvider, ENTITY_DEFINITION_SCHEME } from './entityDefinitionProvider';
 import type { IFileStore } from './fileStore';
 import type { IServer } from './server';
@@ -126,6 +127,13 @@ export async function activateFeatures(context: vscode.ExtensionContext, server:
         vscode.commands.registerCommand('msKustoExplorer.importScratchPadsFromKustoExplorer', () => importer.importScratchPads()),
         vscode.commands.registerCommand('msKustoExplorer.importFromFile', () => importer.importFromFile()),
         vscode.commands.registerCommand('msKustoExplorer.exportConnections', () => importer.exportConnections()),
+    );
+
+    // Open queries from links, and copy links to Azure Data Explorer web
+    const deepLinkHandler = new DeepLinkHandler(server, connectionManager, scratchPadManager);
+    context.subscriptions.push(
+        vscode.window.registerUriHandler(deepLinkHandler),
+        vscode.commands.registerCommand('msKustoExplorer.copyLinkToAdxWeb', () => deepLinkHandler.copyLinkToAdxWeb()),
     );
 
     // activate connections panel and related features

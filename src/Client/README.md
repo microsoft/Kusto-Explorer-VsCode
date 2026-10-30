@@ -25,6 +25,7 @@ Edit, run, and chart Kusto queries (KQL) right from VS Code. Explore databases a
 - Go-to-definition and find-all-references for tables, functions, columns, and more
 - Code actions and quick fixes for common issues and refactorings
 - Copy colorized query text to the clipboard for pasting into other documents
+- Copy a link that opens the current query in Azure Data Explorer web, and open such links (`vscode://ms-kusto.kusto-explorer-vscode/clusters/<cluster>/databases/<database>?query=...`) in a new scratch pad. A link only opens its query for review; it never runs it.
 
 ### Connections (sidebar)
 

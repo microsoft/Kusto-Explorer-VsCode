@@ -21,6 +21,7 @@
   "activationEvents": [
     "onLanguage:kusto",
     "onFileSystem:msKustoExplorer-scratch",
+    "onUri",
     "onLanguageModelTool:msKustoExplorer_getClusters",
     "onChatParticipant:msKustoExplorer"
   ],
@@ -187,6 +188,11 @@
         "icon": "$(copy)"
       },
       {
+        "command": "msKustoExplorer.copyLinkToAdxWeb",
+        "title": "Copy Link to Azure Data Explorer Web",
+        "icon": "$(link)"
+      },
+      {
         "command": "msKustoExplorer.copyData",
         "title": "Copy",
         "icon": "$(copy)"
@@ -341,6 +347,10 @@
         {
           "command": "msKustoExplorer.runQuery.running",
           "when": "false"
+        },
+        {
+          "command": "msKustoExplorer.copyLinkToAdxWeb",
+          "when": "editorLangId == kusto && !msKustoExplorer.isEntityDefinition"
         }
       ],
       "view/title": [
@@ -619,6 +629,11 @@
           "command": "msKustoExplorer.copyQueryTransparent",
           "when": "editorLangId == kusto && !msKustoExplorer.isEntityDefinition",
           "group": "0_kusto@1"
+        },
+        {
+          "command": "msKustoExplorer.copyLinkToAdxWeb",
+          "when": "editorLangId == kusto && !msKustoExplorer.isEntityDefinition",
+          "group": "0_kusto@1.5"
         },
         {
           "command": "msKustoExplorer.formatQuery",
