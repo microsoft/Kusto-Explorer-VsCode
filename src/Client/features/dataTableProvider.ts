@@ -270,6 +270,7 @@ class DataTableView implements IDataTableView {
                 expression => {
                     if (expression) {
                         this.webview.invoke('setExpression', {
+                            _token: this.token,
                             expression,
                             html,
                             fullExpression: expression,
@@ -292,6 +293,7 @@ class DataTableView implements IDataTableView {
             ([expression, fullExpression]) => {
                 if (expression) {
                     this.webview.invoke('setExpression', {
+                        _token: this.token,
                         expression,
                         html,
                         fullExpression: fullExpression ?? expression,
@@ -312,7 +314,7 @@ class DataTableView implements IDataTableView {
     private publishSelectionStats(): void {
         const sel = this.currentSelection;
         const stats = sel ? computeSelectionStats(this.table, sel.rows, sel.cols) : undefined;
-        this.webview.invoke('setSelectionStats', { text: formatSelectionStats(stats) });
+        this.webview.invoke('setSelectionStats', { text: formatSelectionStats(stats), _token: this.token });
     }
 
     /**
@@ -1808,8 +1810,11 @@ class DataTableView implements IDataTableView {
         var msg = event.data;
         if (!msg) return;
 
-        // Only respond to commands when this container is the active tab
-        if (!container.classList.contains('active')) return;
+        // Table replies belong to their originating view even after a tab switch.
+        // Broadcast commands still apply only to the active tab.
+        if (msg.command === 'setSelectionStats' || msg.command === 'setExpression') {
+            if (msg._token !== token) return;
+        } else if (!container.classList.contains('active')) return;
 
         if (msg.command === 'toggleSearch') {
             searchVisible = !searchVisible;

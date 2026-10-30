@@ -650,7 +650,7 @@ describe('SimpleDataTableProvider', () => {
             webview.simulateMessage({
                 command: 'setSelection', _token: token, selection: { rows: [0], cols: [1] },
             });
-            expect(webview.invoke).toHaveBeenCalledWith('setSelectionStats', { text: expect.stringContaining('Sum: 10') });
+            expect(webview.invoke).toHaveBeenCalledWith('setSelectionStats', { text: expect.stringContaining('Sum: 10'), _token: token });
             webview.invoke.mockClear();
 
             const registrations = html.match(/    \/\/ Clear the cell selection[\s\S]*?grid\.on\('datatable\.refresh', reapplyColOrder\);/);
@@ -695,7 +695,7 @@ describe('SimpleDataTableProvider', () => {
             expect(state).toEqual({ selAnchor: null, cachedExpression: '', cachedHtml: '' });
             expect(applySelection).toHaveBeenCalledOnce();
             expect(postMessage).toHaveBeenCalledExactlyOnceWith({ command: 'setSelection', selection: null, _token: token });
-            expect(webview.invoke).toHaveBeenCalledWith('setSelectionStats', { text: '' });
+            expect(webview.invoke).toHaveBeenCalledWith('setSelectionStats', { text: '', _token: token });
             if (eventName !== 'datatable.sort') {
                 expect(stampOriginalColIndex).toHaveBeenCalledOnce();
                 expect(applyColOrder).toHaveBeenCalledOnce();
@@ -813,6 +813,99 @@ describe('SimpleDataTableProvider', () => {
     });
 
     // ─── token uniqueness ───────────────────────────────────────────────
+
+    describe('table reply routing', () => {
+        function createReceiver(active: boolean) {
+            const webview = createMockWebView();
+            provider.createView(webview, make2dTable());
+            const html: string = webview.setContent.mock.calls[0]![0];
+            const token = html.match(/var token = '(dt-[a-z0-9]+)'/)![1]!;
+            const handler = html.match(/function onMessage\(event\) \{[\s\S]*?\n    \}/);
+            expect(handler).not.toBeNull();
+            const stats = { textContent: 'old statistics', hidden: false };
+            const toggle = vi.fn();
+            const focus = vi.fn();
+            const context = {
+                token,
+                container: {
+                    classList: { contains: () => active },
+                    querySelector: (selector: string) => selector === '.selection-stats' ? stats : { focus },
+                },
+                wrapper: { classList: { toggle } },
+                searchVisible: false,
+                cachedExpression: 'old expression',
+                cachedHtml: 'old HTML',
+                cachedFullExpression: 'old full expression',
+                cachedFullHtml: 'old full HTML',
+            };
+            return {
+                token, stats, context, toggle, focus,
+                receive: (message: Record<string, unknown>) => runInNewContext(
+                    `${handler![0]}\nonMessage({ data: message });`,
+                    Object.assign(context, { message }),
+                ),
+            };
+        }
+
+        it.each([true, false])('applies owned stats and expression replies with active=%s', active => {
+            const receiver = createReceiver(active);
+            receiver.receive({ command: 'setSelectionStats', text: 'Sum: 60', _token: receiver.token });
+            expect(receiver.stats).toEqual({ textContent: 'Sum: 60', hidden: false });
+            receiver.receive({
+                command: 'setExpression', expression: 'new expression', html: 'new HTML',
+                fullExpression: 'new full expression', fullHtml: 'new full HTML', _token: receiver.token,
+            });
+            expect(receiver.context).toMatchObject({
+                cachedExpression: 'new expression', cachedHtml: 'new HTML',
+                cachedFullExpression: 'new full expression', cachedFullHtml: 'new full HTML',
+            });
+            receiver.receive({ command: 'setSelectionStats', text: '', _token: receiver.token });
+            expect(receiver.stats).toEqual({ textContent: '', hidden: true });
+        });
+
+        it.each(['other-table', undefined])('ignores stats and expression replies with token=%s', token => {
+            const receiver = createReceiver(true);
+            receiver.receive({ command: 'setSelectionStats', text: 'wrong statistics', _token: token });
+            receiver.receive({
+                command: 'setExpression', expression: 'wrong expression', html: 'wrong HTML',
+                fullExpression: 'wrong full expression', fullHtml: 'wrong full HTML', _token: token,
+            });
+            expect(receiver.stats).toEqual({ textContent: 'old statistics', hidden: false });
+            expect(receiver.context).toMatchObject({
+                cachedExpression: 'old expression', cachedHtml: 'old HTML',
+                cachedFullExpression: 'old full expression', cachedFullHtml: 'old full HTML',
+            });
+        });
+
+        it.each([true, false])('keeps broadcast search active-tab-only with active=%s', active => {
+            const receiver = createReceiver(active);
+            receiver.receive({ command: 'toggleSearch' });
+            expect(receiver.context.searchVisible).toBe(active);
+            expect(receiver.toggle).toHaveBeenCalledTimes(active ? 1 : 0);
+            expect(receiver.focus).toHaveBeenCalledTimes(active ? 1 : 0);
+        });
+
+        it('tokens stats and both full-table and selected-subset expression replies', async () => {
+            const webview = createMockWebView();
+            const p = new DataTableProvider(createMockServer(async () => 'expression'), clipboard);
+            p.createView(webview, make2dTable());
+            const html: string = webview.setContent.mock.calls[0]![0];
+            const token = html.match(/var token = '(dt-[a-z0-9]+)'/)![1]!;
+            await vi.waitFor(() => expect(webview.invoke).toHaveBeenCalledWith(
+                'setExpression', expect.objectContaining({ _token: token }),
+            ));
+            webview.invoke.mockClear();
+            webview.simulateMessage({
+                command: 'setSelection', selection: { rows: [0], cols: [1] }, _token: token,
+            });
+            expect(webview.invoke).toHaveBeenCalledWith(
+                'setSelectionStats', expect.objectContaining({ text: expect.stringContaining('Sum: 10'), _token: token }),
+            );
+            await vi.waitFor(() => expect(webview.invoke).toHaveBeenCalledWith(
+                'setExpression', expect.objectContaining({ _token: token }),
+            ));
+        });
+    });
 
     describe('token scoping', () => {
         it('generates unique tokens for different views', () => {
