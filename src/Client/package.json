@@ -2338,6 +2338,7 @@
     ]
   },
   "dependencies": {
+    "azure-kusto-data": "7.2.0",
     "fast-xml-parser": "^5.10.1",
     "vscode-languageclient": "^9.0.0"
   },
@@ -2347,6 +2348,7 @@
     "@types/vscode": "^1.90.0",
     "@vscode/test-cli": "^0.0.15",
     "@vscode/test-electron": "^2.5.2",
+    "@vscode/test-web": "^0.0.81",
     "esbuild": "^0.28.1",
     "eslint": "^9.0.0",
     "typescript": "^5.0.0",
