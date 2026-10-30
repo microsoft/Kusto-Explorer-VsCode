@@ -24,9 +24,6 @@
     "onLanguageModelTool:msKustoExplorer_getClusters",
     "onChatParticipant:msKustoExplorer"
   ],
-  "extensionDependencies": [
-    "ms-dotnettools.vscode-dotnet-runtime"
-  ],
   "main": "./dist/extension.js",
   "scripts": {
     "compile": "esbuild ./extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --sourcemap",

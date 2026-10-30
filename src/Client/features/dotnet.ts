@@ -51,13 +51,59 @@ async function findSystemDotnet(): Promise<string | undefined> {
     }
 }
 
+const DOTNET_RUNTIME_EXTENSION_ID = 'ms-dotnettools.vscode-dotnet-runtime';
+const EXTENSION_REGISTRATION_TIMEOUT_MS = 30_000;
+
 /**
- * Acquires the .NET runtime using the ms-dotnettools.vscode-dotnet-runtime extension.
+ * Installs the .NET runtime acquisition extension. It is not declared in
+ * extensionDependencies because it has no web build, and a dependency the web
+ * extension host cannot load stops this extension from activating there.
+ * @returns The installed extension, or undefined if installation failed.
+ */
+async function installDotnetRuntimeExtension(): Promise<vscode.Extension<unknown> | undefined> {
+    log(`Installing ${DOTNET_RUNTIME_EXTENSION_ID}`);
+    try {
+        await vscode.window.withProgress(
+            { location: vscode.ProgressLocation.Notification, title: 'Kusto Explorer: installing the .NET Install Tool extension...' },
+            () => Promise.resolve(vscode.commands.executeCommand('workbench.extensions.installExtension', DOTNET_RUNTIME_EXTENSION_ID))
+        );
+    } catch (error) {
+        log(`Installing ${DOTNET_RUNTIME_EXTENSION_ID} failed: ${error instanceof Error ? error.message : String(error)}`);
+        return undefined;
+    }
+    return waitForExtension(DOTNET_RUNTIME_EXTENSION_ID, EXTENSION_REGISTRATION_TIMEOUT_MS);
+}
+
+/** Resolves once a newly installed extension is registered with the extension host. */
+function waitForExtension(id: string, timeoutMs: number): Promise<vscode.Extension<unknown> | undefined> {
+    const existing = vscode.extensions.getExtension(id);
+    if (existing) {
+        return Promise.resolve(existing);
+    }
+    return new Promise(resolve => {
+        const finish = (extension: vscode.Extension<unknown> | undefined) => {
+            clearTimeout(timer);
+            listener.dispose();
+            resolve(extension);
+        };
+        const listener = vscode.extensions.onDidChange(() => {
+            const extension = vscode.extensions.getExtension(id);
+            if (extension) {
+                finish(extension);
+            }
+        });
+        const timer = setTimeout(() => finish(vscode.extensions.getExtension(id)), timeoutMs);
+    });
+}
+
+/**
+ * Acquires the .NET runtime using the ms-dotnettools.vscode-dotnet-runtime extension,
+ * installing that extension first if needed.
  * @returns The path to the dotnet executable, or undefined if acquisition failed.
  */
 async function acquireDotnetFromExtension(): Promise<string | undefined> {
     try {
-        const dotnetExtension = vscode.extensions.getExtension('ms-dotnettools.vscode-dotnet-runtime');
+        const dotnetExtension = vscode.extensions.getExtension(DOTNET_RUNTIME_EXTENSION_ID) ?? await installDotnetRuntimeExtension();
         if (!dotnetExtension) {
             log('.NET Runtime acquisition extension not installed');
             return undefined;
