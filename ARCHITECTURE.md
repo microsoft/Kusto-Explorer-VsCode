@@ -218,7 +218,7 @@ Features are grouped by responsibility. Key ones:
 | **Scratch pads** | `scratchPadManager.ts`, `scratchPadPanel.ts` | In-memory `.kql` documents (custom `kusto-scratchpad:` scheme) that need no file on disk. |
 | **History** | `historyManager.ts`, `historyPanel.ts` | Record executed queries + results and let users revisit them. |
 | **Entities** | `entityDefinitionProvider.ts` | Virtual read-only documents (`kusto-entity:` scheme) showing an entity's `CREATE` statement for go-to-definition. |
-| **Import** | `importer.ts`, `importManager.ts`, `kustoExplorerLocalData.ts` | Import connections / scratch pads from a local desktop Kusto Explorer install (desktop only) or from chosen files ("Import from File…", both hosts); export connections as JSON. |
+| **Import** | `importer.ts`, `importManager.ts`, `kustoExplorerLocalData.ts` | Import connections / scratch pads from a local desktop Kusto Explorer install (desktop only) or from chosen files ("Import from File…", both hosts); export connections as JSON, with secret connection-string keywords (passwords, application keys, tokens) removed. |
 | **Copilot** | `copilot.ts` | Registers language-model tools so Copilot can read schema, run, and diagnose queries. |
 | **Web** | `webServer.ts`, `kustoWebClient.ts`, `kustoResponse.ts` | `IServer` for VS Code for the Web; Kusto REST client on `azure-kusto-data` (one client per request so cancel is scoped); mapping of raw responses to the shapes the C# server returns. |
 | **Infra** | `server.ts`, `lspServer.ts`, `activation.ts`, `fileStore.ts`, `dotnet.ts`, `clipboard.ts`, `kustoLiteral.ts` | Server seam and LSP client; shared activation; host-independent file storage; .NET runtime discovery; clipboard; KQL literal/identifier helpers. |

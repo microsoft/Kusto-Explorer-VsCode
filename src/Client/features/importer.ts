@@ -23,6 +23,8 @@ const SUPPRESS_IMPORT_SETTING = 'connections.suppressKustoExplorerImportPrompt';
 /** Default file name for exported connections. */
 const EXPORT_FILE_NAME = 'kusto-connections.json';
 
+const SECRETS_NOT_EXPORTED_MESSAGE = "Connection secrets (passwords, application keys and tokens) aren't included in exports.";
+
 // =============================================================================
 // Importer Class
 // =============================================================================
@@ -205,8 +207,11 @@ export class Importer {
                 parts.push(`${result.importedScratchPads} scratch pad document${result.importedScratchPads !== 1 ? 's' : ''}`);
             }
             const skippedMsg = result.skippedConnections > 0 ? ` (${result.skippedConnections} duplicates skipped)` : '';
+            const secretsMsg = result.importedConnectionsExport && result.importedConnections > 0
+                ? ` ${SECRETS_NOT_EXPORTED_MESSAGE}`
+                : '';
             if (parts.length > 0) {
-                vscode.window.showInformationMessage(`Imported ${parts.join(' and ')}${skippedMsg}.`);
+                vscode.window.showInformationMessage(`Imported ${parts.join(' and ')}${skippedMsg}.${secretsMsg}`);
             } else if (result.skippedConnections > 0) {
                 vscode.window.showInformationMessage(
                     `All ${result.skippedConnections} connection${result.skippedConnections !== 1 ? 's' : ''} already exist.`
@@ -273,7 +278,9 @@ export class Importer {
         try {
             await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(this.importManager.exportConnections()));
             const count = this.connections.getConfiguredConnections().length;
-            vscode.window.showInformationMessage(`Exported ${count} connection${count !== 1 ? 's' : ''} to ${uriFileName(uri)}.`);
+            vscode.window.showInformationMessage(
+                `Exported ${count} connection${count !== 1 ? 's' : ''} to ${uriFileName(uri)}. ${SECRETS_NOT_EXPORTED_MESSAGE}`
+            );
         } catch (e) {
             const message = e instanceof Error ? e.message : String(e);
             vscode.window.showErrorMessage(`Failed to export connections: ${message}`);

@@ -98,6 +98,8 @@ export interface ImportFilesResult {
     unrecognizedFiles: string[];
     /** Group connection files referenced by a groups file that couldn't be read. */
     missingGroupFiles: string[];
+    /** True if any file was a connections export, whose connections come without their secrets. */
+    importedConnectionsExport: boolean;
 }
 
 /** A group of servers to import; an undefined name means the root level. */
@@ -341,6 +343,7 @@ export class ImportManager {
             importedScratchPads: 0,
             unrecognizedFiles: [],
             missingGroupFiles: [],
+            importedConnectionsExport: false,
         };
         const recoveryFiles: KustoExplorerRecoveryFile[] = [];
 
@@ -355,6 +358,7 @@ export class ImportManager {
             switch (kind) {
                 case 'connectionsExport':
                     groups.push(...exportToImportGroups(JSON.parse(file.text) as ConnectionsExport));
+                    result.importedConnectionsExport = true;
                     break;
                 case 'connectionsXml':
                     if (!referencedFileNames.has(file.name.toLowerCase())) {
@@ -396,12 +400,19 @@ export class ImportManager {
 
     // ─── Export Connections ──────────────────────────────────────────
 
-    /** Serializes all configured servers and groups to this extension's JSON export format. */
+    /**
+     * Serializes all configured servers and groups to this extension's JSON export format.
+     * Secrets (passwords, application keys, tokens, certificate private keys) are removed
+     * from the connection strings so the file is safe to share.
+     */
     exportConnections(): string {
+        const stripServer = (server: ServerInfo): ServerInfo =>
+            ({ ...server, connection: removeConnectionStringSecrets(server.connection) });
         const data: ConnectionsExport = {
             format: CONNECTIONS_EXPORT_FORMAT,
             version: 1,
-            items: this.connections.getServersAndGroups().items,
+            items: this.connections.getServersAndGroups().items.map(item =>
+                isServerGroup(item) ? { ...item, servers: item.servers.map(stripServer) } : stripServer(item)),
         };
         return JSON.stringify(data, null, 2);
     }
@@ -432,6 +443,79 @@ export function parseDatabaseFromConnectionString(connectionString: string): str
         return undefined;
     }
     return database;
+}
+
+/**
+ * Secret-bearing connection string keywords and their aliases, lowercased with whitespace
+ * removed. Taken from the keywords Kusto.Data's KustoConnectionStringBuilder masks
+ * (Password, Application Key, Application Token, User Token) plus the certificate private
+ * key keyword azure-kusto-data marks as secret. A client secret is the Application Key.
+ */
+export const SECRET_CONNECTION_STRING_KEYWORDS: ReadonlySet<string> = new Set([
+    'password', 'pwd',
+    'applicationkey', 'appkey',
+    'applicationtoken', 'apptoken',
+    'usertoken', 'usrtoken',
+    'applicationcertificateprivatekey',
+]);
+
+/**
+ * Removes secret-bearing `keyword=value` parts from a Kusto connection string, keeping every
+ * other part verbatim. Keywords match case-insensitively and ignoring whitespace. Values may be
+ * quoted with ' or " (a doubled quote escapes it), so a quoted secret containing ';' is removed
+ * whole; an unterminated quote removes the rest of the string.
+ */
+export function removeConnectionStringSecrets(connectionString: string): string {
+    const kept: string[] = [];
+    let removed = false;
+    let i = 0;
+    while (i < connectionString.length) {
+        const start = i;
+        // Keyword: up to the first '=' that isn't doubled ('==' is a literal '=' in a keyword).
+        let eq = -1;
+        while (i < connectionString.length && connectionString[i] !== ';') {
+            if (connectionString[i] === '=') {
+                if (connectionString[i + 1] === '=') {
+                    i += 2;
+                    continue;
+                }
+                eq = i;
+                break;
+            }
+            i++;
+        }
+        if (eq >= 0) {
+            i = eq + 1;
+            while (i < connectionString.length && /\s/.test(connectionString[i]!)) {
+                i++;
+            }
+            const quote = connectionString[i];
+            if (quote === '"' || quote === "'") {
+                i++;
+                while (i < connectionString.length) {
+                    if (connectionString[i] === quote) {
+                        if (connectionString[i + 1] !== quote) {
+                            break;
+                        }
+                        i++;
+                    }
+                    i++;
+                }
+            }
+            while (i < connectionString.length && connectionString[i] !== ';') {
+                i++;
+            }
+        }
+        const part = connectionString.substring(start, i);
+        i++;
+        const keyword = eq >= 0 ? connectionString.substring(start, eq).replace(/==/g, '=').replace(/\s+/g, '').toLowerCase() : undefined;
+        if (keyword !== undefined && SECRET_CONNECTION_STRING_KEYWORDS.has(keyword)) {
+            removed = true;
+        } else {
+            kept.push(part);
+        }
+    }
+    return removed ? kept.join(';') : connectionString;
 }
 
 /**

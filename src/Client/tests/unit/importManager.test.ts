@@ -12,6 +12,7 @@ import {
     parseConnectionsXml,
     parseRecoveryFile,
     classifyImportFile,
+    removeConnectionStringSecrets,
     ImportManager,
     CONNECTIONS_EXPORT_FORMAT,
 } from '../../features/importManager';
@@ -643,5 +644,111 @@ describe('ImportManager connections export', () => {
             [{ connection: 'https://b.kusto.windows.net', cluster: 'b.kusto.windows.net', serverKind: 'Engine' }, 'G'],
         ]);
         expect(connections.addServerGroup).toHaveBeenCalledWith({ name: 'G', servers: [] });
+    });
+
+    it('removes secrets from servers and grouped servers, keeping other fields', () => {
+        const base = 'Data Source=https://a.kusto.windows.net;Initial Catalog=Db;AAD Federated Security=True;Application Client Id=app-id';
+        const mgr = new ImportManager(createMockScratchPadManager(), createMockConnectionManager({
+            getServersAndGroups: vi.fn(() => ({
+                items: [
+                    { connection: `${base};Application Key=fake-value`, cluster: 'a.kusto.windows.net', displayName: 'A', serverKind: 'Engine' },
+                    { name: 'G', servers: [{ connection: `${base};User Token=fake-value`, cluster: 'a.kusto.windows.net' }] },
+                ],
+            })),
+        }));
+
+        const exported = mgr.exportConnections();
+
+        expect(exported).not.toContain('fake-value');
+        expect(JSON.parse(exported).items).toEqual([
+            { connection: base, cluster: 'a.kusto.windows.net', displayName: 'A', serverKind: 'Engine' },
+            { name: 'G', servers: [{ connection: base, cluster: 'a.kusto.windows.net' }] },
+        ]);
+    });
+
+    it('round-trips a connection whose secret was removed by the export', async () => {
+        const exported = new ImportManager(createMockScratchPadManager(), createMockConnectionManager({
+            getServersAndGroups: vi.fn(() => ({
+                items: [{ connection: 'Data Source=https://a.kusto.windows.net;Initial Catalog=Db;AppClientId=app-id;AppKey=fake-value', cluster: 'a.kusto.windows.net' }],
+            })),
+        })).exportConnections();
+
+        const connections = createMockConnectionManager();
+        const result = await new ImportManager(createMockScratchPadManager(), connections)
+            .importFiles([{ name: 'kusto-connections.json', text: exported }]);
+
+        expect(result.importedConnections).toBe(1);
+        expect(result.importedConnectionsExport).toBe(true);
+        expect(connections.addServer).toHaveBeenCalledWith(
+            { connection: 'Data Source=https://a.kusto.windows.net;Initial Catalog=Db;AppClientId=app-id', cluster: 'a.kusto.windows.net' },
+            undefined,
+        );
+    });
+
+    it('does not flag Kusto Explorer XML imports as connections exports', async () => {
+        const result = await new ImportManager(createMockScratchPadManager(), createMockConnectionManager())
+            .importFiles([{ name: 'UserConnections.xml', text: USER_CONNECTIONS_XML }]);
+
+        expect(result.importedConnectionsExport).toBe(false);
+    });
+});
+
+describe('removeConnectionStringSecrets', () => {
+    const keep = 'Data Source=https://a.kusto.windows.net;Initial Catalog=Db';
+
+    it.each([
+        'Password', 'PWD',
+        'Application Key', 'AppKey',
+        'Application Token', 'AppToken',
+        'User Token', 'UserToken', 'UsrToken',
+        'Application Certificate PrivateKey',
+    ])('removes %s in any case and spacing', keyword => {
+        for (const variant of [keyword, keyword.toLowerCase(), keyword.toUpperCase(), `  ${keyword} `, keyword.replace(/ /g, '')]) {
+            expect(removeConnectionStringSecrets(`${keep};${variant}=fake-value;Fed=True`)).toBe(`${keep};Fed=True`);
+            expect(removeConnectionStringSecrets(`${variant} = fake-value;${keep}`)).toBe(keep);
+        }
+    });
+
+    it('removes quoted secret values containing separators and escaped quotes', () => {
+        expect(removeConnectionStringSecrets(`${keep};Password="fake;value""with=quote";Fed=True`)).toBe(`${keep};Fed=True`);
+        expect(removeConnectionStringSecrets(`${keep};AppKey='fake;''value';Fed=True`)).toBe(`${keep};Fed=True`);
+        expect(removeConnectionStringSecrets(`${keep};Password= "fake;value" ;Fed=True`)).toBe(`${keep};Fed=True`);
+    });
+
+    it('removes the rest of the string after an unterminated quoted secret', () => {
+        expect(removeConnectionStringSecrets(`${keep};Password="fake;Fed=True`)).toBe(keep);
+    });
+
+    it('removes every secret in a connection string', () => {
+        expect(removeConnectionStringSecrets(`${keep};PWD=fake-value;AppKey=fake-value;UsrToken=fake-value;AppToken=fake-value`)).toBe(keep);
+    });
+
+    it('preserves non-secret fields verbatim', () => {
+        const connection = [
+            'Data Source=https://a.kusto.windows.net:443',
+            'Initial Catalog=Db',
+            'AAD Federated Security=True',
+            'Application Client Id=app-id',
+            'Authority Id=tenant-id',
+            'Application Certificate Thumbprint=ABCDEF',
+            'Application Certificate Subject Distinguished Name=CN=app',
+            'User ID=someone@contoso.com',
+            'dSTS Federated Security=False',
+            'Description="quoted; value"',
+        ].join(';');
+
+        expect(removeConnectionStringSecrets(connection)).toBe(connection);
+    });
+
+    it('keeps a bare URL or host unchanged', () => {
+        expect(removeConnectionStringSecrets('https://a.kusto.windows.net/Db')).toBe('https://a.kusto.windows.net/Db');
+        expect(removeConnectionStringSecrets('a.kusto.windows.net;Fed=True')).toBe('a.kusto.windows.net;Fed=True');
+        expect(removeConnectionStringSecrets('https://a.kusto.windows.net;Password=fake-value')).toBe('https://a.kusto.windows.net');
+        expect(removeConnectionStringSecrets('')).toBe('');
+    });
+
+    it('does not treat keywords that merely contain a secret keyword as secrets', () => {
+        const connection = `${keep};Password Hint=x;Pwd2=y;My AppKey=z`;
+        expect(removeConnectionStringSecrets(connection)).toBe(connection);
     });
 });
