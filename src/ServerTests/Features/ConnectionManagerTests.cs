@@ -59,6 +59,20 @@ public class ConnectionManagerTests
         Assert.AreSame(connection1, connection2);
     }
 
+    [TestMethod]
+    public void GetOrAddConnection_HostWithoutShortName_ReturnsConnection()
+    {
+        // KustoFacts.GetShortHostName returns null for a single-label host such as
+        // "localhost", so there is no short-name alias to register.
+        var manager = new ConnectionManager();
+
+        var connection = manager.GetOrAddConnection("Data Source=http://localhost:11011;Initial Catalog=MyDatabase");
+
+        Assert.IsNotNull(connection);
+        Assert.AreEqual("localhost", connection.Cluster);
+        Assert.IsTrue(manager.TryGetConnection("localhost", out _));
+    }
+
     #endregion
 
     #region TryGetConnection Tests

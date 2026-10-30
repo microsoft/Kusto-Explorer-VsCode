@@ -81,7 +81,7 @@ public class ConnectionManager : IConnectionManager
             ImmutableInterlocked.GetOrAdd(ref _clusterToInfoMap, cluster, info);
 
             var shortName = KustoFacts.GetShortHostName(cluster, _defaultDomain);
-            if (shortName != cluster)
+            if (!string.IsNullOrEmpty(shortName) && shortName != cluster)
             {
                 ImmutableInterlocked.GetOrAdd(ref _clusterToInfoMap, shortName, info);
             }
