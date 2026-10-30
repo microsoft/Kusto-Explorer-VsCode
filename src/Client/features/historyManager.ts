@@ -17,7 +17,8 @@ import { toText, uriFileName, type IFileStore } from './fileStore';
 const MAX_HISTORY_ENTRIES = 200;
 
 /** Filename for the lightweight index that powers the tree view. */
-const INDEX_FILE = 'history-index.json';
+export const HISTORY_INDEX_FILE = 'history-index.json';
+const INDEX_FILE = HISTORY_INDEX_FILE;
 
 /** Lightweight metadata for a history entry (stored in the index file). */
 export interface HistoryEntry {

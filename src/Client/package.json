@@ -26,7 +26,7 @@
   ],
   "main": "./dist/extension.js",
   "scripts": {
-    "compile": "esbuild ./extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --sourcemap",
+    "compile": "esbuild ./extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --sourcemap && npm run compile-web",
     "watch": "esbuild ./extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --sourcemap --watch",
     "type-check": "tsc --noEmit",
     "lint": "eslint . --max-warnings 0",
@@ -41,7 +41,10 @@
     "prepackage": "node -e \"require('fs').copyFileSync('../../LICENSE','./LICENSE')\" && npm run compile && npm run build-release-server",
     "package": "vsce package",
     "package:version": "npm run prepackage && vsce package --no-update-package-json $VERSION",
-    "publish": "vsce publish"
+    "publish": "vsce publish",
+    "compile-web": "node scripts/build-web.mjs",
+    "watch-web": "node scripts/build-web.mjs --watch",
+    "test:web": "npm run compile-web && node tests/web/runTest.mjs"
   },
   "contributes": {
     "chatParticipants": [
@@ -2386,5 +2389,6 @@
   },
   "allowScripts": {
     "esbuild@0.28.1": true
-  }
+  },
+  "browser": "./dist/web/extension.js"
 }

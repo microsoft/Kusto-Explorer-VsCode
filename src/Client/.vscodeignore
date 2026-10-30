@@ -1,6 +1,8 @@
 # Source files
 features/**/*.ts
+web/**
 *.ts
+scripts/**
 tsconfig.json
 
 # Build artifacts not needed in package
@@ -9,6 +11,7 @@ node_modules/**
 **/*.map
 .vscode/**
 .vscode-test/**
+.vscode-test-web/**
 **/*.vsix
 
 # Don't include debug symbols
