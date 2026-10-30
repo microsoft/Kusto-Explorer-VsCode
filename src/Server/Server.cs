@@ -753,7 +753,7 @@ public class Server : LspServer, ILogger, ISettingSource, IStorage, IAuthenticat
                     {
                         var _ = this.SendWindowLogMessageAsync($"Signature help failed: {result.Error}", LSP.MessageType.Error);
                     }
-                    else if (result.Value is { } info)
+                    else if (result.Value is { Signatures.Count: > 0 } info)
                     {
                         return Task.FromResult<LSP.SignatureHelp?>(ToLspSignatureHelp(info));
                     }

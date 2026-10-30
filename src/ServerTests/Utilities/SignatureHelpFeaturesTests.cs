@@ -95,6 +95,34 @@ public class SignatureHelpFeaturesTests
         Assert.AreEqual(-1, info.ActiveParameter);
     }
 
+    private const string TabularFirstFunction = "let f = (T: (a: long), x: long, y: long) { T }; ";
+
+    [TestMethod]
+    public void InvokedFunction_ParametersAreOffsetByTheImplicitTabularArgument()
+    {
+        const string call = TabularFirstFunction + "print a = 1 | invoke f(";
+
+        Assert.AreEqual(1, GetHelp(call + "$)").ActiveParameter, "the first written argument is the second parameter");
+        Assert.AreEqual(1, GetHelp(call + "1$)").ActiveParameter);
+        Assert.AreEqual(2, GetHelp(call + "1, $)").ActiveParameter);
+        Assert.AreEqual(2, GetHelp(call + "1, 2$)").ActiveParameter);
+    }
+
+    [TestMethod]
+    public void InvokedFunction_NamedArgumentStillActivatesItsParameterByName()
+    {
+        Assert.AreEqual(2, GetHelp(TabularFirstFunction + "print a = 1 | invoke f(y = $").ActiveParameter);
+    }
+
+    [TestMethod]
+    public void FunctionCalledDirectly_ParametersAreNotOffset()
+    {
+        const string call = TabularFirstFunction + "print f(datatable(a: long)[], ";
+
+        Assert.AreEqual(1, GetHelp(call + "$)").ActiveParameter);
+        Assert.AreEqual(2, GetHelp(call + "1, $)").ActiveParameter);
+    }
+
     [TestMethod]
     public void LocalFunction_LabelAndParameterOffsets()
     {
@@ -215,7 +243,10 @@ public class SignatureHelpFeaturesTests
     {
         var result = Run(queryWithCursor);
         Assert.IsNull(result.Error, result.Error);
-        Assert.IsNull(result.Value);
+        Assert.IsNotNull(result.Value, "no result is an empty success");
+        Assert.AreEqual(0, result.Value.Signatures.Count);
+        Assert.AreEqual(-1, result.Value.ActiveSignature);
+        Assert.AreEqual(-1, result.Value.ActiveParameter);
     }
 
     private static FeatureResult<SignatureHelpInfo> Run(string queryWithCursor)

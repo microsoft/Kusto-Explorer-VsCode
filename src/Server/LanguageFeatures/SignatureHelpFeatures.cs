@@ -19,7 +19,13 @@ namespace Kusto.Vscode;
 public sealed record SignatureHelpInfo(
     ImmutableList<SignatureInfo> Signatures,
     int ActiveSignature,
-    int ActiveParameter);
+    int ActiveParameter)
+{
+    /// <summary>
+    /// No signatures: the position is not inside the arguments of a call to a known function.
+    /// </summary>
+    public static readonly SignatureHelpInfo None = new(ImmutableList<SignatureInfo>.Empty, -1, -1);
+}
 
 /// <summary>
 /// One displayable signature, e.g. <c>substring(source: string, startingIndex: long, [length: long]): string</c>.
@@ -47,7 +53,7 @@ public static class SignatureHelpFeatures
 {
     /// <summary>
     /// Gets the signature help for the innermost function call whose argument list contains the position.
-    /// Returns <see cref="FeatureResult{T}.None"/> when the position is not inside a call to a known function.
+    /// Succeeds with <see cref="SignatureHelpInfo.None"/> when the position is not inside a call to a known function.
     /// </summary>
     public static FeatureResult<SignatureHelpInfo> GetSignatureHelp(KustoCode code, int position, CancellationToken cancellationToken)
     {
@@ -55,15 +61,24 @@ public static class SignatureHelpFeatures
         {
             var call = FindEnclosingCall(code, position, cancellationToken);
             if (call == null || GetFunctionSymbol(call) is not { } function)
-                return FeatureResult<SignatureHelpInfo>.None;
+                return FeatureResult<SignatureHelpInfo>.Success(SignatureHelpInfo.None);
 
             var signatures = function.Signatures.Where(s => !s.IsHidden).ToList();
             if (signatures.Count == 0)
-                return FeatureResult<SignatureHelpInfo>.None;
+                return FeatureResult<SignatureHelpInfo>.Success(SignatureHelpInfo.None);
 
             var argumentList = call.ArgumentList.Expressions;
             var arguments = argumentList.Select(a => a.Element).ToList();
             var argumentIndex = GetArgumentIndex(argumentList, position);
+
+            // The binder maps the implicit value of "T | invoke f(...)" onto f's first parameter,
+            // so the arguments as written are one parameter further along.
+            if (GetImplicitInvokeArgument(call) is { } implicitArgument)
+            {
+                arguments.Insert(0, implicitArgument);
+                argumentIndex++;
+            }
+
             var argumentCount = Math.Max(arguments.Count, argumentIndex + 1);
 
             var activeSignature = GetActiveSignature(call, signatures, argumentCount);
@@ -80,6 +95,21 @@ public static class SignatureHelpFeatures
         {
             return FeatureResult<SignatureHelpInfo>.Failure(ex.Message);
         }
+    }
+
+    // Mirrors the binder: a dotted path leading to the call is part of the invoked function.
+    private static Expression? GetImplicitInvokeArgument(FunctionCallExpression call)
+    {
+        Expression function = call;
+        while (function.Parent is PathExpression path && path.Selector == function)
+            function = path.Expression;
+
+        if (function.Parent is not InvokeOperator invoke || invoke.Function != function)
+            return null;
+
+        return invoke.Parent is PipeExpression pipe && pipe.Operator == invoke
+            ? pipe.Expression
+            : call.Name;
     }
 
     /// <summary>

@@ -4,8 +4,8 @@
 namespace Kusto.Vscode;
 
 /// <summary>
-/// The outcome of a host-independent language feature: a value, nothing (the feature has nothing
-/// to offer at that position), or an error message.
+/// The outcome of a host-independent language feature: a value or an error message.
+/// "Nothing found" is a successful empty value, not an error.
 /// Cancellation is not an error; it surfaces as <see cref="OperationCanceledException"/>.
 /// </summary>
 public sealed class FeatureResult<T> where T : class
@@ -17,7 +17,7 @@ public sealed class FeatureResult<T> where T : class
     }
 
     /// <summary>
-    /// The value, or null when the feature produced nothing or failed.
+    /// The value, or null when the feature failed.
     /// </summary>
     public T? Value { get; }
 
@@ -31,6 +31,4 @@ public sealed class FeatureResult<T> where T : class
     public static FeatureResult<T> Success(T value) => new(value, null);
 
     public static FeatureResult<T> Failure(string error) => new(null, error);
-
-    public static readonly FeatureResult<T> None = new(null, null);
 }

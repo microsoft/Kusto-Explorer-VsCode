@@ -139,6 +139,37 @@ public class DocumentSymbolFeaturesTests
         CollectionAssert.AreEqual(new[] { ("a", "a"), ("b", "b") }, found);
     }
 
+    private static string NestedFunctions(int depth) =>
+        string.Concat(Enumerable.Range(0, depth).Select(i => $"let f{i} = () {{ "))
+        + "print 1"
+        + string.Concat(Enumerable.Repeat(" }; print 0", depth));
+
+    private static int Depth(IReadOnlyList<DocumentSymbolInfo> symbols) =>
+        symbols.Count == 0 ? 0 : 1 + symbols.Max(s => Depth(s.Children));
+
+    [TestMethod]
+    public void NestingBeyondTheLimit_KeepsTheOutermostLevelsAndTheirRanges()
+    {
+        var text = NestedFunctions(40);
+        var symbols = GetSymbols(text);
+
+        Assert.AreEqual(DocumentSymbolFeatures.MaxDepth, Depth(symbols));
+
+        var deepest = symbols.Single();
+        for (var level = 1; level < DocumentSymbolFeatures.MaxDepth; level++)
+            deepest = deepest.Children.Single();
+
+        Assert.AreEqual($"f{DocumentSymbolFeatures.MaxDepth - 1}", deepest.Name);
+        Assert.AreEqual(0, deepest.Children.Count, "the function at the limit keeps its range but not its body's symbols");
+        StringAssert.StartsWith(text.Substring(deepest.Start, deepest.Length), $"let f{DocumentSymbolFeatures.MaxDepth - 1} = () {{");
+    }
+
+    [TestMethod]
+    public void NestingAtTheLimit_IsNotCut()
+    {
+        Assert.AreEqual(DocumentSymbolFeatures.MaxDepth, Depth(GetSymbols(NestedFunctions(DocumentSymbolFeatures.MaxDepth))));
+    }
+
     [TestMethod]
     public void CancelledToken_Throws()
     {

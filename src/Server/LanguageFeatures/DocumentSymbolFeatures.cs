@@ -60,6 +60,13 @@ public sealed record DocumentSymbolInfo(
 public static class DocumentSymbolFeatures
 {
     /// <summary>
+    /// The deepest level of function nesting reported, counting a top-level symbol as level 1.
+    /// A function at this level keeps its range but its body is not read, so it has no children.
+    /// This keeps the tree within what JSON serializers will write.
+    /// </summary>
+    public const int MaxDepth = 16;
+
+    /// <summary>
     /// Gets the symbols declared by the block's statements, with symbols declared inside function bodies as children.
     /// </summary>
     public static FeatureResult<ImmutableList<DocumentSymbolInfo>> GetDocumentSymbols(KustoCode code, CancellationToken cancellationToken)
@@ -74,7 +81,7 @@ public static class DocumentSymbolFeatures
             };
 
             var symbols = statements != null
-                ? GetStatementSymbols(statements, cancellationToken)
+                ? GetStatementSymbols(statements, 1, cancellationToken)
                 : ImmutableList<DocumentSymbolInfo>.Empty;
 
             return FeatureResult<ImmutableList<DocumentSymbolInfo>>.Success(symbols);
@@ -89,7 +96,8 @@ public static class DocumentSymbolFeatures
         }
     }
 
-    private static ImmutableList<DocumentSymbolInfo> GetStatementSymbols(SyntaxList<SeparatedElement<Statement>> statements, CancellationToken cancellationToken)
+    // depth is the level of the symbols being listed; a top-level symbol is level 1
+    private static ImmutableList<DocumentSymbolInfo> GetStatementSymbols(SyntaxList<SeparatedElement<Statement>> statements, int depth, CancellationToken cancellationToken)
     {
         var builder = ImmutableList.CreateBuilder<DocumentSymbolInfo>();
 
@@ -100,7 +108,7 @@ public static class DocumentSymbolFeatures
             switch (element.Element)
             {
                 case LetStatement let:
-                    AddLet(builder, let, cancellationToken);
+                    AddLet(builder, let, depth, cancellationToken);
                     break;
 
                 case PatternStatement pattern:
@@ -116,7 +124,7 @@ public static class DocumentSymbolFeatures
                     break;
 
                 case ExpressionStatement { Expression: CustomCommand command }:
-                    AddCommand(builder, command, cancellationToken);
+                    AddCommand(builder, command, depth, cancellationToken);
                     break;
             }
         }
@@ -124,12 +132,12 @@ public static class DocumentSymbolFeatures
         return builder.ToImmutable();
     }
 
-    private static void AddLet(ImmutableList<DocumentSymbolInfo>.Builder builder, LetStatement let, CancellationToken cancellationToken)
+    private static void AddLet(ImmutableList<DocumentSymbolInfo>.Builder builder, LetStatement let, int depth, CancellationToken cancellationToken)
     {
         if (let.Expression is FunctionDeclaration function)
         {
             var isView = function.ViewKeyword is { IsMissing: false, Width: > 0 };
-            AddFunction(builder, let, let.Name, isView ? DocumentSymbolKind.View : DocumentSymbolKind.Function, function, cancellationToken);
+            AddFunction(builder, depth, let, let.Name, isView ? DocumentSymbolKind.View : DocumentSymbolKind.Function, function, cancellationToken);
             return;
         }
 
@@ -159,7 +167,7 @@ public static class DocumentSymbolFeatures
         ["CreateOrAlterMaterializedView"] = DocumentSymbolKind.MaterializedView,
     }.ToImmutableDictionary();
 
-    private static void AddCommand(ImmutableList<DocumentSymbolInfo>.Builder builder, CustomCommand command, CancellationToken cancellationToken)
+    private static void AddCommand(ImmutableList<DocumentSymbolInfo>.Builder builder, CustomCommand command, int depth, CancellationToken cancellationToken)
     {
         if (!CommandKinds.TryGetValue(command.CommandKind, out var kind) || command.Custom is not SyntaxNode custom)
             return;
@@ -188,21 +196,22 @@ public static class DocumentSymbolFeatures
             return;
 
         if (kind == DocumentSymbolKind.Function && function != null)
-            AddFunction(builder, command, name, kind, function, cancellationToken);
+            AddFunction(builder, depth, command, name, kind, function, cancellationToken);
         else
             Add(builder, command, name, kind, detail: null);
     }
 
     private static void AddFunction(
         ImmutableList<DocumentSymbolInfo>.Builder builder,
+        int depth,
         SyntaxNode declaringNode,
         SyntaxNode name,
         DocumentSymbolKind kind,
         FunctionDeclaration function,
         CancellationToken cancellationToken)
     {
-        var children = function.Body != null
-            ? GetStatementSymbols(function.Body.Statements, cancellationToken)
+        var children = function.Body != null && depth < MaxDepth
+            ? GetStatementSymbols(function.Body.Statements, depth + 1, cancellationToken)
             : ImmutableList<DocumentSymbolInfo>.Empty;
 
         Add(builder, declaringNode, name, kind, function.Parameters.ToString(IncludeTrivia.Minimal), children);
