@@ -2,6 +2,7 @@
 // Licensed under the MIT license.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { runInNewContext } from 'node:vm';
 import { DataTableProvider } from '../../features/dataTableProvider';
 import type { IDataTableView } from '../../features/dataTableProvider';
 import type { IWebView } from '../../features/webview';
@@ -574,7 +575,337 @@ describe('SimpleDataTableProvider', () => {
         });
     });
 
+    // ─── selection statistics ───────────────────────────────────────────
+
+    describe('selection statistics', () => {
+        function tokenOf(webview: ReturnType<typeof createMockWebView>): string {
+            const html: string = webview.setContent.mock.calls[0]![0];
+            return html.match(/var token = '(dt-[a-z0-9]+)'/)![1]!;
+        }
+
+        function lastStats(webview: ReturnType<typeof createMockWebView>): string | undefined {
+            const calls = webview.invoke.mock.calls.filter(c => c[0] === 'setSelectionStats');
+            const last = calls[calls.length - 1];
+            return last ? (last[1] as { text: string }).text : undefined;
+        }
+
+        it('publishes aggregates when a numeric selection is reported', () => {
+            const webview = createMockWebView();
+            provider.createView(webview, make2dTable());
+
+            webview.simulateMessage({
+                command: 'setSelection',
+                _token: tokenOf(webview),
+                selection: { rows: [0, 1, 2], cols: [1] },
+            });
+
+            const text = lastStats(webview)!;
+            expect(text).toContain('Count: 3');
+            expect(text).toContain('Sum: 60');
+            expect(text).toContain('Avg: 20');
+            expect(text).toContain('Min: 10');
+            expect(text).toContain('Max: 30');
+        });
+
+        it('publishes count only for a non-numeric selection', () => {
+            const webview = createMockWebView();
+            provider.createView(webview, make2dTable());
+
+            webview.simulateMessage({
+                command: 'setSelection',
+                _token: tokenOf(webview),
+                selection: { rows: [0, 1], cols: [0] },
+            });
+
+            expect(lastStats(webview)).toBe('Count: 2');
+        });
+
+        it('publishes empty text when the selection is cleared', () => {
+            const webview = createMockWebView();
+            provider.createView(webview, make2dTable());
+            const token = tokenOf(webview);
+
+            webview.simulateMessage({ command: 'setSelection', _token: token, selection: { rows: [0], cols: [1] } });
+            webview.simulateMessage({ command: 'setSelection', _token: token, selection: null });
+
+            expect(lastStats(webview)).toBe('');
+        });
+
+        it('renders the status bar element and handler in the page', () => {
+            const webview = createMockWebView();
+            provider.createView(webview, make2dTable());
+            const html: string = webview.setContent.mock.calls[0]![0];
+
+            expect(html).toContain('class="selection-stats"');
+            expect(html).toContain('setSelectionStats');
+        });
+    });
+
+    describe.each(['datatable.sort', 'datatable.page', 'datatable.search'])('%s selection reset', eventName => {
+        it('clears selected cells and anchor, hides statistics, and restores whole-table copy', async () => {
+            const webview = createMockWebView();
+            const view = provider.createView(webview, make2dTable());
+            const html: string = webview.setContent.mock.calls[0]![0];
+            const token = html.match(/var token = '(dt-[a-z0-9]+)'/)![1]!;
+            webview.simulateMessage({
+                command: 'setSelection', _token: token, selection: { rows: [0], cols: [1] },
+            });
+            expect(webview.invoke).toHaveBeenCalledWith('setSelectionStats', { text: expect.stringContaining('Sum: 10'), _token: token });
+            webview.invoke.mockClear();
+
+            const registrations = html.match(/    \/\/ Clear the cell selection[\s\S]*?grid\.on\('datatable\.refresh', reapplyColOrder\);/);
+            expect(registrations).not.toBeNull();
+            const functions = ['currentSelectionIndices', 'postSelectionChange'].map(name => {
+                const match = html.match(new RegExp(`function ${name}\\(\\) \\{[\\s\\S]*?\\n    \\}`));
+                expect(match).not.toBeNull();
+                return match![0];
+            });
+            const handlers = new Map<string, (() => void)[]>();
+            const applySelection = vi.fn();
+            const stampOriginalColIndex = vi.fn();
+            const applyColOrder = vi.fn();
+            const postMessage = vi.fn((message: Record<string, unknown>) => webview.simulateMessage(message));
+            const context = {
+                grid: {
+                    on: (name: string, handler: () => void) => {
+                        handlers.set(name, [...(handlers.get(name) ?? []), handler]);
+                    },
+                },
+                selectedCells: new Set(['0:2']),
+                selAnchor: { r: 0, c: 2 },
+                applySelection,
+                stampOriginalColIndex,
+                applyColOrder,
+                cachedExpression: 'stale expression',
+                cachedHtml: 'stale HTML',
+                tableEl: { querySelector: () => ({ rows: [] }) },
+                window: { _vscodeApi: { postMessage } },
+                token,
+                handlers,
+                eventName,
+            };
+            const state = runInNewContext(`
+                ${registrations![0]}
+                ${functions.join('\n')}
+                handlers.get(eventName).forEach(function(handler) { handler(); });
+                ({ selAnchor: selAnchor, cachedExpression: cachedExpression, cachedHtml: cachedHtml });
+            `, context);
+
+            expect(context.selectedCells.size).toBe(0);
+            expect(state).toEqual({ selAnchor: null, cachedExpression: '', cachedHtml: '' });
+            expect(applySelection).toHaveBeenCalledOnce();
+            expect(postMessage).toHaveBeenCalledExactlyOnceWith({ command: 'setSelection', selection: null, _token: token });
+            expect(webview.invoke).toHaveBeenCalledWith('setSelectionStats', { text: '', _token: token });
+            if (eventName !== 'datatable.sort') {
+                expect(stampOriginalColIndex).toHaveBeenCalledOnce();
+                expect(applyColOrder).toHaveBeenCalledOnce();
+            }
+
+            await view.copyTableAsText();
+            expect(clipboard.copyText).not.toHaveBeenCalled();
+            expect(clipboard.copyItems).toHaveBeenCalledWith(expect.arrayContaining([
+                expect.objectContaining({ format: 'Text', data: 'Category\tValue\nA\t10\nB\t20\nC\t30' }),
+            ]));
+        });
+    });
+
+    describe.each([
+        ['Ctrl+C', { ctrlKey: true, metaKey: false }],
+        ['Cmd+C', { ctrlKey: false, metaKey: true }],
+    ])('%s in the webview', (_shortcut, modifiers) => {
+        const statsText = {};
+        const otherStatsText = {};
+        const gridText = {};
+        let selection: {
+            anchorNode: object | null;
+            focusNode: object | null;
+            isCollapsed: boolean;
+            toString: () => string;
+        } | null;
+        let active: boolean;
+        let activeElement: { tagName: string } | null;
+        let statsElement: { contains: (node: object | null) => boolean } | null;
+        let onKeyDown: string;
+        let token: string;
+        let postMessage: ReturnType<typeof vi.fn>;
+
+        beforeEach(() => {
+            const webview = createMockWebView();
+            provider.createView(webview, make2dTable());
+            const html: string = webview.setContent.mock.calls[0]![0];
+            const handler = html.match(/function onKeyDown\(e\) \{[\s\S]*?\n    \}/);
+            expect(handler).not.toBeNull();
+            onKeyDown = handler![0];
+            token = html.match(/var token = '(dt-[a-z0-9]+)'/)![1]!;
+            selection = null;
+            active = true;
+            activeElement = null;
+            statsElement = { contains: node => node === statsText };
+            postMessage = vi.fn();
+        });
+
+        function selectText(anchorNode = statsText, focusNode = anchorNode): void {
+            selection = { anchorNode, focusNode, isCollapsed: false, toString: () => 'Sum: 60' };
+        }
+
+        function pressCopy(overrides: Record<string, unknown> = {}): ReturnType<typeof vi.fn> {
+            const preventDefault = vi.fn();
+            runInNewContext(`${onKeyDown}\nonKeyDown(event);`, {
+                container: {
+                    classList: { contains: () => active },
+                    querySelector: (selector: string) => selector === '.selection-stats' ? statsElement : null,
+                },
+                document: { activeElement },
+                window: { getSelection: () => selection, _vscodeApi: { postMessage } },
+                token,
+                event: { ...modifiers, shiftKey: false, altKey: false, key: 'c', preventDefault, ...overrides },
+            });
+            return preventDefault;
+        }
+
+        it('leaves selected statistics text to native copy', () => {
+            selectText();
+            expect(pressCopy()).not.toHaveBeenCalled();
+            expect(postMessage).not.toHaveBeenCalled();
+        });
+
+        it.each(['INPUT', 'TEXTAREA'])('preserves native copy in a %s', tagName => {
+            activeElement = { tagName };
+            expect(pressCopy()).not.toHaveBeenCalled();
+            expect(postMessage).not.toHaveBeenCalled();
+        });
+
+        it.each([
+            'no selection', 'collapsed selection', 'empty text', 'grid text',
+            'another table statistics', 'selection ending outside statistics',
+            'selection starting outside statistics', 'missing statistics element',
+        ])('copies grid data with %s', scenario => {
+            selectText();
+            switch (scenario) {
+                case 'no selection': selection = null; break;
+                case 'collapsed selection': selection!.isCollapsed = true; break;
+                case 'empty text': selection!.toString = () => ''; break;
+                case 'grid text': selectText(gridText); break;
+                case 'another table statistics': selectText(otherStatsText); break;
+                case 'selection ending outside statistics': selectText(statsText, gridText); break;
+                case 'selection starting outside statistics': selectText(gridText, statsText); break;
+                case 'missing statistics element': statsElement = null; break;
+            }
+            expect(pressCopy()).toHaveBeenCalledOnce();
+            expect(postMessage).toHaveBeenCalledExactlyOnceWith({ command: 'copyTable', _token: token });
+        });
+
+        it('ignores inactive tables', () => {
+            active = false;
+            expect(pressCopy()).not.toHaveBeenCalled();
+            expect(postMessage).not.toHaveBeenCalled();
+        });
+
+        it('handles uppercase C as grid copy', () => {
+            expect(pressCopy({ key: 'C' })).toHaveBeenCalledOnce();
+            expect(postMessage).toHaveBeenCalledExactlyOnceWith({ command: 'copyTable', _token: token });
+        });
+
+        it.each([{ shiftKey: true }, { altKey: true }, { key: 'x' }])('ignores other shortcuts: %j', overrides => {
+            expect(pressCopy(overrides)).not.toHaveBeenCalled();
+            expect(postMessage).not.toHaveBeenCalled();
+        });
+    });
+
     // ─── token uniqueness ───────────────────────────────────────────────
+
+    describe('table reply routing', () => {
+        function createReceiver(active: boolean) {
+            const webview = createMockWebView();
+            provider.createView(webview, make2dTable());
+            const html: string = webview.setContent.mock.calls[0]![0];
+            const token = html.match(/var token = '(dt-[a-z0-9]+)'/)![1]!;
+            const handler = html.match(/function onMessage\(event\) \{[\s\S]*?\n    \}/);
+            expect(handler).not.toBeNull();
+            const stats = { textContent: 'old statistics', hidden: false };
+            const toggle = vi.fn();
+            const focus = vi.fn();
+            const context = {
+                token,
+                container: {
+                    classList: { contains: () => active },
+                    querySelector: (selector: string) => selector === '.selection-stats' ? stats : { focus },
+                },
+                wrapper: { classList: { toggle } },
+                searchVisible: false,
+                cachedExpression: 'old expression',
+                cachedHtml: 'old HTML',
+                cachedFullExpression: 'old full expression',
+                cachedFullHtml: 'old full HTML',
+            };
+            return {
+                token, stats, context, toggle, focus,
+                receive: (message: Record<string, unknown>) => runInNewContext(
+                    `${handler![0]}\nonMessage({ data: message });`,
+                    Object.assign(context, { message }),
+                ),
+            };
+        }
+
+        it.each([true, false])('applies owned stats and expression replies with active=%s', active => {
+            const receiver = createReceiver(active);
+            receiver.receive({ command: 'setSelectionStats', text: 'Sum: 60', _token: receiver.token });
+            expect(receiver.stats).toEqual({ textContent: 'Sum: 60', hidden: false });
+            receiver.receive({
+                command: 'setExpression', expression: 'new expression', html: 'new HTML',
+                fullExpression: 'new full expression', fullHtml: 'new full HTML', _token: receiver.token,
+            });
+            expect(receiver.context).toMatchObject({
+                cachedExpression: 'new expression', cachedHtml: 'new HTML',
+                cachedFullExpression: 'new full expression', cachedFullHtml: 'new full HTML',
+            });
+            receiver.receive({ command: 'setSelectionStats', text: '', _token: receiver.token });
+            expect(receiver.stats).toEqual({ textContent: '', hidden: true });
+        });
+
+        it.each(['other-table', undefined])('ignores stats and expression replies with token=%s', token => {
+            const receiver = createReceiver(true);
+            receiver.receive({ command: 'setSelectionStats', text: 'wrong statistics', _token: token });
+            receiver.receive({
+                command: 'setExpression', expression: 'wrong expression', html: 'wrong HTML',
+                fullExpression: 'wrong full expression', fullHtml: 'wrong full HTML', _token: token,
+            });
+            expect(receiver.stats).toEqual({ textContent: 'old statistics', hidden: false });
+            expect(receiver.context).toMatchObject({
+                cachedExpression: 'old expression', cachedHtml: 'old HTML',
+                cachedFullExpression: 'old full expression', cachedFullHtml: 'old full HTML',
+            });
+        });
+
+        it.each([true, false])('keeps broadcast search active-tab-only with active=%s', active => {
+            const receiver = createReceiver(active);
+            receiver.receive({ command: 'toggleSearch' });
+            expect(receiver.context.searchVisible).toBe(active);
+            expect(receiver.toggle).toHaveBeenCalledTimes(active ? 1 : 0);
+            expect(receiver.focus).toHaveBeenCalledTimes(active ? 1 : 0);
+        });
+
+        it('tokens stats and both full-table and selected-subset expression replies', async () => {
+            const webview = createMockWebView();
+            const p = new DataTableProvider(createMockServer(async () => 'expression'), clipboard);
+            p.createView(webview, make2dTable());
+            const html: string = webview.setContent.mock.calls[0]![0];
+            const token = html.match(/var token = '(dt-[a-z0-9]+)'/)![1]!;
+            await vi.waitFor(() => expect(webview.invoke).toHaveBeenCalledWith(
+                'setExpression', expect.objectContaining({ _token: token }),
+            ));
+            webview.invoke.mockClear();
+            webview.simulateMessage({
+                command: 'setSelection', selection: { rows: [0], cols: [1] }, _token: token,
+            });
+            expect(webview.invoke).toHaveBeenCalledWith(
+                'setSelectionStats', expect.objectContaining({ text: expect.stringContaining('Sum: 10'), _token: token }),
+            );
+            await vi.waitFor(() => expect(webview.invoke).toHaveBeenCalledWith(
+                'setExpression', expect.objectContaining({ _token: token }),
+            ));
+        });
+    });
 
     describe('token scoping', () => {
         it('generates unique tokens for different views', () => {
