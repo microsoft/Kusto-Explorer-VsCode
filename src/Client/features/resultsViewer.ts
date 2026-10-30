@@ -290,7 +290,7 @@ async function saveResults(source: { data: server.ResultData }): Promise<{ uri: 
         return { uri: finalUri, alreadyOpen: true };
     }
 
-    await vscode.workspace.fs.writeFile(finalUri, Buffer.from(content, 'utf-8'));
+    await vscode.workspace.fs.writeFile(finalUri, new TextEncoder().encode(content));
     return { uri: finalUri, alreadyOpen: false };
 }
 
@@ -1188,7 +1188,7 @@ export class ResultsViewer {
             this.singletonWriteBackTimer = undefined;
             if (this.singletonBackingUri && this.singletonResultData) {
                 const content = JSON.stringify(this.singletonResultData, null, 2);
-                vscode.workspace.fs.writeFile(this.singletonBackingUri, Buffer.from(content, 'utf-8'))
+                vscode.workspace.fs.writeFile(this.singletonBackingUri, new TextEncoder().encode(content))
                     .then(undefined, error => console.error('Failed to write back result data:', error));
             }
         }, 1000);
@@ -1201,7 +1201,7 @@ export class ResultsViewer {
         }
         if (this.singletonBackingUri && this.singletonResultData) {
             const content = JSON.stringify(this.singletonResultData, null, 2);
-            vscode.workspace.fs.writeFile(this.singletonBackingUri, Buffer.from(content, 'utf-8'))
+            vscode.workspace.fs.writeFile(this.singletonBackingUri, new TextEncoder().encode(content))
                 .then(undefined, error => console.error('Failed to write back result data:', error));
         }
     }

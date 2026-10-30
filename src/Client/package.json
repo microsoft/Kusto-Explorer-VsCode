@@ -315,6 +315,16 @@
         "icon": "$(cloud-download)"
       },
       {
+        "command": "msKustoExplorer.importFromFile",
+        "title": "Import from File...",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "msKustoExplorer.exportConnections",
+        "title": "Export Connections...",
+        "icon": "$(save-as)"
+      },
+      {
         "command": "msKustoExplorer.rerunQuery",
         "title": "Rerun Query",
         "icon": "$(play)"
@@ -359,6 +369,16 @@
           "group": "1_add@3"
         },
         {
+          "command": "msKustoExplorer.importFromFile",
+          "when": "view == msKustoExplorer_connections",
+          "group": "2_file@1"
+        },
+        {
+          "command": "msKustoExplorer.exportConnections",
+          "when": "view == msKustoExplorer_connections",
+          "group": "2_file@2"
+        },
+        {
           "command": "msKustoExplorer.newScratchPad",
           "when": "view == msKustoExplorer_scratchPads",
           "group": "navigation@1"
@@ -377,6 +397,11 @@
           "command": "msKustoExplorer.importScratchPadsFromKustoExplorer",
           "when": "view == msKustoExplorer_scratchPads",
           "group": "1_import@1"
+        },
+        {
+          "command": "msKustoExplorer.importFromFile",
+          "when": "view == msKustoExplorer_scratchPads",
+          "group": "1_import@2"
         },
         {
           "command": "msKustoExplorer.clearHistory",

@@ -10,10 +10,14 @@ import {
     parseDatabaseFromConnectionString,
     parseGroupsXml,
     parseConnectionsXml,
+    parseRecoveryFile,
+    classifyImportFile,
     ImportManager,
+    CONNECTIONS_EXPORT_FORMAT,
 } from '../../features/importManager';
-import type { KustoExplorerRecoveryFile } from '../../features/importManager';
-import type { ConnectionManager } from '../../features/connectionManager';
+import type { KustoExplorerRecoveryFile, ImportFile } from '../../features/importManager';
+import { KustoExplorerLocalData } from '../../features/kustoExplorerLocalData';
+import type { ConnectionManager, ServerInfo } from '../../features/connectionManager';
 import type { ScratchPadManager } from '../../features/scratchPadManager';
 
 // ─── Mock Helpers ────────────────────────────────────────────────────────────
@@ -285,7 +289,7 @@ describe('ImportManager.importScratchPads', () => {
     }
 
     function createManager(): ImportManager {
-        return new ImportManager(scratchPadManager, connections);
+        return new ImportManager(scratchPadManager, connections, new KustoExplorerLocalData());
     }
 
     it('returns undefined when no recovery files exist', async () => {
@@ -328,7 +332,7 @@ describe('ImportManager.importScratchPads', () => {
         const connWithHostName = createMockConnectionManager({
             getHostName: vi.fn(async () => 'help.kusto.windows.net'),
         });
-        const mgr = new ImportManager(scratchPadManager, connWithHostName);
+        const mgr = new ImportManager(scratchPadManager, connWithHostName, new KustoExplorerLocalData());
         await mgr.importScratchPads();
 
         expect(scratchPadManager.addScratchPadFile).toHaveBeenCalledWith(
@@ -362,7 +366,7 @@ describe('ImportManager.importScratchPads', () => {
                     : undefined
             ),
         });
-        const mgr = new ImportManager(scratchPadManager, connWithServer);
+        const mgr = new ImportManager(scratchPadManager, connWithServer, new KustoExplorerLocalData());
         await mgr.importScratchPads();
 
         expect(connWithServer.addServer).not.toHaveBeenCalled();
@@ -450,5 +454,194 @@ describe('ImportManager.importScratchPads', () => {
         const result = await mgr.importScratchPads();
 
         expect(result?.importedCount).toBe(1);
+    });
+});
+
+// ─── Without local Kusto Explorer data (web) ─────────────────────────────────
+
+describe('ImportManager without local Kusto Explorer data', () => {
+    it('reports nothing to import and cannot read Kusto Explorer data', async () => {
+        const mgr = new ImportManager(createMockScratchPadManager(), createMockConnectionManager());
+
+        expect(mgr.canReadKustoExplorerData).toBe(false);
+        expect(mgr.hasConnectionsToImport()).toBe(false);
+        expect(mgr.hasScratchPadsToImport()).toBe(false);
+        expect(mgr.getScratchPadsToImportCount()).toBe(0);
+        expect(await mgr.importConnections()).toBeUndefined();
+        expect(await mgr.importScratchPads()).toBeUndefined();
+    });
+});
+
+// ─── Import from Files ───────────────────────────────────────────────────────
+
+const USER_CONNECTIONS_XML = `<?xml version="1.0" encoding="utf-8"?>
+<ArrayOfServerDescriptionBase xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+    <ServerDescriptionBase>
+        <ConnectionString>https://help.kusto.windows.net</ConnectionString>
+        <Name>Help</Name>
+    </ServerDescriptionBase>
+</ArrayOfServerDescriptionBase>`;
+
+const TEAM_CONNECTIONS_XML = `<ArrayOfServerDescriptionBase>
+    <ServerDescriptionBase>
+        <ConnectionString>https://team.kusto.windows.net</ConnectionString>
+    </ServerDescriptionBase>
+</ArrayOfServerDescriptionBase>`;
+
+const GROUPS_XML = `<?xml version="1.0" encoding="utf-8"?>
+<ArrayOfServerGroupDescription>
+    <ServerGroupDescription>
+        <Name>Connections</Name>
+        <Details>C:\\Users\\me\\AppData\\Local\\Kusto.Explorer\\UserConnections.xml</Details>
+    </ServerGroupDescription>
+    <ServerGroupDescription>
+        <Name>Team</Name>
+        <Details>C:\\Users\\me\\AppData\\Local\\Kusto.Explorer\\Team.xml</Details>
+    </ServerGroupDescription>
+</ArrayOfServerGroupDescription>`;
+
+describe('classifyImportFile', () => {
+    it('recognizes each supported kind', () => {
+        expect(classifyImportFile(USER_CONNECTIONS_XML)).toBe('connectionsXml');
+        expect(classifyImportFile(GROUPS_XML)).toBe('groupsXml');
+        expect(classifyImportFile('\uFEFF{"QueryText":"T | take 1"}')).toBe('recovery');
+        expect(classifyImportFile(JSON.stringify({ format: CONNECTIONS_EXPORT_FORMAT, version: 1, items: [] }))).toBe('connectionsExport');
+    });
+
+    it('returns unknown for other content', () => {
+        expect(classifyImportFile('')).toBe('unknown');
+        expect(classifyImportFile('{ not json')).toBe('unknown');
+        expect(classifyImportFile('{"foo":1}')).toBe('unknown');
+        expect(classifyImportFile('<root/>')).toBe('unknown');
+        expect(classifyImportFile('print 1')).toBe('unknown');
+    });
+});
+
+describe('parseRecoveryFile', () => {
+    it('returns scratch pad documents', () => {
+        expect(parseRecoveryFile('{"QueryText":"T","TabOrdinal":2}')).toEqual({ QueryText: 'T', TabOrdinal: 2 });
+    });
+
+    it('skips saved documents, empty queries and malformed files', () => {
+        expect(parseRecoveryFile('{"QueryText":"T","FullPath":"C:\\\\q.kql"}')).toBeUndefined();
+        expect(parseRecoveryFile('{"QueryText":"  "}')).toBeUndefined();
+        expect(parseRecoveryFile('not json')).toBeUndefined();
+    });
+});
+
+describe('ImportManager.importFiles', () => {
+    function file(name: string, text: string, referenced?: Record<string, string>): ImportFile {
+        return {
+            name,
+            text,
+            ...(referenced ? { readReferencedFile: async (p: string) => referenced[p.split('\\').pop()!] } : {}),
+        };
+    }
+
+    it('imports a UserConnections.xml at the root level', async () => {
+        const connections = createMockConnectionManager();
+        const mgr = new ImportManager(createMockScratchPadManager(), connections);
+
+        const result = await mgr.importFiles([file('UserConnections.xml', USER_CONNECTIONS_XML)]);
+
+        expect(result.importedConnections).toBe(1);
+        expect(connections.addServer).toHaveBeenCalledWith(expect.objectContaining({ cluster: 'help.kusto.windows.net', displayName: 'Help' }), undefined);
+    });
+
+    it('imports the groups of a UserConnectionGroups.xml, once per group file', async () => {
+        const connections = createMockConnectionManager();
+        const mgr = new ImportManager(createMockScratchPadManager(), connections);
+        const referenced = { 'UserConnections.xml': USER_CONNECTIONS_XML, 'Team.xml': TEAM_CONNECTIONS_XML };
+
+        // The group files are picked too; they must not be imported again at the root level.
+        const result = await mgr.importFiles([
+            file('UserConnections.xml', USER_CONNECTIONS_XML),
+            file('Team.xml', TEAM_CONNECTIONS_XML),
+            file('UserConnectionGroups.xml', GROUPS_XML, referenced),
+        ]);
+
+        expect(result.importedConnections).toBe(2);
+        expect(result.missingGroupFiles).toEqual([]);
+        expect(connections.addServerGroup).toHaveBeenCalledWith({ name: 'Team', servers: [] });
+        expect(connections.addServer).toHaveBeenCalledTimes(2);
+        expect(connections.addServer).toHaveBeenCalledWith(expect.objectContaining({ cluster: 'help.kusto.windows.net' }), undefined);
+        expect(connections.addServer).toHaveBeenCalledWith(expect.objectContaining({ cluster: 'team.kusto.windows.net' }), 'Team');
+    });
+
+    it('reports group files it cannot read', async () => {
+        const mgr = new ImportManager(createMockScratchPadManager(), createMockConnectionManager());
+
+        const result = await mgr.importFiles([file('UserConnectionGroups.xml', GROUPS_XML, { 'UserConnections.xml': USER_CONNECTIONS_XML })]);
+
+        expect(result.importedConnections).toBe(1);
+        expect(result.missingGroupFiles).toEqual(['C:\\Users\\me\\AppData\\Local\\Kusto.Explorer\\Team.xml']);
+    });
+
+    it('imports .kebak files as scratch pads in tab order', async () => {
+        const scratchPads = createMockScratchPadManager();
+        const mgr = new ImportManager(scratchPads, createMockConnectionManager());
+
+        const result = await mgr.importFiles([
+            file('b.kebak', JSON.stringify({ CustomTitle: 'B', QueryText: 'b', TabOrdinal: 2 })),
+            file('a.kebak', JSON.stringify({ CustomTitle: 'A', QueryText: 'a', TabOrdinal: 1 })),
+        ]);
+
+        expect(result.importedScratchPads).toBe(2);
+        const calls = (scratchPads.addScratchPadFile as ReturnType<typeof vi.fn>).mock.calls;
+        expect(calls.map(c => c[0])).toEqual(['A', 'B']);
+    });
+
+    it('reports unrecognized files and skips duplicates', async () => {
+        const connections = createMockConnectionManager({
+            findServerInfo: vi.fn(() => ({ connection: 'x', cluster: 'help.kusto.windows.net' })),
+        });
+        const mgr = new ImportManager(createMockScratchPadManager(), connections);
+
+        const result = await mgr.importFiles([
+            file('notes.txt', 'hello'),
+            file('UserConnections.xml', USER_CONNECTIONS_XML),
+        ]);
+
+        expect(result.unrecognizedFiles).toEqual(['notes.txt']);
+        expect(result.importedConnections).toBe(0);
+        expect(result.skippedConnections).toBe(1);
+    });
+});
+
+// ─── Export Connections ──────────────────────────────────────────────────────
+
+describe('ImportManager connections export', () => {
+    const items = [
+        { connection: 'https://a.kusto.windows.net', cluster: 'a.kusto.windows.net', displayName: 'A' },
+        { name: 'G', servers: [{ connection: 'https://b.kusto.windows.net', cluster: 'b.kusto.windows.net', serverKind: 'Engine' }] },
+    ];
+
+    it('exports servers and groups in a versioned format', () => {
+        const mgr = new ImportManager(createMockScratchPadManager(), createMockConnectionManager({
+            getServersAndGroups: vi.fn(() => ({ items })),
+        }));
+
+        expect(JSON.parse(mgr.exportConnections())).toEqual({ format: CONNECTIONS_EXPORT_FORMAT, version: 1, items });
+    });
+
+    it('round-trips an export through importFiles, dropping malformed entries and unknown fields', async () => {
+        const exported = new ImportManager(createMockScratchPadManager(), createMockConnectionManager({
+            getServersAndGroups: vi.fn(() => ({ items })),
+        })).exportConnections();
+        const data = JSON.parse(exported);
+        data.items.push({ cluster: 'no-connection' }, 42, null);
+        data.items[0].extra = 'ignored';
+
+        const connections = createMockConnectionManager();
+        const mgr = new ImportManager(createMockScratchPadManager(), connections);
+        const result = await mgr.importFiles([{ name: 'kusto-connections.json', text: JSON.stringify(data) }]);
+
+        expect(result.importedConnections).toBe(2);
+        const added = (connections.addServer as ReturnType<typeof vi.fn>).mock.calls as [ServerInfo, string | undefined][];
+        expect(added).toEqual([
+            [{ connection: 'https://a.kusto.windows.net', cluster: 'a.kusto.windows.net', displayName: 'A' }, undefined],
+            [{ connection: 'https://b.kusto.windows.net', cluster: 'b.kusto.windows.net', serverKind: 'Engine' }, 'G'],
+        ]);
+        expect(connections.addServerGroup).toHaveBeenCalledWith({ name: 'G', servers: [] });
     });
 });
