@@ -76,6 +76,7 @@ export async function activateFeatures(context: vscode.ExtensionContext, server:
         vscode.commands.registerCommand('msKustoExplorer.copyDataAsMarkdown', () => resultsViewer.copyDataAsMarkdown()),
         vscode.commands.registerCommand('msKustoExplorer.copyDataAsHtml', () => resultsViewer.copyDataAsHtml()),
         vscode.commands.registerCommand('msKustoExplorer.copyTableAsDatatable', () => resultsViewer.copyTableAsDatatable()),
+        vscode.commands.registerCommand('msKustoExplorer.exportDataAsCsv', () => resultsViewer.exportDataAsCsv()),
         vscode.commands.registerCommand('msKustoExplorer.savePanelResults', () => resultsViewer.saveCurrentResults()),
         vscode.commands.registerCommand('msKustoExplorer.chartPanelResults', () => resultsViewer.openChartFromBottomView()),
         vscode.commands.registerCommand('msKustoExplorer.rerunQuery', () => resultsViewer.rerunQuery()),

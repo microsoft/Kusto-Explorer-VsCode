@@ -213,7 +213,7 @@ Features are grouped by responsibility. Key ones:
 |------|---------|----------------|
 | **Connections** | `connectionManager.ts`, `connectionsPanel.ts`, `connectionStatusBar.ts`, `authentication.ts` | Persist clusters/groups (in `globalState`) and per-document cluster/database assignments (in `workspaceState`); render the Connections tree; show the active connection in the status bar; acquire AAD tokens. |
 | **Query editing** | `queryEditor.ts`, `markdown.ts` | Run/format/copy queries; CodeLens-driven selection; paste transforms; document schema refresh. |
-| **Results** | `resultsViewer.ts`, `dataTableProvider.ts`, `webview.ts`, `webviewHtml.ts`, `html.ts`, `tsv.ts` | Display query results in webviews; tabular grid (`simple-datatables`); copy/export; drag-and-drop as `datatable` expressions. |
+| **Results** | `resultsViewer.ts`, `dataTableProvider.ts`, `webview.ts`, `webviewHtml.ts`, `html.ts`, `tsv.ts`, `csv.ts` | Display query results in webviews; tabular grid (`simple-datatables`); copy/export (TSV/HTML/markdown clipboard, `.kqr`, CSV file); drag-and-drop as `datatable` expressions. |
 | **Charts** | `chartProvider.ts`, `compositeChartProvider.ts`, `chartEditorProvider.ts`, `plotlyChartProvider.ts`, `graphChartProvider.ts`, `timePivotChartProvider.ts` | Render and edit charts from results; save as `.kqr`; copy as image. |
 | **Scratch pads** | `scratchPadManager.ts`, `scratchPadPanel.ts` | In-memory `.kql` documents (custom `kusto-scratchpad:` scheme) that need no file on disk. |
 | **History** | `historyManager.ts`, `historyPanel.ts` | Record executed queries + results and let users revisit them. |

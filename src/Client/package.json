@@ -231,6 +231,11 @@
         "icon": "$(symbol-snippet)"
       },
       {
+        "command": "msKustoExplorer.exportDataAsCsv",
+        "title": "Export to CSV...",
+        "icon": "$(export)"
+      },
+      {
         "command": "msKustoExplorer.refreshDocumentSchema",
         "title": "Refresh Schema",
         "icon": "$(refresh)"
@@ -438,6 +443,11 @@
           "command": "msKustoExplorer.toggleSearch",
           "when": "view == msKustoExplorer_resultsView && msKustoExplorer.panelShowingData && !msKustoExplorer.panelChartActive",
           "group": "navigation@5"
+        },
+        {
+          "command": "msKustoExplorer.exportDataAsCsv",
+          "when": "view == msKustoExplorer_resultsView && msKustoExplorer.panelShowingData && !msKustoExplorer.panelChartActive",
+          "group": "1_export@1"
         }
       ],
       "view/item/context": [
@@ -597,6 +607,11 @@
           "command": "msKustoExplorer.rerunQuery",
           "when": "activeWebviewPanelId == msKustoExplorer_resultViewer && msKustoExplorer.resultViewerHasQuery",
           "group": "navigation@5"
+        },
+        {
+          "command": "msKustoExplorer.exportDataAsCsv",
+          "when": "(activeWebviewPanelId == msKustoExplorer_singletonView || activeWebviewPanelId == msKustoExplorer_resultViewer) && msKustoExplorer.resultViewerShowingData && !msKustoExplorer.resultViewerChartActive",
+          "group": "1_export@1"
         }
       ],
       "editor/context": [
@@ -646,6 +661,11 @@
           "command": "msKustoExplorer.copyTableAsDatatable",
           "when": "webviewId == msKustoExplorer_resultsView || (webviewId == msKustoExplorer_resultViewer && !chartVisible && !queryVisible) || (webviewId == msKustoExplorer_singletonView && !chartVisible && !queryVisible)",
           "group": "9_cutcopypaste@4"
+        },
+        {
+          "command": "msKustoExplorer.exportDataAsCsv",
+          "when": "webviewId == msKustoExplorer_resultsView || (webviewId == msKustoExplorer_resultViewer && !chartVisible && !queryVisible) || (webviewId == msKustoExplorer_singletonView && !chartVisible && !queryVisible)",
+          "group": "9_export@1"
         },
         {
           "command": "msKustoExplorer.savePanelResults",

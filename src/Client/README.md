@@ -47,6 +47,7 @@ Edit, run, and chart Kusto queries (KQL) right from VS Code. Explore databases a
 - Drag and drop a table into your document as a KQL `datatable` expression
 - Add or edit a chart to visualize your results
 - Save data as a `.kqr` file (Kusto Query Results) to share with others
+- Export a full result table (all rows) to a `.csv` file
 
 ### Charts (document tab)
 
