@@ -16,6 +16,7 @@ import {
 export interface IServer {
     // LSP Requests
     runQuery(query: string, cluster?: string, database?: string, isReadOnly?: boolean, maxRows?: number, clientRequestId?: string): Promise<RunQueryResult | null>;
+    cancelQuery(clientRequestId: string): Promise<CancelQueryResult | null>;
     getQueryResultType(query: string, cluster: string, database?: string): Promise<GetQueryResultTypeResult | null>;
     getFunctionResultType(cluster: string, database: string, functionName: string): Promise<GetFunctionResultTypeResult | null>;
     getQueryRanges(uri: string): Promise<QueryRangesResult | null>;
@@ -94,6 +95,16 @@ export class Server implements IServer {
         return this.client.sendRequest<RunQueryResult | null>(
             'kusto/runQuery',
             { query, cluster, database, isReadOnly, maxRows, clientRequestId }
+        );
+    }
+
+    /**
+     * Cancels the query run started with the given client request id.
+     */
+    cancelQuery(clientRequestId: string): Promise<CancelQueryResult | null> {
+        return this.client.sendRequest<CancelQueryResult | null>(
+            'kusto/cancelQuery',
+            { clientRequestId }
         );
     }
 
@@ -411,6 +422,7 @@ export class NullServer implements IServer {
     private static readonly noopDisposable: Disposable = { dispose() {} };
 
     runQuery(): Promise<RunQueryResult | null> { return Promise.resolve(null); }
+    cancelQuery(): Promise<CancelQueryResult | null> { return Promise.resolve(null); }
     getQueryResultType(): Promise<GetQueryResultTypeResult | null> { return Promise.resolve(null); }
     getFunctionResultType(): Promise<GetFunctionResultTypeResult | null> { return Promise.resolve(null); }
     getQueryRanges(): Promise<QueryRangesResult | null> { return Promise.resolve(null); }
@@ -522,7 +534,15 @@ export interface RunQueryResult {
     error?: QueryDiagnostic;
 }
 
-/** Result of getting the query result type. */
+/** Result of cancelling a running query. */
+export interface CancelQueryResult {
+    /** True if a run with the client request id was in progress. */
+    found: boolean;
+    /** The client request id targeted on the cluster (may carry a suffix such as ';fetchStoredQueryResult'). */
+    cancelledClientRequestId?: string;
+    /** The error from the cluster-side cancellation, if it failed. */
+    error?: string;
+}
 export interface GetQueryResultTypeResult {
     resultType?: string;
 }

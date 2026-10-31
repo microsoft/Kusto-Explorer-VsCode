@@ -40,6 +40,34 @@ public interface IQueryManager
         string? clientRequestId,
         CancellationToken cancellationToken
         );
+
+    /// <summary>
+    /// Cancels the run started with the specified client request id: aborts the local request and
+    /// sends a best-effort <c>.cancel query</c> for the request currently executing on the server.
+    /// </summary>
+    Task<CancelQueryResult> CancelQueryAsync(string clientRequestId, CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// The result of cancelling a running query.
+/// </summary>
+public record CancelQueryResult
+{
+    /// <summary>
+    /// True if a run with the client request id was in progress.
+    /// </summary>
+    public bool Found { get; init; }
+
+    /// <summary>
+    /// The client request id targeted by the server-side <c>.cancel query</c>, if one was sent.
+    /// This can differ from the run's id when the run executes more than one request.
+    /// </summary>
+    public string? CancelledClientRequestId { get; init; }
+
+    /// <summary>
+    /// The error from the server-side cancellation, if it failed.
+    /// </summary>
+    public string? Error { get; init; }
 }
 
 /// <summary>

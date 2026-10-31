@@ -117,8 +117,13 @@
       },
       {
         "command": "msKustoExplorer.runQuery.running",
-        "title": "Running Query",
+        "title": "Cancel Query",
         "icon": "$(sync~spin)"
+      },
+      {
+        "command": "msKustoExplorer.cancelQuery",
+        "title": "Cancel Query",
+        "enablement": "msKustoExplorer.queryRunning"
       },
       {
         "command": "msKustoExplorer.addServer",

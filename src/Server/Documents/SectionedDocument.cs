@@ -2,6 +2,7 @@
 // Licensed under the MIT license.
 
 using System.Collections.Immutable;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 
 using Kusto.Language;
@@ -82,6 +83,20 @@ public class SectionedDocument : IDocument
     public IReadOnlyList<TextRange> GetSectionRanges()
     {
         return _script.Blocks.Select(b => new TextRange(b.Start, b.Length)).ToImmutableList();
+    }
+
+    public bool TryGetSectionCode(int position, CancellationToken cancellationToken, [NotNullWhen(true)] out KustoCode? code, out int sectionStart)
+    {
+        var block = _script.GetBlockAtPosition(position);
+        if (block != null && block.Service.TryGetCode(cancellationToken, out code))
+        {
+            sectionStart = block.Start;
+            return true;
+        }
+
+        code = null;
+        sectionStart = 0;
+        return false;
     }
 
     public string? GetMinimalText(int position, MinimalTextKind kind)
