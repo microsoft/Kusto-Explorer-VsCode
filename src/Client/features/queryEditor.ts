@@ -6,7 +6,6 @@
  */
 
 import * as vscode from 'vscode';
-import * as crypto from 'crypto';
 import type { IServer, SelectionRange, Range } from './server';
 import type { ConnectionManager } from './connectionManager';
 import { ResultsViewer } from './resultsViewer';
@@ -30,6 +29,9 @@ function rangeFromArgs(startLine?: number, startChar?: number, endLine?: number,
     }
     return undefined;
 }
+
+/** Web Crypto: global in browsers and in VS Code's Node runtime, but not declared by @types/node 18. */
+declare const crypto: { randomUUID(): string };
 
 function createClientRequestId(): string {
     return `KustoExplorerVsCode;${crypto.randomUUID()}`;

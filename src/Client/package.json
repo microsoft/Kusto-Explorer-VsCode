@@ -24,12 +24,9 @@
     "onLanguageModelTool:msKustoExplorer_getClusters",
     "onChatParticipant:msKustoExplorer"
   ],
-  "extensionDependencies": [
-    "ms-dotnettools.vscode-dotnet-runtime"
-  ],
   "main": "./dist/extension.js",
   "scripts": {
-    "compile": "esbuild ./extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --sourcemap",
+    "compile": "esbuild ./extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --sourcemap && npm run compile-web && npm run copy-media",
     "watch": "esbuild ./extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --sourcemap --watch",
     "type-check": "tsc --noEmit",
     "lint": "eslint . --max-warnings 0",
@@ -44,7 +41,11 @@
     "prepackage": "node -e \"require('fs').copyFileSync('../../LICENSE','./LICENSE')\" && npm run compile && npm run build-release-server",
     "package": "vsce package",
     "package:version": "npm run prepackage && vsce package --no-update-package-json $VERSION",
-    "publish": "vsce publish"
+    "publish": "vsce publish",
+    "compile-web": "node scripts/build-web.mjs",
+    "watch-web": "node scripts/build-web.mjs --watch",
+    "test:web": "npm run compile-web && npm run copy-media && node tests/web/runTest.mjs",
+    "copy-media": "node scripts/copy-media.mjs"
   },
   "contributes": {
     "chatParticipants": [
@@ -315,6 +316,16 @@
         "icon": "$(cloud-download)"
       },
       {
+        "command": "msKustoExplorer.importFromFile",
+        "title": "Import from File...",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "msKustoExplorer.exportConnections",
+        "title": "Export Connections...",
+        "icon": "$(save-as)"
+      },
+      {
         "command": "msKustoExplorer.rerunQuery",
         "title": "Rerun Query",
         "icon": "$(play)"
@@ -359,6 +370,16 @@
           "group": "1_add@3"
         },
         {
+          "command": "msKustoExplorer.importFromFile",
+          "when": "view == msKustoExplorer_connections",
+          "group": "2_file@1"
+        },
+        {
+          "command": "msKustoExplorer.exportConnections",
+          "when": "view == msKustoExplorer_connections",
+          "group": "2_file@2"
+        },
+        {
           "command": "msKustoExplorer.newScratchPad",
           "when": "view == msKustoExplorer_scratchPads",
           "group": "navigation@1"
@@ -377,6 +398,11 @@
           "command": "msKustoExplorer.importScratchPadsFromKustoExplorer",
           "when": "view == msKustoExplorer_scratchPads",
           "group": "1_import@1"
+        },
+        {
+          "command": "msKustoExplorer.importFromFile",
+          "when": "view == msKustoExplorer_scratchPads",
+          "group": "1_import@2"
         },
         {
           "command": "msKustoExplorer.clearHistory",
@@ -2338,6 +2364,7 @@
     ]
   },
   "dependencies": {
+    "azure-kusto-data": "7.2.0",
     "fast-xml-parser": "^5.10.1",
     "vscode-languageclient": "^9.0.0"
   },
@@ -2347,8 +2374,12 @@
     "@types/vscode": "^1.90.0",
     "@vscode/test-cli": "^0.0.15",
     "@vscode/test-electron": "^2.5.2",
+    "@vscode/test-web": "^0.0.81",
+    "cytoscape": "3.30.2",
     "esbuild": "^0.28.1",
     "eslint": "^9.0.0",
+    "plotly.js-strict-dist-min": "2.27.0",
+    "simple-datatables": "9.2.2",
     "typescript": "^5.0.0",
     "typescript-eslint": "^8.62.0",
     "vitest": "^4.1.11"
@@ -2362,5 +2393,6 @@
   },
   "allowScripts": {
     "esbuild@0.28.1": true
-  }
+  },
+  "browser": "./dist/web/extension.js"
 }

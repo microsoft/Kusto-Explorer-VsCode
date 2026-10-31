@@ -1,0 +1,22 @@
+{
+  "name": "kusto-web-signin-harness",
+  "displayName": "Kusto Web Sign-in Harness",
+  "description": "Manual test harness: Microsoft sign-in with a Kusto scope and `print 1` from VS Code for the Web.",
+  "publisher": "ms-kusto-dev",
+  "version": "0.0.1",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "browser": "./extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "commands": [
+      {
+        "command": "kustoWebHarness.run",
+        "title": "Kusto Web Harness: Sign in and run print 1"
+      }
+    ]
+  }
+}

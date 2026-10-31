@@ -7,9 +7,9 @@
 */
 
 import * as vscode from 'vscode';
-import * as path from 'path';
 import type { ConnectionManager, DocumentConnection } from './connectionManager';
 import { ScratchPadManager, SCRATCH_PAD_SCHEME } from './scratchPadManager';
+import { pathBaseName } from './fileStore';
 
 /** MIME type for scratch pad drag-and-drop within the tree view. */
 const SCRATCH_PAD_DRAG_MIME = 'application/vnd.code.tree.mskustoexplorer_scratchpads';
@@ -201,7 +201,7 @@ export class ScratchPadPanel {
 
     async deleteScratchPad(item: { fileName: string }): Promise<void> {
         const confirm = await vscode.window.showWarningMessage(
-            `Delete query "${path.basename(item.fileName, '.kql')}"?`,
+            `Delete query "${pathBaseName(item.fileName, '.kql')}"?`,
             { modal: true },
             'Delete'
         );
@@ -222,7 +222,7 @@ export class ScratchPadPanel {
     }
 
     async renameScratchPad(item: { fileName: string }): Promise<void> {
-        const currentName = path.basename(item.fileName, '.kql');
+        const currentName = pathBaseName(item.fileName, '.kql');
         const newName = await vscode.window.showInputBox({
             prompt: 'Enter new name for the query document',
             value: currentName,
@@ -277,7 +277,7 @@ export class ScratchPadPanel {
         const scratchUriValue = scratchDocument.uri;
         const viewColumn = editor.viewColumn;
 
-        const defaultName = path.basename(scratchUriValue.path);
+        const defaultName = pathBaseName(scratchUriValue.path);
         const target = await vscode.window.showSaveDialog({
             defaultUri: vscode.Uri.file(defaultName),
             filters: { 'Kusto Query': ['kql', 'csl', 'kusto'] },
@@ -288,7 +288,7 @@ export class ScratchPadPanel {
 
         const scratchConnection = await this.connections.getDocumentConnection(scratchUriValue.toString());
 
-        const content = Buffer.from(scratchDocument.getText(), 'utf-8');
+        const content = new TextEncoder().encode(scratchDocument.getText());
         await vscode.workspace.fs.writeFile(target, content);
 
         if (scratchConnection?.cluster) {
@@ -296,7 +296,7 @@ export class ScratchPadPanel {
         }
 
         const action = await vscode.window.showInformationMessage(
-            `What would you like to do with the original query set "${path.basename(scratchUriValue.path, '.kql')}"?`,
+            `What would you like to do with the original query set "${pathBaseName(scratchUriValue.path, '.kql')}"?`,
             { modal: true },
             'Keep',
             'Keep and Clear',
@@ -316,7 +316,7 @@ export class ScratchPadPanel {
                     }
                 }
             }
-            const fileName = path.basename(scratchUriValue.path.replace(/^\//, ''));
+            const fileName = pathBaseName(scratchUriValue.path.replace(/^\//, ''));
             this.manager.deleteScratchPadFile(scratchUriValue, fileName);
         } else if (action === 'Keep and Clear') {
             this.manager.writeFile(scratchUriValue, new Uint8Array());
@@ -397,7 +397,7 @@ class ScratchPadDragAndDropController implements vscode.TreeDragAndDropControlle
 
 class ScratchPadItem extends vscode.TreeItem {
     constructor(public readonly fileName: string) {
-        super(path.basename(fileName, '.kql'), vscode.TreeItemCollapsibleState.None);
+        super(pathBaseName(fileName, '.kql'), vscode.TreeItemCollapsibleState.None);
         this.command = {
             command: 'msKustoExplorer.openScratchPad',
             title: 'Open',

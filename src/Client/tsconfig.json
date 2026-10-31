@@ -28,5 +28,5 @@
     "moduleResolution": "bundler"
   },
   "include": [ "**/*.ts" ],
-  "exclude": [ "node_modules", "out", "tests" ]
+  "exclude": [ "node_modules", "out", "tests", ".vscode-test-web" ]
 }

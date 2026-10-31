@@ -8,6 +8,7 @@ import type { IWebView } from '../../features/webview';
 import { NullServer } from '../../features/server';
 import type { IServer, ResultTable } from '../../features/server';
 import type { IClipboard } from '../../features/clipboard';
+import { WebviewLibraries } from '../../features/webviewHtml';
 
 // ─── Mock IWebView ──────────────────────────────────────────────────────────
 
@@ -73,13 +74,15 @@ describe('SimpleDataTableProvider', () => {
     // ─── createView ─────────────────────────────────────────────────────
 
     describe('createView', () => {
-        it('calls webview.setup() with CDN link and CSS', () => {
+        it('calls webview.setup() with the bundled library and CSS', () => {
             const webview = createMockWebView();
             provider.createView(webview, make2dTable());
 
             expect(webview.setup).toHaveBeenCalledOnce();
             const [headHtml, scriptsHtml] = webview.setup.mock.calls[0]!;
-            expect(headHtml).toContain('simple-datatables');
+            expect(headHtml).toContain(`src="${WebviewLibraries.simpleDataTablesScript}"`);
+            expect(headHtml).toContain(`href="${WebviewLibraries.simpleDataTablesStyle}"`);
+            expect(headHtml).not.toContain('cdn');
             expect(headHtml).toContain('<style>');
             expect(headHtml).toContain('.datatable-wrapper');
             expect(scriptsHtml).toBe('');
@@ -173,14 +176,12 @@ describe('SimpleDataTableProvider', () => {
             provider.createView(webview, table);
             const html: string = webview.setContent.mock.calls[0]![0];
 
-            // The cell value is no longer HTML-escaped, but the embedded JSON
-            // is still protected against early `</script>` termination by the
-            // `</` -> `<\/` replacement at serialization time. Only the real
-            // closing </script> tag should appear; the cell payload should use
-            // the `<\/script>` form.
+            // The cell value is not HTML-escaped, but every `<` in the embedded
+            // JSON becomes the JSON escape `\u003c`, so the payload cannot end
+            // the script early. Only the real closing </script> tag appears.
             const matches = html.match(/<\/script>/g);
             expect(matches).toHaveLength(1);
-            expect(html).toContain('<\\/script>');
+            expect(html).toContain('\\u003c/script>');
         });
 
         it('preserves angle brackets in cell values (passed via cell objects)', () => {
@@ -201,7 +202,9 @@ describe('SimpleDataTableProvider', () => {
             provider.createView(webview, table);
             const html: string = webview.setContent.mock.calls[0]![0];
 
-            expect(html).toContain('George Washington <gwashington@contoso.com>');
+            // `<` is JSON-escaped as `\u003c`, which JSON parsing turns back
+            // into a literal `<`; it is never HTML-escaped.
+            expect(html).toContain('George Washington \\u003cgwashington@contoso.com>');
             expect(html).not.toContain('&lt;gwashington@contoso.com&gt;');
         });
 
@@ -237,7 +240,7 @@ describe('SimpleDataTableProvider', () => {
             provider.createView(webview, table);
             const html: string = webview.setContent.mock.calls[0]![0];
 
-            expect(html).toContain('Value <units>');
+            expect(html).toContain('Value \\u003cunits>');
             expect(html).not.toContain('Value &lt;units&gt;');
         });
 

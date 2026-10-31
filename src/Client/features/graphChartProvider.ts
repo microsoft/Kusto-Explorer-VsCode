@@ -27,8 +27,7 @@ import type { ChartOptions, ResultTable, ResultChartView } from './server';
 import { ChartColorways, ChartMode, getColumnRef, getColumnRefByIndex } from './chartProvider';
 import type { IChartView, IWebView, IChartProvider, ColumnRef, ChartRenderContext } from './chartProvider';
 import * as vscode from 'vscode';
-
-const CytoscapeJsCdn = 'https://cdn.jsdelivr.net/npm/cytoscape@3.30.2/dist/cytoscape.min.js';
+import { WebviewLibraries, escapeForInlineScript } from './webviewHtml';
 
 // ─── View ───────────────────────────────────────────────────────────────────
 
@@ -214,7 +213,7 @@ export class GraphChartProvider implements IChartProvider {
 
     createView(webview: IWebView): IChartView {
         webview.setup(
-            `<script defer src="${CytoscapeJsCdn}" charset="utf-8"></script>`,
+            `<script defer src="${WebviewLibraries.cytoscape}" charset="utf-8"></script>`,
             ''
         );
         return new GraphChartView(webview, (data, options, darkMode, ctx, positions, token, seed) => this.renderGraphHtml(data, options, darkMode, ctx, positions, token, seed));
@@ -823,10 +822,5 @@ function escapeHtml(s: string): string {
 }
 
 function escapeForJsStringLiteral(json: string): string {
-    return json
-        .replace(/\\/g, '\\\\')
-        .replace(/'/g, "\\'")
-        .replace(/<\//g, '<\\/')
-        .replace(/\u2028/g, '\\u2028')
-        .replace(/\u2029/g, '\\u2029');
+    return escapeForInlineScript(json, true);
 }

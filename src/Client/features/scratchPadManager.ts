@@ -7,8 +7,7 @@
 */
 
 import * as vscode from 'vscode';
-import * as path from 'path';
-import * as fs from 'fs';
+import { toText, type IFileStore } from './fileStore';
 
 // =============================================================================
 // Constants
@@ -29,16 +28,16 @@ const ORDER_FILE = '_order.json';
  * This class is used primary by the ScratchPadPanel UI component.
  */
 export class ScratchPadManager {
-    private readonly scratchpadDir: string;
     private readonly scratchFs: ScratchPadFileSystemProvider;
     private readonly _onDidChange = new vscode.EventEmitter<void>();
 
     /** Fires after any mutation (add, delete, rename, reorder) so the UI can refresh. */
     readonly onDidChange = this._onDidChange.event;
 
-    constructor(context: vscode.ExtensionContext) {
-        this.scratchpadDir = path.join(context.globalStorageUri.fsPath, 'scratchpads');
-        fs.mkdirSync(this.scratchpadDir, { recursive: true });
+    /**
+     * @param store the scratch pad directory (desktop: `<globalStorage>/scratchpads` on disk).
+     */
+    constructor(context: vscode.ExtensionContext, readonly store: IFileStore) {
 
         // Register virtual file system provider
         this.scratchFs = new ScratchPadFileSystemProvider(this);
@@ -49,9 +48,8 @@ export class ScratchPadManager {
         // Create a default scratch pad if none exist yet
         if (this.getScratchPadFiles().length === 0) {
             const name = this.nextScratchPadFileName([]);
-            const filePath = path.join(this.scratchpadDir, name);
-            if (!fs.existsSync(filePath)) {
-                fs.writeFileSync(filePath, '', 'utf-8');
+            if (!this.store.exists(name)) {
+                this.store.write(name, '');
             }
             const order = this.readOrder();
             if (!order.includes(name)) {
@@ -63,18 +61,14 @@ export class ScratchPadManager {
 
     // ─── Public API ──────────────────────────────────────────────────
 
-    /** Resolves a virtual URI to its backing file path on disk. */
-    diskPath(uri: vscode.Uri): string {
-        const fileName = uri.path.replace(/^\//, '');
-        return path.join(this.scratchpadDir, fileName);
+    /** Resolves a virtual URI to the name of its backing file in the store. */
+    fileName(uri: vscode.Uri): string {
+        return uri.path.replace(/^\//, '');
     }
 
     /** Returns ordered list of .kql filenames in the scratchpads directory, respecting user-defined order. */
     getScratchPadFiles(): string[] {
-        if (!fs.existsSync(this.scratchpadDir)) {
-            return [];
-        }
-        const filesOnDisk = fs.readdirSync(this.scratchpadDir)
+        const filesOnDisk = this.store.list()
             .filter(f => f.endsWith('.kql'));
         if (filesOnDisk.length === 0) {
             return [];
@@ -89,9 +83,8 @@ export class ScratchPadManager {
 
     /** Reads the order list from disk. Returns an empty array if the file doesn't exist or is invalid. */
     readOrder(): string[] {
-        const orderPath = path.join(this.scratchpadDir, ORDER_FILE);
         try {
-            const data = fs.readFileSync(orderPath, 'utf-8');
+            const data = toText(this.store.read(ORDER_FILE));
             const parsed = JSON.parse(data);
             if (Array.isArray(parsed) && parsed.every(item => typeof item === 'string')) {
                 return parsed;
@@ -104,8 +97,7 @@ export class ScratchPadManager {
 
     /** Writes the order list to disk and fires the change event. */
     saveOrder(order: string[]): void {
-        const orderPath = path.join(this.scratchpadDir, ORDER_FILE);
-        fs.writeFileSync(orderPath, JSON.stringify(order, null, 2), 'utf-8');
+        this.store.write(ORDER_FILE, JSON.stringify(order, null, 2));
         this._onDidChange.fire();
     }
 
@@ -120,9 +112,8 @@ export class ScratchPadManager {
 
     /** Creates an empty .kql file in the scratchpads directory if it doesn't exist, and appends to order. */
     async createScratchPadFile(name: string): Promise<void> {
-        const filePath = path.join(this.scratchpadDir, name);
-        if (!fs.existsSync(filePath)) {
-            await fs.promises.writeFile(filePath, '', 'utf-8');
+        if (!this.store.exists(name)) {
+            await this.store.writeAsync(name, '');
         }
         const order = this.readOrder();
         if (!order.includes(name)) {
@@ -144,15 +135,14 @@ export class ScratchPadManager {
             finalName += '.kql';
         }
         if (existing.includes(finalName)) {
-            const base = path.basename(finalName, '.kql');
+            const base = finalName.slice(0, -'.kql'.length);
             let num = 2;
             while (existing.includes(`${base} (${num}).kql`)) {
                 num++;
             }
             finalName = `${base} (${num}).kql`;
         }
-        const filePath = path.join(this.scratchpadDir, finalName);
-        await fs.promises.writeFile(filePath, content, 'utf-8');
+        await this.store.writeAsync(finalName, content);
         const order = this.readOrder();
         if (!order.includes(finalName)) {
             order.push(finalName);
@@ -205,7 +195,7 @@ export class ScratchPadManager {
 }
 
 // =============================================================================
-// FileSystemProvider — maps msKustoExplorer-scratch:/ URIs to real files on disk
+// FileSystemProvider — maps msKustoExplorer-scratch:/ URIs to files in the scratch pad store
 // =============================================================================
 
 class ScratchPadFileSystemProvider implements vscode.FileSystemProvider {
@@ -220,12 +210,11 @@ class ScratchPadFileSystemProvider implements vscode.FileSystemProvider {
     }
 
     stat(uri: vscode.Uri): vscode.FileStat {
-        const filePath = this.manager.diskPath(uri);
-        const stat = fs.statSync(filePath);
+        const stat = this.manager.store.stat(this.manager.fileName(uri));
         return {
             type: vscode.FileType.File,
-            ctime: stat.ctimeMs,
-            mtime: stat.mtimeMs,
+            ctime: stat.ctime,
+            mtime: stat.mtime,
             size: stat.size,
         };
     }
@@ -234,30 +223,27 @@ class ScratchPadFileSystemProvider implements vscode.FileSystemProvider {
         return this.manager.getScratchPadFiles().map(f => [f, vscode.FileType.File]);
     }
 
-    // FileSystemProvider methods use synchronous fs calls because the VS Code
+    // FileSystemProvider methods are synchronous because the VS Code
     // FileSystemProvider interface is invoked synchronously by the editor for
     // document open/save operations. While the interface accepts Thenable returns,
     // async I/O here risks interleaving with editor state. These files are small
-    // scratch pads on local disk, so blocking is negligible.
+    // scratch pads, so blocking is negligible (on the web the store serves them from memory).
     readFile(uri: vscode.Uri): Uint8Array {
-        const filePath = this.manager.diskPath(uri);
-        return fs.readFileSync(filePath);
+        return this.manager.store.read(this.manager.fileName(uri));
     }
 
     writeFile(uri: vscode.Uri, content: Uint8Array, _options: { create: boolean; overwrite: boolean }): void {
-        const filePath = this.manager.diskPath(uri);
-        fs.writeFileSync(filePath, content);
+        this.manager.store.write(this.manager.fileName(uri), content);
         this._onDidChangeFile.fire([{ type: vscode.FileChangeType.Changed, uri }]);
     }
 
     delete(uri: vscode.Uri): void {
-        const filePath = this.manager.diskPath(uri);
-        fs.unlinkSync(filePath);
+        this.manager.store.delete(this.manager.fileName(uri));
         this._onDidChangeFile.fire([{ type: vscode.FileChangeType.Deleted, uri }]);
     }
 
     rename(oldUri: vscode.Uri, newUri: vscode.Uri): void {
-        fs.renameSync(this.manager.diskPath(oldUri), this.manager.diskPath(newUri));
+        this.manager.store.rename(this.manager.fileName(oldUri), this.manager.fileName(newUri));
         this._onDidChangeFile.fire([
             { type: vscode.FileChangeType.Deleted, uri: oldUri },
             { type: vscode.FileChangeType.Created, uri: newUri },
@@ -265,7 +251,7 @@ class ScratchPadFileSystemProvider implements vscode.FileSystemProvider {
     }
 
     createDirectory(_uri: vscode.Uri): void {
-        // Not needed — the backing directory is managed in ScratchPadManager constructor
+        // Not needed — the backing directory is created by the store
     }
 
     dispose(): void {

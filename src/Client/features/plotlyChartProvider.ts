@@ -10,6 +10,7 @@ import type { ChartOptions, ResultTable } from './server';
 import { ChartType, ChartAxis, ChartSortOrder, ChartLegendPosition, ChartColorways, ChartYLayout, ChartMode, hexToRgba, isNumericType, isDateTimeType, getColumnRef, getColumnRefByIndex } from './chartProvider';
 import type { IChartView, IWebView, IChartProvider, ColumnRef } from './chartProvider';
 import { escapeHtml } from './html';
+import { WebviewLibraries, escapeForInlineScript } from './webviewHtml';
 
 // ─── Plotly Constants ───────────────────────────────────────────────────────
 
@@ -993,19 +994,9 @@ class PlotlyChartBuilder {
 
 // ─── HTML Helpers ───────────────────────────────────────────────────────────
 
-const PlotlyJsCdn = 'https://cdn.plot.ly/plotly-2.27.0.min.js';
-
 /**
  * Escapes a JSON string so it can be embedded inside a single-quoted JS string
- * literal and recovered with `JSON.parse`. We escape:
- *  - `\\` (must come first) so JSON's own escapes survive JS-string decoding,
- *  - `'` so we don't terminate the surrounding JS string,
- *  - `</` → `<\/` so a literal `</script>` in the data can't break out of the
- *    enclosing `<script>` tag,
- *  - U+2028 (LINE SEPARATOR) and U+2029 (PARAGRAPH SEPARATOR), which were
- *    illegal inside JS string literals before ES2019 and remain a syntax-error
- *    risk on older runtimes. Modern V8 accepts them, but defensive escaping
- *    keeps the generated `<script>` valid for any string content in the data.
+ * literal and recovered with `JSON.parse` (see {@link escapeForInlineScript}).
  *
  * Embedding the data via `JSON.parse('…')` is dramatically faster than emitting
  * a JS object literal (`var data = […];`) when the payload is large: V8 has a
@@ -1013,12 +1004,7 @@ const PlotlyJsCdn = 'https://cdn.plot.ly/plotly-2.27.0.min.js';
  * path for parsing a multi-megabyte inline literal at script-load time.
  */
 function escapeForJsStringLiteral(json: string): string {
-    return json
-        .replace(/\\/g, '\\\\')
-        .replace(/'/g, "\\'")
-        .replace(/<\//g, '<\\/')
-        .replace(/\u2028/g, '\\u2028')
-        .replace(/\u2029/g, '\\u2029');
+    return escapeForInlineScript(json, true);
 }
 
 function createChartDiv(dataJson: string, layoutJson: string, configJson: string, divId = 'plotly-chart'): string {
@@ -1946,7 +1932,7 @@ export class PlotlyChartProvider implements IChartProvider {
 
     createView(webview: IWebView): IChartView {
         webview.setup(
-            `<script src="${PlotlyJsCdn}" charset="utf-8"></script>
+            `<script src="${WebviewLibraries.plotly}" charset="utf-8"></script>
 <style>
 .multi-chart-container {
     width: 100%;

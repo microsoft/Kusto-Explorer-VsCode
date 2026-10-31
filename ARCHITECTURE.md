@@ -112,6 +112,13 @@ intelligence (completion, diagnostics, query execution, schema), so it is only u
 the client's UI wiring in isolation. Don't design features around it as if it were a degraded-but-
 functional runtime; treat a missing server as a test/dev condition, not a shipping configuration.
 
+The one exception is **VS Code for the Web** (vscode.dev, github.dev, Codespaces in the browser),
+where the .NET server cannot run. There, `WebServer`
+([src/Client/features/webServer.ts](src/Client/features/webServer.ts)) extends `NullServer`: it runs
+queries, decodes connections, loads schema and splits query ranges by calling the Kusto REST API
+directly, and every Kusto.Language-dependent feature (completion, diagnostics, formatting, semantic
+tokens, entity definitions) keeps the `NullServer` defaults. See §3.1.
+
 ### A note on history: from "an LSP server" to "a VS Code extension"
 
 The project began as an attempt to build a **general-purpose Kusto LSP server** that any editor could
@@ -143,7 +150,11 @@ its own way rather than for portability's sake.
 
 The client `package.json` declares all VS Code contributions (commands, menus, views, settings,
 the `kusto` language, the scratch-pad/entity-definition URI schemes). The build (`npm run compile`)
-uses **esbuild**; the debug server is produced by `build-debug-server`.
+uses **esbuild** to produce two bundles: `main` (`dist/extension.js`, desktop Node extension host)
+and `browser` (`dist/web/extension.js`, web worker extension host, built by
+`scripts/build-web.mjs`, which fails if a Node-only module leaks into the bundle). It also copies the
+webview libraries into `dist/media` (`scripts/copy-media.mjs`). The debug server is produced by
+`build-debug-server`.
 
 ---
 
@@ -151,16 +162,27 @@ uses **esbuild**; the debug server is produced by `build-debug-server`.
 
 ### 3.1 Activation and wiring — `extension.ts`
 
-[src/Client/extension.ts](src/Client/extension.ts) is the composition root. It:
+There are two entry points, one per extension host, sharing one host-independent activation:
 
-1. Creates the `Kusto` output channel early.
-2. Tries to launch the .NET language server (`dotnet Server.dll vscode`) via
-   `vscode-languageclient`. On success it wraps the `LanguageClient` in the typed `Server` class;
-   on failure it uses `NullServer`.
-3. Constructs every feature object, injecting the shared `IServer`, `ConnectionManager`,
-   `Clipboard`, etc., and registers their commands on the extension context.
-4. Returns a small object of internals (`historyManager`, `connectionManager`, `resultsViewer`,
-   `server`) so **integration tests** can drive the extension.
+- [src/Client/extension.ts](src/Client/extension.ts) (desktop) creates the `Kusto` output channel,
+  then tries to launch the .NET language server (`dotnet Server.dll vscode`) via
+  `vscode-languageclient`. On success it wraps the `LanguageClient` in the typed `Server` class
+  (`features/lspServer.ts`); on failure it uses `NullServer`. The .NET runtime comes from the
+  `ms-dotnettools.vscode-dotnet-runtime` extension, which `features/dotnet.ts` installs on first
+  activation if it is missing. It is deliberately **not** in `extensionDependencies`: it has no web
+  build, and a dependency the web host can't load would stop this extension activating there.
+- [src/Client/extension.web.ts](src/Client/extension.web.ts) (VS Code for the Web, web worker host)
+  uses `WebServer` (§1) and must not import Node-only modules.
+- Both call `activateFeatures` in [src/Client/features/activation.ts](src/Client/features/activation.ts),
+  passing their `IServer` and `HostServices` (file stores for scratch pads and history, optional
+  local Kusto Explorer data access, optional rich clipboard). It constructs every feature object,
+  injecting the shared `IServer`, `ConnectionManager`, `Clipboard`, etc., registers their commands,
+  and returns a small object of internals (`historyManager`, `connectionManager`, `resultsViewer`,
+  `server`) so **integration tests** can drive the extension.
+
+**Host-dependent code** lives in desktop-only modules (`lspServer.ts`, `nodeFileStore.ts`,
+`kustoExplorerLocalData.ts`, `windowsClipboard.ts`, `dotnet.ts`) imported only by `extension.ts`;
+everything else must stay host-independent (no `fs`, `path`, `child_process`, etc.).
 
 **Design intent:** dependencies flow one way — `extension.ts` builds the graph and hands
 collaborators down by constructor injection. Features depend on the `IServer` *interface*, never on
@@ -191,14 +213,15 @@ Features are grouped by responsibility. Key ones:
 |------|---------|----------------|
 | **Connections** | `connectionManager.ts`, `connectionsPanel.ts`, `connectionStatusBar.ts`, `authentication.ts` | Persist clusters/groups (in `globalState`) and per-document cluster/database assignments (in `workspaceState`); render the Connections tree; show the active connection in the status bar; acquire AAD tokens. |
 | **Query editing** | `queryEditor.ts`, `markdown.ts` | Run/format/copy queries; CodeLens-driven selection; paste transforms; document schema refresh. |
-| **Results** | `resultsViewer.ts`, `dataTableProvider.ts`, `webview.ts`, `html.ts`, `tsv.ts` | Display query results in webviews; tabular grid (`simple-datatables`); copy/export; drag-and-drop as `datatable` expressions. |
+| **Results** | `resultsViewer.ts`, `dataTableProvider.ts`, `webview.ts`, `webviewHtml.ts`, `html.ts`, `tsv.ts` | Display query results in webviews; tabular grid (`simple-datatables`); copy/export; drag-and-drop as `datatable` expressions. |
 | **Charts** | `chartProvider.ts`, `compositeChartProvider.ts`, `chartEditorProvider.ts`, `plotlyChartProvider.ts`, `graphChartProvider.ts`, `timePivotChartProvider.ts` | Render and edit charts from results; save as `.kqr`; copy as image. |
 | **Scratch pads** | `scratchPadManager.ts`, `scratchPadPanel.ts` | In-memory `.kql` documents (custom `kusto-scratchpad:` scheme) that need no file on disk. |
 | **History** | `historyManager.ts`, `historyPanel.ts` | Record executed queries + results and let users revisit them. |
 | **Entities** | `entityDefinitionProvider.ts` | Virtual read-only documents (`kusto-entity:` scheme) showing an entity's `CREATE` statement for go-to-definition. |
-| **Import** | `importer.ts`, `importManager.ts` | Import connections / scratch pads from desktop Kusto Explorer. |
+| **Import** | `importer.ts`, `importManager.ts`, `kustoExplorerLocalData.ts` | Import connections / scratch pads from a local desktop Kusto Explorer install (desktop only) or from chosen files ("Import from File…", both hosts); export connections as JSON, with secret connection-string keywords (passwords, application keys, tokens) removed. |
 | **Copilot** | `copilot.ts` | Registers language-model tools so Copilot can read schema, run, and diagnose queries. |
-| **Infra** | `server.ts`, `dotnet.ts`, `clipboard.ts`, `kustoLiteral.ts` | Server seam; .NET runtime discovery; clipboard; KQL literal/identifier helpers. |
+| **Web** | `webServer.ts`, `kustoWebClient.ts`, `kustoResponse.ts` | `IServer` for VS Code for the Web; Kusto REST client on `azure-kusto-data` (one client per request so cancel is scoped); mapping of raw responses to the shapes the C# server returns. |
+| **Infra** | `server.ts`, `lspServer.ts`, `activation.ts`, `fileStore.ts`, `dotnet.ts`, `clipboard.ts`, `kustoLiteral.ts` | Server seam and LSP client; shared activation; host-independent file storage; .NET runtime discovery; clipboard; KQL literal/identifier helpers. |
 
 **Data model vs. UI component (naming convention):** features are usually split into two cooperating
 modules — a lower-level **data model** that holds state and logic and is easily unit-tested (e.g.
@@ -241,8 +264,12 @@ in settings so either panel can display any mixture of tables, charts, and query
 **Webview pattern (important convention):** webview-based features (results, charts, data table)
 follow one house style — a feature class builds an HTML *string* with inline `<script>`,
 uses `acquireVsCodeApi()` + document-level click delegation for events, and posts messages back to
-the extension. There is **no React/bundler for webview content**; CDN libraries (Plotly, Cytoscape,
-simple-datatables) are loaded directly. New webview UIs should match this pattern.
+the extension. There is **no React/bundler for webview content**. The libraries (Plotly — the
+`plotly.js-strict-dist-min` build, which needs no `eval` — Cytoscape, simple-datatables) ship in
+`dist/media` and load from the extension, not a CDN. `features/webviewHtml.ts` applies a strict
+Content Security Policy: scripts run only with the page's nonce, so inline `on*=` handlers are not
+allowed (use delegation), and data embedded in inline scripts must go through
+`escapeForInlineScript`. New webview UIs should match this pattern.
 
 ---
 
@@ -358,7 +385,11 @@ concurrent edits/loads don't race.
 - **Settings.** All user settings are under the `msKustoExplorer.*` namespace; the server reads them
   over LSP `workspace/configuration` through `OptionsManager`.
 - **Webview house style.** Vanilla HTML strings + inline scripts + `acquireVsCodeApi()` message
-  passing + document-level event delegation; CDN libraries, no bundler for webview content.
+  passing + document-level event delegation; libraries bundled in `dist/media` under a nonce-based
+  CSP (no CDN, no inline handlers), no bundler for webview content.
+- **Two hosts.** Code outside the desktop-only modules (§3.1) must run in both the Node and the web
+  worker extension hosts; `npm run test:web` activates the web build headlessly in
+  `@vscode/test-web`.
 - **Read-only by default.** The extension runs the queries the user asks for and never auto-crawls or
   mutates a cluster on its own; any automated/profiling queries are bounded and explicitly user-driven.
 
