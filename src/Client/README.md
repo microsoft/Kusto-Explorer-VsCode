@@ -25,12 +25,14 @@ Edit, run, and chart Kusto queries (KQL) right from VS Code. Explore databases a
 - Go-to-definition and find-all-references for tables, functions, columns, and more
 - Code actions and quick fixes for common issues and refactorings
 - Copy colorized query text to the clipboard for pasting into other documents
+- Copy a link that opens the current query in Azure Data Explorer web, and open such links (`vscode://ms-kusto.kusto-explorer-vscode/clusters/<cluster>/databases/<database>?query=...`) in a new scratch pad. A link only opens its query for review; it never runs it.
 
 ### Connections (sidebar)
 
 - Maintain a list of Kusto clusters you connect to
 - Select a cluster and database to set the defaults for your active query document
 - Explore database entities — tables, functions, materialized views, and more
+- Connect to Azure Data Explorer clusters, Microsoft Fabric Eventhouses (`*.kusto.fabric.microsoft.com`), and US Government or China cloud clusters. For a sovereign cloud, set VS Code's `microsoft-sovereign-cloud.environment` setting to that cloud so you can sign in. VS Code for the Web (vscode.dev) offers only public-cloud Microsoft sign-in, so use desktop VS Code for US Government and China clusters.
 
 ### Scratch Pads (sidebar)
 
@@ -47,6 +49,7 @@ Edit, run, and chart Kusto queries (KQL) right from VS Code. Explore databases a
 - Drag and drop a table into your document as a KQL `datatable` expression
 - Add or edit a chart to visualize your results
 - Save data as a `.kqr` file (Kusto Query Results) to share with others
+- Export a full result table (all rows) to a `.csv` file
 
 ### Charts (document tab)
 

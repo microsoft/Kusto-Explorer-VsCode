@@ -21,6 +21,7 @@
   "activationEvents": [
     "onLanguage:kusto",
     "onFileSystem:msKustoExplorer-scratch",
+    "onUri",
     "onLanguageModelTool:msKustoExplorer_getClusters",
     "onChatParticipant:msKustoExplorer"
   ],
@@ -187,6 +188,11 @@
         "icon": "$(copy)"
       },
       {
+        "command": "msKustoExplorer.copyLinkToAdxWeb",
+        "title": "Copy Link to Azure Data Explorer Web",
+        "icon": "$(link)"
+      },
+      {
         "command": "msKustoExplorer.copyData",
         "title": "Copy",
         "icon": "$(copy)"
@@ -229,6 +235,11 @@
         "command": "msKustoExplorer.copyTableAsDatatable",
         "title": "Copy as datatable",
         "icon": "$(symbol-snippet)"
+      },
+      {
+        "command": "msKustoExplorer.exportDataAsCsv",
+        "title": "Export to CSV...",
+        "icon": "$(export)"
       },
       {
         "command": "msKustoExplorer.refreshDocumentSchema",
@@ -336,6 +347,10 @@
         {
           "command": "msKustoExplorer.runQuery.running",
           "when": "false"
+        },
+        {
+          "command": "msKustoExplorer.copyLinkToAdxWeb",
+          "when": "editorLangId == kusto && !msKustoExplorer.isEntityDefinition"
         }
       ],
       "view/title": [
@@ -438,6 +453,11 @@
           "command": "msKustoExplorer.toggleSearch",
           "when": "view == msKustoExplorer_resultsView && msKustoExplorer.panelShowingData && !msKustoExplorer.panelChartActive",
           "group": "navigation@5"
+        },
+        {
+          "command": "msKustoExplorer.exportDataAsCsv",
+          "when": "view == msKustoExplorer_resultsView && msKustoExplorer.panelShowingData && !msKustoExplorer.panelChartActive",
+          "group": "1_export@1"
         }
       ],
       "view/item/context": [
@@ -597,6 +617,11 @@
           "command": "msKustoExplorer.rerunQuery",
           "when": "activeWebviewPanelId == msKustoExplorer_resultViewer && msKustoExplorer.resultViewerHasQuery",
           "group": "navigation@5"
+        },
+        {
+          "command": "msKustoExplorer.exportDataAsCsv",
+          "when": "(activeWebviewPanelId == msKustoExplorer_singletonView || activeWebviewPanelId == msKustoExplorer_resultViewer) && msKustoExplorer.resultViewerShowingData && !msKustoExplorer.resultViewerChartActive",
+          "group": "1_export@1"
         }
       ],
       "editor/context": [
@@ -604,6 +629,11 @@
           "command": "msKustoExplorer.copyQueryTransparent",
           "when": "editorLangId == kusto && !msKustoExplorer.isEntityDefinition",
           "group": "0_kusto@1"
+        },
+        {
+          "command": "msKustoExplorer.copyLinkToAdxWeb",
+          "when": "editorLangId == kusto && !msKustoExplorer.isEntityDefinition",
+          "group": "0_kusto@1.5"
         },
         {
           "command": "msKustoExplorer.formatQuery",
@@ -646,6 +676,11 @@
           "command": "msKustoExplorer.copyTableAsDatatable",
           "when": "webviewId == msKustoExplorer_resultsView || (webviewId == msKustoExplorer_resultViewer && !chartVisible && !queryVisible) || (webviewId == msKustoExplorer_singletonView && !chartVisible && !queryVisible)",
           "group": "9_cutcopypaste@4"
+        },
+        {
+          "command": "msKustoExplorer.exportDataAsCsv",
+          "when": "webviewId == msKustoExplorer_resultsView || (webviewId == msKustoExplorer_resultViewer && !chartVisible && !queryVisible) || (webviewId == msKustoExplorer_singletonView && !chartVisible && !queryVisible)",
+          "group": "9_export@1"
         },
         {
           "command": "msKustoExplorer.savePanelResults",

@@ -18,6 +18,7 @@ import type { IDataTableProvider, IDataTableView } from './dataTableProvider';
 import type { IWebView } from './webview';
 import { escapeHtml } from './html';
 import { finalizeWebviewHtml } from './webviewHtml';
+import { csvFileNameForTable, resultTableToCsv } from './csv';
 
 /** The view type used for the custom results viewer. */
 const resultViewerViewType = 'msKustoExplorer_resultViewer';
@@ -1369,6 +1370,42 @@ export class ResultsViewer {
             return views?.[tableIndex];
         }
         return this.panelTableViews[this.panelActiveTabIndex];
+    }
+
+    /**
+     * Exports every row of the active result table (not just the visible page)
+     * to a CSV file chosen by the user.
+     */
+    async exportDataAsCsv(): Promise<void> {
+        const table = this.getActiveResultTable();
+        if (!table) {
+            vscode.window.showWarningMessage('No result data available to export.');
+            return;
+        }
+
+        const fileName = csvFileNameForTable(table.name);
+        const folder = vscode.workspace.workspaceFolders?.[0]?.uri;
+        const saveUri = await vscode.window.showSaveDialog({
+            filters: { 'CSV (Comma delimited)': ['csv'] },
+            defaultUri: folder ? vscode.Uri.joinPath(folder, fileName) : vscode.Uri.file(fileName)
+        });
+        if (!saveUri) {
+            return;
+        }
+
+        const finalUri = saveUri.path.toLowerCase().endsWith('.csv')
+            ? saveUri
+            : saveUri.with({ path: saveUri.path + '.csv' });
+        await vscode.workspace.fs.writeFile(finalUri, new TextEncoder().encode(resultTableToCsv(table)));
+    }
+
+    /** Resolves the full result table behind the active data table view. */
+    private getActiveResultTable(): server.ResultTable | undefined {
+        const state = this.getActiveViewerState();
+        if (state) {
+            return state.resultData.tables[this.getActiveTableIndex(state)];
+        }
+        return this.lastPanelResultData?.tables[this.panelActiveTabIndex];
     }
 
     /**

@@ -211,9 +211,10 @@ Features are grouped by responsibility. Key ones:
 
 | Area | Modules | Responsibility |
 |------|---------|----------------|
-| **Connections** | `connectionManager.ts`, `connectionsPanel.ts`, `connectionStatusBar.ts`, `authentication.ts` | Persist clusters/groups (in `globalState`) and per-document cluster/database assignments (in `workspaceState`); render the Connections tree; show the active connection in the status bar; acquire AAD tokens. |
+| **Connections** | `connectionManager.ts`, `connectionsPanel.ts`, `connectionStatusBar.ts`, `authentication.ts`, `kustoEndpoints.ts` | Persist clusters/groups (in `globalState`) and per-document cluster/database assignments (in `workspaceState`); render the Connections tree; show the active connection in the status bar; acquire AAD tokens, taking the token scope and sign-in provider (public or sovereign cloud) from the cluster's `/v1/rest/auth/metadata`, with a known-domain table as fallback. |
 | **Query editing** | `queryEditor.ts`, `markdown.ts` | Run/format/copy queries; CodeLens-driven selection; paste transforms; document schema refresh. |
-| **Results** | `resultsViewer.ts`, `dataTableProvider.ts`, `webview.ts`, `webviewHtml.ts`, `html.ts`, `tsv.ts` | Display query results in webviews; tabular grid (`simple-datatables`); copy/export; drag-and-drop as `datatable` expressions. |
+| **Deep links** | `deepLink.ts`, `deepLinkHandler.ts` | Azure Data Explorer web links (`/clusters/<c>/databases/<d>?query=<base64 gzip>`): the URI handler opens a linked query in a new scratch pad after the user confirms the cluster (never runs it); a command copies a web link for the current query. |
+| **Results** | `resultsViewer.ts`, `dataTableProvider.ts`, `webview.ts`, `webviewHtml.ts`, `html.ts`, `tsv.ts`, `csv.ts` | Display query results in webviews; tabular grid (`simple-datatables`); copy/export (TSV/HTML/markdown clipboard, `.kqr`, CSV file); drag-and-drop as `datatable` expressions. |
 | **Charts** | `chartProvider.ts`, `compositeChartProvider.ts`, `chartEditorProvider.ts`, `plotlyChartProvider.ts`, `graphChartProvider.ts`, `timePivotChartProvider.ts` | Render and edit charts from results; save as `.kqr`; copy as image. |
 | **Scratch pads** | `scratchPadManager.ts`, `scratchPadPanel.ts` | In-memory `.kql` documents (custom `kusto-scratchpad:` scheme) that need no file on disk. |
 | **History** | `historyManager.ts`, `historyPanel.ts` | Record executed queries + results and let users revisit them. |
