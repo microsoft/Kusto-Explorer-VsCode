@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
+using Kusto.Language;
+using Kusto.Language.Symbols;
 using Kusto.Vscode;
 
 namespace Tests.Utilities;
@@ -105,6 +107,76 @@ public class ConnectionFactsTests
         var result = ConnectionFacts.GetFullHostName("https://mycluster.kusto.windows.net:443", DefaultDomain);
 
         Assert.AreEqual("mycluster.kusto.windows.net", result);
+    }
+
+    #endregion
+
+    #region Resource-Scoped Proxy Cluster URIs (issue #139)
+
+    private const string WorkspaceUri =
+        "https://ade.loganalytics.io/subscriptions/sub-1/resourcegroups/rg-1/providers/microsoft.operationalinsights/workspaces/my-workspace";
+
+    private const string ComponentUri =
+        "https://ade.applicationinsights.io/subscriptions/sub-1/resourcegroups/rg-1/providers/microsoft.insights/components/my-app";
+
+    [TestMethod]
+    public void TryGetResourceScopedClusterUri_LogAnalyticsWorkspace_ReturnsFullUri()
+    {
+        Assert.AreEqual(WorkspaceUri, ConnectionFacts.TryGetResourceScopedClusterUri(WorkspaceUri));
+    }
+
+    [TestMethod]
+    public void TryGetResourceScopedClusterUri_ApplicationInsightsComponent_ReturnsFullUri()
+    {
+        Assert.AreEqual(ComponentUri, ConnectionFacts.TryGetResourceScopedClusterUri(ComponentUri));
+    }
+
+    [TestMethod]
+    public void TryGetResourceScopedClusterUri_PlainClusterUri_ReturnsNull()
+    {
+        Assert.IsNull(ConnectionFacts.TryGetResourceScopedClusterUri("https://mycluster.kusto.windows.net"));
+    }
+
+    [TestMethod]
+    public void TryGetResourceScopedClusterUri_SinglePathSegment_ReturnsNull()
+    {
+        // A single segment is a database (https://cluster/mydb), not a resource path.
+        Assert.IsNull(ConnectionFacts.TryGetResourceScopedClusterUri("https://help.kusto.windows.net/Samples"));
+    }
+
+    [TestMethod]
+    public void TryGetResourceScopedClusterUri_BareHostName_ReturnsNull()
+    {
+        Assert.IsNull(ConnectionFacts.TryGetResourceScopedClusterUri("ade.loganalytics.io"));
+    }
+
+    [TestMethod]
+    public void GetClusterSymbolName_ResourceScopedUri_ReducesToHost()
+    {
+        Assert.AreEqual("ade.loganalytics.io", ConnectionFacts.GetClusterSymbolName(WorkspaceUri));
+        Assert.AreEqual("ade.applicationinsights.io", ConnectionFacts.GetClusterSymbolName(ComponentUri));
+    }
+
+    [TestMethod]
+    public void GetClusterSymbolName_OrdinaryClusterName_ReturnsUnchanged()
+    {
+        Assert.AreEqual("mycluster", ConnectionFacts.GetClusterSymbolName("mycluster"));
+        Assert.AreEqual("mycluster.kusto.windows.net", ConnectionFacts.GetClusterSymbolName("mycluster.kusto.windows.net"));
+        Assert.AreEqual("https://mycluster.kusto.windows.net", ConnectionFacts.GetClusterSymbolName("https://mycluster.kusto.windows.net"));
+    }
+
+    [TestMethod]
+    public void GlobalStateGetCluster_NormalizesLookupKeyToHost()
+    {
+        // Pins the Kusto.Language constraint that forces GetClusterSymbolName to exist.
+        // If this ever starts finding the URI-named symbol, the reduction to a host name
+        // (and the schema-symbol collision it causes) can be revisited.
+        var uriNamed = GlobalState.Default.AddOrReplaceCluster(new ClusterSymbol(WorkspaceUri, [], isOpen: true));
+        Assert.IsNull(uriNamed.GetCluster(WorkspaceUri), "A cluster symbol named with a full proxy URI is expected to be unfindable.");
+
+        var hostNamed = GlobalState.Default.AddOrReplaceCluster(new ClusterSymbol("ade.loganalytics.io", [], isOpen: true));
+        Assert.IsNotNull(hostNamed.GetCluster("ade.loganalytics.io"));
+        Assert.IsNotNull(hostNamed.GetCluster(WorkspaceUri), "A host-named symbol is expected to resolve from the full proxy URI.");
     }
 
     #endregion

@@ -59,6 +59,150 @@ public class ConnectionManagerTests
         Assert.AreSame(connection1, connection2);
     }
 
+    [TestMethod]
+    [DataRow("https://mycluster.kusto.windows.net", "mycluster.kusto.windows.net", "mycluster")]
+    [DataRow(WorkspaceUri, WorkspaceUri, "ade.loganalytics.io")]
+    [DataRow(ComponentUri, ComponentUri, "ade.applicationinsights.io")]
+    public async Task GetOrAddConnection_ConcurrentCalls_ReturnCanonicalConnectionForAllAliases(
+        string connectionString, string cluster, string alias)
+    {
+        var manager = new ConnectionManager();
+        using var barrier = new Barrier(2);
+        var comparer = new ContendedConnectionStringComparer(barrier);
+        var field = typeof(ConnectionManager).GetField(
+            "_connectionStringsToInfoMap", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.IsNotNull(field);
+        var withComparers = field.FieldType.GetMethod("WithComparers", [typeof(IEqualityComparer<string>)]);
+        Assert.IsNotNull(withComparers);
+        field.SetValue(manager, withComparers.Invoke(field.GetValue(manager), [comparer]));
+
+        // Hold both callers before either can publish to the initially empty map.
+        // A start barrier alone would not guarantee that both initial lookups miss.
+        var calls = Enumerable.Range(0, 2).Select(_ => Task.Factory.StartNew(
+            () => manager.GetOrAddConnection(connectionString),
+            CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default)).ToArray();
+        var connections = await Task.WhenAll(calls);
+        var canonical = manager.GetOrAddConnection(connectionString);
+
+        foreach (var connection in connections)
+        {
+            Assert.AreSame(canonical, connection);
+        }
+        Assert.IsTrue(manager.TryGetConnection(cluster, out var byCluster));
+        Assert.AreSame(canonical, byCluster);
+        Assert.IsTrue(manager.TryGetConnection(alias, out var byAlias));
+        Assert.AreSame(canonical, byAlias);
+    }
+
+    private sealed class ContendedConnectionStringComparer(Barrier barrier) : IEqualityComparer<string>
+    {
+        private int _hashCalls;
+
+        public bool Equals(string? x, string? y) => StringComparer.Ordinal.Equals(x, y);
+
+        public int GetHashCode(string value)
+        {
+            if (Interlocked.Increment(ref _hashCalls) <= barrier.ParticipantCount
+                && !barrier.SignalAndWait(TimeSpan.FromSeconds(30)))
+            {
+                throw new TimeoutException("Both connection registrations must reach the empty map.");
+            }
+            return StringComparer.Ordinal.GetHashCode(value);
+        }
+    }
+
+    #endregion
+
+    #region Resource-Scoped Proxy Cluster URI Tests (issue #139)
+
+    private const string WorkspaceUri =
+        "https://ade.loganalytics.io/subscriptions/sub-1/resourcegroups/rg-1/providers/microsoft.operationalinsights/workspaces/my-workspace";
+
+    private const string ComponentUri =
+        "https://ade.applicationinsights.io/subscriptions/sub-1/resourcegroups/rg-1/providers/microsoft.insights/components/my-app";
+
+    [TestMethod]
+    public void GetOrAddConnection_LogAnalyticsWorkspaceUri_PreservesResourcePath()
+    {
+        var manager = new ConnectionManager();
+
+        var connection = manager.GetOrAddConnection(WorkspaceUri);
+
+        Assert.AreEqual(WorkspaceUri, connection.Cluster);
+    }
+
+    [TestMethod]
+    public void GetOrAddConnection_ApplicationInsightsComponentUri_PreservesResourcePath()
+    {
+        var manager = new ConnectionManager();
+
+        var connection = manager.GetOrAddConnection(ComponentUri);
+
+        Assert.AreEqual(ComponentUri, connection.Cluster);
+    }
+
+    [TestMethod]
+    public void GetOrAddConnection_HostOutsideDefaultDomain_DoesNotThrow()
+    {
+        // KustoFacts.GetShortHostName returns null for any host outside the default
+        // domain, which used to be passed straight through as a dictionary key.
+        var manager = new ConnectionManager();
+
+        var connection = manager.GetOrAddConnection("https://ade.loganalytics.io");
+
+        Assert.AreEqual("ade.loganalytics.io", connection.Cluster);
+    }
+
+    [TestMethod]
+    public void TryGetConnection_ResourceScopedClusterUri_ResolvesByFullUri()
+    {
+        var manager = new ConnectionManager();
+        manager.GetOrAddConnection(WorkspaceUri);
+
+        var found = manager.TryGetConnection(WorkspaceUri, out var connection);
+
+        Assert.IsTrue(found);
+        Assert.AreEqual(WorkspaceUri, connection!.Cluster);
+    }
+
+    [TestMethod]
+    public void TryGetConnection_ResourceScopedClusterUri_AlsoResolvesByProxyHost()
+    {
+        // cluster() references in a query are normalized to a host name, so the
+        // front-door host must still resolve to a usable connection.
+        var manager = new ConnectionManager();
+        manager.GetOrAddConnection(WorkspaceUri);
+
+        var found = manager.TryGetConnection("ade.loganalytics.io", out var connection);
+
+        Assert.IsTrue(found);
+        Assert.AreEqual(WorkspaceUri, connection!.Cluster);
+    }
+
+    [TestMethod]
+    public void GetOrAddConnection_TwoWorkspacesOnSameProxyHost_RouteIndependently()
+    {
+        var manager = new ConnectionManager();
+        var otherUri = WorkspaceUri.Replace("my-workspace", "other-workspace");
+
+        var first = manager.GetOrAddConnection(WorkspaceUri);
+        var second = manager.GetOrAddConnection(otherUri);
+
+        Assert.AreEqual(WorkspaceUri, first.Cluster);
+        Assert.AreEqual(otherUri, second.Cluster);
+
+        // Each full URI resolves to its own connection - routing is per workspace.
+        Assert.IsTrue(manager.TryGetConnection(WorkspaceUri, out var foundFirst));
+        Assert.IsTrue(manager.TryGetConnection(otherUri, out var foundSecond));
+        Assert.AreEqual(WorkspaceUri, foundFirst!.Cluster);
+        Assert.AreEqual(otherUri, foundSecond!.Cluster);
+
+        // The shared front-door host is an ambiguous alias; it keeps the first
+        // registration rather than being overwritten by the second.
+        Assert.IsTrue(manager.TryGetConnection("ade.loganalytics.io", out var foundByHost));
+        Assert.AreEqual(WorkspaceUri, foundByHost!.Cluster);
+    }
+
     #endregion
 
     #region TryGetConnection Tests
@@ -103,6 +247,25 @@ public class ConnectionManagerTests
     #endregion
 
     #region IConnection.WithCluster Tests
+
+    [TestMethod]
+    [DataRow(WorkspaceUri)]
+    [DataRow(ComponentUri)]
+    public void WithCluster_ResourceScopedUri_PreservesRoutingAndContextAuthentication(string cluster)
+    {
+        IConnectionManager manager = new ConnectionManager();
+        var original = manager.GetOrAddConnection(
+            "Data Source=https://cluster1.kusto.windows.net;Initial Catalog=db1;Fed=true");
+
+        Assert.IsTrue(manager.TryGetConnection(cluster, "db2", original.Cluster, out var derived));
+
+        Assert.AreEqual(cluster, derived.Cluster);
+        Assert.AreEqual("db2", derived.Database);
+        Assert.AreEqual(cluster, GetBuilderProperty(derived, "PrimaryBuilder")!.DataSource);
+        Assert.IsTrue(GetBuilderProperty(derived, "PrimaryBuilder")!.FederatedSecurity);
+        Assert.AreEqual("cluster1.kusto.windows.net", original.Cluster);
+        Assert.AreEqual("db1", original.Database);
+    }
 
     [TestMethod]
     public void WithCluster_ReturnsNewConnectionWithDifferentCluster()
