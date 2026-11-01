@@ -19,6 +19,7 @@ import { formatCfHtml } from './clipboard';
 import { resultTableToHtml } from './html';
 import { resultTableToMarkdown } from './markdown';
 import { resultTableToTsv, formatCellValue } from './tsv';
+import { computeSelectionStats, formatSelectionStats } from './selectionStats';
 
 // ─── Interfaces ─────────────────────────────────────────────────────────────
 
@@ -126,6 +127,7 @@ class DataTableView implements IDataTableView {
                 const sel = msg.selection as { rows: number[]; cols: number[] } | null | undefined;
                 this.currentSelection = sel ?? null;
                 this.resolveExpression();
+                this.publishSelectionStats();
             }
             if (msg.command === 'setColumnView') {
                 this.applyColumnViewFromWebview(msg.columns);
@@ -144,7 +146,7 @@ class DataTableView implements IDataTableView {
         };
         const json = JSON.stringify(data).replace(/<\//g, '<\\/');
         const viewJson = JSON.stringify(this.viewState ?? null).replace(/<\//g, '<\\/');
-        webview.setContent(`<table></table>${this.buildInitScript(json, viewJson)}`);
+        webview.setContent(`<table></table><div class="selection-stats" hidden></div>${this.buildInitScript(json, viewJson)}`);
         this.resolveExpression();
     }
 
@@ -268,6 +270,7 @@ class DataTableView implements IDataTableView {
                 expression => {
                     if (expression) {
                         this.webview.invoke('setExpression', {
+                            _token: this.token,
                             expression,
                             html,
                             fullExpression: expression,
@@ -290,6 +293,7 @@ class DataTableView implements IDataTableView {
             ([expression, fullExpression]) => {
                 if (expression) {
                     this.webview.invoke('setExpression', {
+                        _token: this.token,
                         expression,
                         html,
                         fullExpression: fullExpression ?? expression,
@@ -299,6 +303,18 @@ class DataTableView implements IDataTableView {
             },
             () => { /* ignore errors */ }
         );
+    }
+
+    /**
+     * Computes aggregates for the current selection and pushes them to the
+     * webview's status bar. The webview only holds display strings, so the
+     * math runs here against the raw typed values. An empty selection sends
+     * empty text, which hides the bar.
+     */
+    private publishSelectionStats(): void {
+        const sel = this.currentSelection;
+        const stats = sel ? computeSelectionStats(this.table, sel.rows, sel.cols) : undefined;
+        this.webview.invoke('setSelectionStats', { text: formatSelectionStats(stats), _token: this.token });
     }
 
     /**
@@ -335,6 +351,9 @@ class DataTableView implements IDataTableView {
             display: flex;
             flex-direction: column;
             height: 100%;
+            /* Allow the wrapper to shrink below its content height so the
+               selection status bar below it stays visible. */
+            min-height: 0;
         }
         .datatable-top {
             padding: 4px 8px;
@@ -452,6 +471,22 @@ class DataTableView implements IDataTableView {
             outline: none !important;
             box-shadow: none !important;
         }
+        /* Selection statistics status bar. Pinned to the bottom of the view
+           and only shown while a selection is active. */
+        .selection-stats {
+            flex: 0 0 auto;
+            padding: 2px 8px;
+            font-size: 0.9em;
+            text-align: right;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            user-select: text;
+            color: var(--vscode-foreground);
+            background: var(--vscode-editorWidget-background, transparent);
+            border-top: 1px solid var(--vscode-panel-border, transparent);
+        }
+        .selection-stats[hidden] { display: none; }
         /* Cell selection (single cell on click; expanded by later steps). */
         tbody td.cell-selected {
             background: var(--vscode-list-activeSelectionBackground, #094771) !important;
@@ -644,16 +679,18 @@ class DataTableView implements IDataTableView {
         }
     });
 
-    // Clear the cell selection whenever the table is sorted. After a sort
-    // the row order changes and the saved selection coordinates would
-    // highlight unrelated cells, so we drop the selection entirely.
-    grid.on('datatable.sort', function() {
+    // Clear the cell selection when sorting, paging, or searching changes
+    // the visible rows, so saved coordinates and statistics cannot go stale.
+    function clearSelectionOnViewChange() {
         if (selectedCells.size === 0 && !selAnchor) return;
         selectedCells.clear();
         selAnchor = null;
         applySelection();
         postSelectionChange();
-    });
+    }
+    grid.on('datatable.sort', clearSelectionOnViewChange);
+    grid.on('datatable.page', clearSelectionOnViewChange);
+    grid.on('datatable.search', clearSelectionOnViewChange);
 
     // After every internal re-render the library rebuilds tbody (and may
     // touch thead). Re-apply our column order so reorder survives sort,
@@ -1773,8 +1810,11 @@ class DataTableView implements IDataTableView {
         var msg = event.data;
         if (!msg) return;
 
-        // Only respond to commands when this container is the active tab
-        if (!container.classList.contains('active')) return;
+        // Table replies belong to their originating view even after a tab switch.
+        // Broadcast commands still apply only to the active tab.
+        if (msg.command === 'setSelectionStats' || msg.command === 'setExpression') {
+            if (msg._token !== token) return;
+        } else if (!container.classList.contains('active')) return;
 
         if (msg.command === 'toggleSearch') {
             searchVisible = !searchVisible;
@@ -1782,6 +1822,18 @@ class DataTableView implements IDataTableView {
             if (searchVisible) {
                 var input = container.querySelector('.datatable-input');
                 if (input) input.focus();
+            }
+            return;
+        }
+
+        if (msg.command === 'setSelectionStats') {
+            var statsEl = container.querySelector('.selection-stats');
+            if (statsEl) {
+                var statsText = (typeof msg.text === 'string') ? msg.text : '';
+                // textContent, never innerHTML — the text is host-generated
+                // but the grid never injects markup into the page.
+                statsEl.textContent = statsText;
+                statsEl.hidden = statsText === '';
             }
             return;
         }
@@ -1816,6 +1868,13 @@ class DataTableView implements IDataTableView {
             // box) so they can still copy text from those.
             var ae = document.activeElement;
             if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) return;
+            // Statistics are selectable text, not part of the grid selection.
+            var textSelection = window.getSelection();
+            var statsEl = container.querySelector('.selection-stats');
+            if (statsEl && textSelection && !textSelection.isCollapsed &&
+                textSelection.toString() !== '' &&
+                statsEl.contains(textSelection.anchorNode) &&
+                statsEl.contains(textSelection.focusNode)) return;
             if (window._vscodeApi) {
                 window._vscodeApi.postMessage({ command: 'copyTable', _token: token });
             }
