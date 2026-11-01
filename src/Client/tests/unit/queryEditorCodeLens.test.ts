@@ -111,6 +111,45 @@ describe('KustoCodeLensProvider query range caching', () => {
         expect(getQueryRanges).toHaveBeenCalledTimes(2);
     });
 
+    it('does not cache a null response', async () => {
+        getQueryRanges.mockResolvedValueOnce(null);
+        const document = createDocument('file:///a.kql', 1);
+
+        const first = await provider.provideCodeLenses(document);
+        const second = await provider.provideCodeLenses(document);
+
+        expect(first).toHaveLength(0);
+        expect(second.length).toBeGreaterThan(0);
+        expect(getQueryRanges).toHaveBeenCalledTimes(2);
+    });
+
+    it('caches a successful result with no ranges', async () => {
+        getQueryRanges.mockResolvedValueOnce({ uri: 'file:///a.kql', ranges: [] });
+        const document = createDocument('file:///a.kql', 1);
+
+        await provider.provideCodeLenses(document);
+        await provider.provideCodeLenses(document);
+
+        expect(getQueryRanges).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps a newer version cached when an older request resolves to null', async () => {
+        let resolveFirst: (result: QueryRangesResult | null) => void = () => {};
+        const firstResult = new Promise<QueryRangesResult | null>(resolve => {
+            resolveFirst = resolve;
+        });
+        getQueryRanges.mockReturnValueOnce(firstResult);
+        const uri = 'file:///a.kql';
+        const firstRequest = provider.provideCodeLenses(createDocument(uri, 1));
+
+        await provider.provideCodeLenses(createDocument(uri, 2));
+        resolveFirst(null);
+        await firstRequest;
+        await provider.provideCodeLenses(createDocument(uri, 2));
+
+        expect(getQueryRanges).toHaveBeenCalledTimes(2);
+    });
+
     it('re-queries a document that was closed and reopened at the same version', async () => {
         const closeListener = vi.fn();
         const disposeSpy = vi.fn();

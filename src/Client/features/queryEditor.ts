@@ -734,12 +734,19 @@ export class KustoCodeLensProvider implements vscode.CodeLensProvider, vscode.Di
         const entry: CachedQueryRanges = { version, result };
         this.queryRangesCache.set(uri, entry);
 
-        result.catch(() => {
-            // Never leave a rejected request cached; the next request should retry.
+        const evictIfCurrent = (): void => {
             if (this.queryRangesCache.get(uri) === entry) {
                 this.queryRangesCache.delete(uri);
             }
-        });
+        };
+        void result.then(
+            queryRanges => {
+                if (queryRanges === null) {
+                    evictIfCurrent();
+                }
+            },
+            evictIfCurrent
+        );
 
         return result;
     }
