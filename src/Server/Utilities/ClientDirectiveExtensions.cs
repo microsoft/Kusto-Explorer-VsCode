@@ -55,6 +55,11 @@ public static class ClientDirectiveExtensions
                 if (cluster != null)
                 {
                     KustoFacts.GetHostAndPath(cluster, out clusterName, out var path);
+                    if (ConnectionFacts.TryGetResourceScopedClusterUri(cluster) is { } resourceUri)
+                    {
+                        clusterName = resourceUri;
+                        path = null;
+                    }
                     databaseName = GetStringValueAfterPrefix(arg.Text, "database(", end, out _)
                         ?? path;
                     return clusterName != null;
@@ -64,7 +69,7 @@ public static class ClientDirectiveExtensions
             {
                 connection = GetDirectiveArgumentStringValue(arg);
                 var builder = new KustoConnectionStringBuilder(connection);
-                clusterName = builder.Hostname;
+                clusterName = ConnectionFacts.TryGetResourceScopedClusterUri(builder.DataSource) ?? builder.Hostname;
                 databaseName = builder.InitialCatalog;
                 return true;
             }

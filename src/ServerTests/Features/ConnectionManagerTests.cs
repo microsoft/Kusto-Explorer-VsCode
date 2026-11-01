@@ -249,6 +249,25 @@ public class ConnectionManagerTests
     #region IConnection.WithCluster Tests
 
     [TestMethod]
+    [DataRow(WorkspaceUri)]
+    [DataRow(ComponentUri)]
+    public void WithCluster_ResourceScopedUri_PreservesRoutingAndContextAuthentication(string cluster)
+    {
+        IConnectionManager manager = new ConnectionManager();
+        var original = manager.GetOrAddConnection(
+            "Data Source=https://cluster1.kusto.windows.net;Initial Catalog=db1;Fed=true");
+
+        Assert.IsTrue(manager.TryGetConnection(cluster, "db2", original.Cluster, out var derived));
+
+        Assert.AreEqual(cluster, derived.Cluster);
+        Assert.AreEqual("db2", derived.Database);
+        Assert.AreEqual(cluster, GetBuilderProperty(derived, "PrimaryBuilder")!.DataSource);
+        Assert.IsTrue(GetBuilderProperty(derived, "PrimaryBuilder")!.FederatedSecurity);
+        Assert.AreEqual("cluster1.kusto.windows.net", original.Cluster);
+        Assert.AreEqual("db1", original.Database);
+    }
+
+    [TestMethod]
     public void WithCluster_ReturnsNewConnectionWithDifferentCluster()
     {
         var manager = new ConnectionManager();
