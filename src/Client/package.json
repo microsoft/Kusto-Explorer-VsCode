@@ -1086,6 +1086,11 @@
             "type": "boolean",
             "default": true,
             "description": "Show query separator lines (---) in the editor."
+          },
+          "msKustoExplorer.editor.showCodeLensForActiveQueryOnly": {
+            "type": "boolean",
+            "default": false,
+            "description": "Show the query action CodeLens (Select, Run, Copy, Format, Results) only above the query block containing the cursor or selection, instead of above every query block. A query that is still running keeps its running indicator even when the cursor moves elsewhere."
           }
         }
       },
