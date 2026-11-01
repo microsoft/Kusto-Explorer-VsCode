@@ -59,6 +59,58 @@ public class ConnectionManagerTests
         Assert.AreSame(connection1, connection2);
     }
 
+    [TestMethod]
+    [DataRow("https://mycluster.kusto.windows.net", "mycluster.kusto.windows.net", "mycluster")]
+    [DataRow(WorkspaceUri, WorkspaceUri, "ade.loganalytics.io")]
+    [DataRow(ComponentUri, ComponentUri, "ade.applicationinsights.io")]
+    public async Task GetOrAddConnection_ConcurrentCalls_ReturnCanonicalConnectionForAllAliases(
+        string connectionString, string cluster, string alias)
+    {
+        var manager = new ConnectionManager();
+        using var barrier = new Barrier(2);
+        var comparer = new ContendedConnectionStringComparer(barrier);
+        var field = typeof(ConnectionManager).GetField(
+            "_connectionStringsToInfoMap", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.IsNotNull(field);
+        var withComparers = field.FieldType.GetMethod("WithComparers", [typeof(IEqualityComparer<string>)]);
+        Assert.IsNotNull(withComparers);
+        field.SetValue(manager, withComparers.Invoke(field.GetValue(manager), [comparer]));
+
+        // Hold both callers before either can publish to the initially empty map.
+        // A start barrier alone would not guarantee that both initial lookups miss.
+        var calls = Enumerable.Range(0, 2).Select(_ => Task.Factory.StartNew(
+            () => manager.GetOrAddConnection(connectionString),
+            CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default)).ToArray();
+        var connections = await Task.WhenAll(calls);
+        var canonical = manager.GetOrAddConnection(connectionString);
+
+        foreach (var connection in connections)
+        {
+            Assert.AreSame(canonical, connection);
+        }
+        Assert.IsTrue(manager.TryGetConnection(cluster, out var byCluster));
+        Assert.AreSame(canonical, byCluster);
+        Assert.IsTrue(manager.TryGetConnection(alias, out var byAlias));
+        Assert.AreSame(canonical, byAlias);
+    }
+
+    private sealed class ContendedConnectionStringComparer(Barrier barrier) : IEqualityComparer<string>
+    {
+        private int _hashCalls;
+
+        public bool Equals(string? x, string? y) => StringComparer.Ordinal.Equals(x, y);
+
+        public int GetHashCode(string value)
+        {
+            if (Interlocked.Increment(ref _hashCalls) <= barrier.ParticipantCount
+                && !barrier.SignalAndWait(TimeSpan.FromSeconds(30)))
+            {
+                throw new TimeoutException("Both connection registrations must reach the empty map.");
+            }
+            return StringComparer.Ordinal.GetHashCode(value);
+        }
+    }
+
     #endregion
 
     #region Resource-Scoped Proxy Cluster URI Tests (issue #139)

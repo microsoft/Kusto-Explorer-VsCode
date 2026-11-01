@@ -75,7 +75,7 @@ public class ConnectionManager : IConnectionManager
         if (!_connectionStringsToInfoMap.TryGetValue(connectionString, out var info))
         {
             info = CreateConnectionInfo(connectionString);
-            ImmutableInterlocked.GetOrAdd(ref _connectionStringsToInfoMap, connectionString, info);
+            info = ImmutableInterlocked.GetOrAdd(ref _connectionStringsToInfoMap, connectionString, info);
 
             var cluster = info.Connection.Cluster;
             ImmutableInterlocked.GetOrAdd(ref _clusterToInfoMap, cluster, info);
