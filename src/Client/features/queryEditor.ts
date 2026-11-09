@@ -15,10 +15,12 @@ import type { HistoryEntry } from './historyManager';
 import type { HistoryPanel } from './historyPanel';
 import { formatCfHtml, type ClipboardItem, type IClipboard } from './clipboard';
 import { ENTITY_DEFINITION_SCHEME } from './entityDefinitionProvider';
+import { QueryRunTracker, type QueryRun } from './queryRunTracker';
 
 const PASTE_KIND = vscode.DocumentDropOrPasteEditKind.Text.append('kusto');
 const QUERY_RUNNING_CONTEXT_KEY = 'msKustoExplorer.queryRunning';
 const MIN_QUERY_RUNNING_INDICATOR_MS = 500;
+const QUERY_CANCELLED_MESSAGE_MS = 5000;
 
 /**
  * Builds a SelectionRange from optional CodeLens arguments.
@@ -118,6 +120,7 @@ export class QueryEditor {
     private queryRunningGeneration = 0;
     private queryRangeRunningGeneration = 0;
     private readonly runningQueryRanges = new Map<string, RunningQueryRangeState>();
+    private readonly queryRuns = new QueryRunTracker();
 
     constructor(
         context: vscode.ExtensionContext, 
@@ -147,7 +150,8 @@ export class QueryEditor {
             1
         );
         this.queryRunningStatusBarItem.text = '$(sync~spin) Running Kusto query';
-        this.queryRunningStatusBarItem.tooltip = 'A Kusto query is running';
+        this.queryRunningStatusBarItem.tooltip = 'A Kusto query is running. Click to cancel.';
+        this.queryRunningStatusBarItem.command = 'msKustoExplorer.cancelQuery';
         context.subscriptions.push(this.queryRunningStatusBarItem);
         void vscode.commands.executeCommand('setContext', QUERY_RUNNING_CONTEXT_KEY, false);
 
@@ -195,6 +199,7 @@ export class QueryEditor {
         }
 
         let queryRunIndicator: QueryRunIndicator | undefined;
+        let queryRun: QueryRun | undefined;
         try {
             const uri = editor.document.uri.toString();
             const selection = queryRange ?? {
@@ -226,13 +231,22 @@ export class QueryEditor {
             const executionStartedAt = new Date().toISOString();
             const startedAtMs = Date.now();
             const clientRequestId = createClientRequestId();
-            const runResult = await vscode.window.withProgress(
+            const run = this.queryRuns.start(clientRequestId, queryRunIndicator.key);
+            queryRun = run;
+            const outcome = await vscode.window.withProgress(
                 {
                     location: vscode.ProgressLocation.Window,
                     title: 'Running Kusto query...'
                 },
-                () => this.server.runQuery(queryText, connection?.cluster, connection?.database, true, undefined, clientRequestId)
+                () => this.queryRuns.whenCompletedOrCancelled(
+                    run,
+                    this.server.runQuery(queryText, connection?.cluster, connection?.database, true, undefined, clientRequestId))
             );
+            if (outcome.cancelled) {
+                vscode.window.setStatusBarMessage('$(circle-slash) Kusto query cancelled', QUERY_CANCELLED_MESSAGE_MS);
+                return;
+            }
+            const runResult = outcome.value;
             const executionDurationMs = Date.now() - startedAtMs;
 
             // If the result includes a connection string for an unknown cluster, add it as a server
@@ -282,9 +296,31 @@ export class QueryEditor {
         } 
         finally
         {
+            if (queryRun) {
+                this.queryRuns.finish(queryRun);
+            }
             if (queryRunIndicator) {
                 await this.endQueryRun(queryRunIndicator);
             }
+        }
+    }
+
+    /**
+     * Cancels the running queries for the query range given by CodeLens arguments,
+     * or all running queries when no range is given (editor title button, status bar, command palette).
+     * The run stops waiting immediately; the server cancels its request and the cluster-side query best-effort.
+     */
+    async cancelQuery(startLine?: number, startChar?: number, endLine?: number, endChar?: number): Promise<void> {
+        const range = rangeFromArgs(startLine, startChar, endLine, endChar);
+        const editor = vscode.window.activeTextEditor;
+        const rangeKey = range && editor ? getQueryRangeKey(editor.document.uri.toString(), range) : undefined;
+
+        const clientRequestIds = this.queryRuns.cancel(rangeKey);
+        const results = await Promise.allSettled(clientRequestIds.map(id => this.server.cancelQuery(id)));
+
+        const errors = results.map(r => r.status === 'rejected' ? String(r.reason) : r.value?.error).filter(e => !!e);
+        if (errors.length > 0) {
+            vscode.window.showWarningMessage(`The query was cancelled, but the cluster may still be running it: ${errors[0]}`);
         }
     }
 
@@ -681,9 +717,9 @@ class KustoCodeLensProvider implements vscode.CodeLensProvider {
             if (!isEntityDefinition) {
                 const isQueryRangeRunning = this.runningQueryRangeKeys.has(getQueryRangeKey(document.uri.toString(), range));
                 lenses.push(new vscode.CodeLens(vsRange, {
-                    title: isQueryRangeRunning ? '$(sync~spin) Running' : '▶ Run',
+                    title: isQueryRangeRunning ? '$(sync~spin) Cancel' : '▶ Run',
                     command: isQueryRangeRunning ? 'msKustoExplorer.runQuery.running' : 'msKustoExplorer.runQuery',
-                    tooltip: isQueryRangeRunning ? 'This Kusto query is running' : 'Run this query',
+                    tooltip: isQueryRangeRunning ? 'This Kusto query is running. Click to cancel.' : 'Run this query',
                     arguments: [range.start.line, range.start.character, range.end.line, range.end.character]
                 }));
             }

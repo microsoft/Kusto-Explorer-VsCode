@@ -2,6 +2,7 @@
 // Licensed under the MIT license.
 
 using System.Collections.Immutable;
+using System.Diagnostics.CodeAnalysis;
 
 using Kusto.Language;
 using Kusto.Language.Editor;
@@ -54,6 +55,12 @@ public interface IDocument
     /// Gets the text ranges for all the document sections.
     /// </summary>
     IReadOnlyList<TextRange> GetSectionRanges();
+
+    /// <summary>
+    /// Gets the parsed and bound code of the section at the position.
+    /// Positions within the code are relative to <paramref name="sectionStart"/>.
+    /// </summary>
+    bool TryGetSectionCode(int position, CancellationToken cancellationToken, [NotNullWhen(true)] out KustoCode? code, out int sectionStart);
 
     /// <summary>
     /// Gets the minimal text of the section associated with the document position.

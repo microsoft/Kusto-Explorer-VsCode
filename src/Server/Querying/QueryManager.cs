@@ -6,6 +6,7 @@ using Kusto.Data.Common;
 using Kusto.Language;
 using Kusto.Language.Editor;
 using Kusto.Language.Symbols;
+using System.Collections.Concurrent;
 using System.Collections.Immutable;
 
 namespace Kusto.Vscode;
@@ -128,13 +129,123 @@ public class QueryManager : IQueryManager
         }
     }
 
-    public Task<RunResult> RunQueryAsync(
+    /// <summary>
+    /// A run that can be cancelled by its caller's client request id.
+    /// </summary>
+    private sealed class RunningQuery
+    {
+        public required CancellationTokenSource Cancellation { get; init; }
+
+        /// <summary>
+        /// The connection and client request id of the request currently executing on the server, if any.
+        /// These differ from the run's own id when a run executes more than one request (e.g. stored query results).
+        /// </summary>
+        public (IConnection Connection, string ClientRequestId)? Executing { get; set; }
+    }
+
+    private readonly ConcurrentDictionary<string, RunningQuery> _runningQueries = new();
+
+    public async Task<RunResult> RunQueryAsync(
         EditString query,
         string? clusterName,
         string? databaseName,
         ImmutableDictionary<string, string> queryOptions,
         ImmutableDictionary<string, string> queryParameters,
         string? clientRequestId,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(clientRequestId))
+        {
+            return await RunQueryCoreAsync(query, clusterName, databaseName, queryOptions, queryParameters, clientRequestId, running: null, cancellationToken).ConfigureAwait(false);
+        }
+
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var running = new RunningQuery { Cancellation = cancellation };
+        if (!_runningQueries.TryAdd(clientRequestId, running))
+        {
+            // a duplicate id cannot be cancelled unambiguously, so run it untracked
+            return await RunQueryCoreAsync(query, clusterName, databaseName, queryOptions, queryParameters, clientRequestId, running: null, cancellationToken).ConfigureAwait(false);
+        }
+
+        try
+        {
+            var result = await RunQueryCoreAsync(query, clusterName, databaseName, queryOptions, queryParameters, clientRequestId, running, cancellation.Token)
+                .WaitAsync(cancellation.Token)
+                .ConfigureAwait(false);
+
+            return cancellation.IsCancellationRequested
+                ? new RunResult { Query = query, Error = CreateDiagnostic(query, QueryCancelledMessage) }
+                : result;
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+            // Control commands do not observe the token, so the request may still complete in
+            // the background; its result is discarded.
+            return new RunResult { Query = query, Error = CreateDiagnostic(query, QueryCancelledMessage) };
+        }
+        finally
+        {
+            _runningQueries.TryRemove(new KeyValuePair<string, RunningQuery>(clientRequestId, running));
+        }
+    }
+
+    internal const string QueryCancelledMessage = "The query was cancelled.";
+
+    public async Task<CancelQueryResult> CancelQueryAsync(string clientRequestId, CancellationToken cancellationToken)
+    {
+        if (!_runningQueries.TryGetValue(clientRequestId, out var running))
+        {
+            return new CancelQueryResult { Found = false };
+        }
+
+        // Cancel before reading the executing request: ExecuteQueryAsync publishes a request and then
+        // checks the token, so a request published after this read is never started on the server.
+        running.Cancellation.Cancel();
+
+        (IConnection Connection, string ClientRequestId)? executing;
+        lock (running)
+        {
+            executing = running.Executing;
+        }
+
+        if (executing is not { } request)
+        {
+            return new CancelQueryResult { Found = true };
+        }
+
+        string? error = null;
+        try
+        {
+            var command = $".cancel query {KustoFacts.GetStringLiteral(request.ClientRequestId)}";
+            var result = await request.Connection.ExecuteAsync(command, cancellationToken: cancellationToken).ConfigureAwait(false);
+            error = result.Diagnostics?.FirstOrDefault()?.Message;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            error = ex.Message;
+        }
+
+        if (error != null)
+        {
+            _logger?.Log($"Cancel query '{request.ClientRequestId}' failed: {error}");
+        }
+
+        return new CancelQueryResult
+        {
+            Found = true,
+            CancelledClientRequestId = request.ClientRequestId,
+            Error = error
+        };
+    }
+
+    private Task<RunResult> RunQueryCoreAsync(
+        EditString query,
+        string? clusterName,
+        string? databaseName,
+        ImmutableDictionary<string, string> queryOptions,
+        ImmutableDictionary<string, string> queryParameters,
+        string? clientRequestId,
+        RunningQuery? running,
         CancellationToken cancellationToken)
     {
         var context = new ExecutionContext
@@ -186,7 +297,7 @@ public class QueryManager : IQueryManager
                 });
         }
 
-        return ExecuteQueryAsync(connection, context, cancellationToken);
+        return ExecuteQueryAsync(connection, context, running, cancellationToken);
     }
 
     private static bool IsDirective(string text)
@@ -253,7 +364,7 @@ public class QueryManager : IQueryManager
         public string? StoredQueryResultName { get; init; }
     }
 
-    private async Task<RunResult> ExecuteQueryAsync(IConnection connection, ExecutionContext context, CancellationToken cancellationToken)
+    private async Task<RunResult> ExecuteQueryAsync(IConnection connection, ExecutionContext context, RunningQuery? running, CancellationToken cancellationToken)
     {
         // some servers will if there is any comment or whitespace preceeding the first token
         var query = RemoveLeadingTrivia(context.Query);
@@ -274,7 +385,7 @@ public class QueryManager : IQueryManager
         {
             // execute command to execute query and store results on server
             var command = query.ReplaceAt(0, query.Length, CslCommandGenerator.GenerateStoredQueryResultSetOrReplaceCommand(context.StoredQueryResultName, query, previewCount: 0));
-            var commandResult = await ExecuteQueryAsync(connection, context with { Query = command, StoredQueryResultName = null }, cancellationToken).ConfigureAwait(false);
+            var commandResult = await ExecuteQueryAsync(connection, context with { Query = command, StoredQueryResultName = null }, running, cancellationToken).ConfigureAwait(false);
             if (commandResult.Error != null)
                 return commandResult;
 
@@ -282,6 +393,17 @@ public class QueryManager : IQueryManager
             query = query.ReplaceAt(0, query.Length, $"stored_query_result({KustoFacts.GetStringLiteral(context.StoredQueryResultName)})");
             executeClientRequestId = AddClientRequestIdSuffix(context.ClientRequestId, "fetchStoredQueryResult");
         }
+
+        if (running != null && executeClientRequestId != null)
+        {
+            lock (running)
+            {
+                running.Executing = (connection, executeClientRequestId);
+            }
+        }
+
+        // checked after publishing the request so CancelQueryAsync either sees it or prevents it from starting
+        cancellationToken.ThrowIfCancellationRequested();
 
         var executeResult = await connection.ExecuteAsync(
             query,

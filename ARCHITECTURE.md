@@ -169,7 +169,7 @@ the concrete `LanguageClient`, which keeps them testable and server-agnostic.
 ### 3.2 The typed server seam — `features/server.ts`
 
 `IServer` is the single typed contract for everything the client asks of the language server:
-`runQuery`, `getQueryResultType`, `getDatabaseInfo`, `validateQuery`, `refreshSchema`, entity and
+`runQuery`, `cancelQuery`, `getQueryResultType`, `getDatabaseInfo`, `validateQuery`, `refreshSchema`, entity and
 paste helpers, plus notifications in both directions. The concrete `Server`:
 
 - Centralizes every custom `kusto/*` request so return-type signatures live in one place.
@@ -190,7 +190,7 @@ Features are grouped by responsibility. Key ones:
 | Area | Modules | Responsibility |
 |------|---------|----------------|
 | **Connections** | `connectionManager.ts`, `connectionsPanel.ts`, `connectionStatusBar.ts`, `authentication.ts` | Persist clusters/groups (in `globalState`) and per-document cluster/database assignments (in `workspaceState`); render the Connections tree; show the active connection in the status bar; acquire AAD tokens. |
-| **Query editing** | `queryEditor.ts`, `markdown.ts` | Run/format/copy queries; CodeLens-driven selection; paste transforms; document schema refresh. |
+| **Query editing** | `queryEditor.ts`, `queryRunTracker.ts`, `markdown.ts` | Run/cancel/format/copy queries; CodeLens-driven selection; paste transforms; document schema refresh. `queryRunTracker.ts` is the VS Code-free model of in-flight runs (client request ID per run, cancel by range or all). |
 | **Results** | `resultsViewer.ts`, `dataTableProvider.ts`, `webview.ts`, `html.ts`, `tsv.ts` | Display query results in webviews; tabular grid (`simple-datatables`); copy/export; drag-and-drop as `datatable` expressions. |
 | **Charts** | `chartProvider.ts`, `compositeChartProvider.ts`, `chartEditorProvider.ts`, `plotlyChartProvider.ts`, `graphChartProvider.ts`, `timePivotChartProvider.ts` | Render and edit charts from results; save as `.kqr`; copy as image. |
 | **Scratch pads** | `scratchPadManager.ts`, `scratchPadPanel.ts` | In-memory `.kql` documents (custom `kusto-scratchpad:` scheme) that need no file on disk. |
@@ -259,8 +259,10 @@ with `[JsonRpcMethod]`-attributed virtual methods mapped to LSP request names. `
 those handlers and also declares the custom `kusto/*` methods.
 
 `OnInitializeAsync` advertises the server's capabilities: semantic tokens, completion (with trigger
-characters), hover, folding, formatting, document highlight, references, definition, code actions,
-and rename — each one corresponds to a Kusto code service.
+characters), hover, signature help, document symbols, folding, formatting, document highlight,
+references, definition, code actions, and rename. Most map to a Kusto code service; signature help
+and document symbols have no `Kusto.Language` API, so they are computed in `LanguageFeatures/` (see
+below).
 
 ### 4.2 The manager layer — `Server.cs` as coordinator
 
@@ -271,6 +273,7 @@ concrete implementations). Responsibilities are split so each manager owns one c
 | Folder | Type(s) | Responsibility |
 |--------|---------|----------------|
 | `Documents/` | `DocumentManager`, `SectionedDocument`, `IDocument` | Track open documents; wrap `Kusto.Language.Editor.CodeScript`; expose per-section editor services (diagnostics, completion, hover, classification, code actions). |
+| `LanguageFeatures/` | `SignatureHelpFeatures`, `DocumentSymbolFeatures`, `FeatureResult<T>` | Host-independent editor features that `Kusto.Language` lacks: static pure functions over one section's `KustoCode`, a position, and a `CancellationToken`, returning plain DTOs (character offsets, no LSP types). `Server.cs` maps them to LSP; tests target the DTOs. Kept free of host dependencies so a shared language core can adopt them. |
 | `Symbols/` | `SymbolManager` | Build and hold the shared `GlobalState` (cluster/database symbols) the parser needs; raise `GlobalsChanged`. |
 | `Schema/` | `SchemaManager`, `ServerSchemaSource`, `ISchemaSource` | Fetch live schema via `.show` commands and cache it (memory + `IStorage`), with background refresh. |
 | `Connections/` | `ConnectionManager`, `KustoConnection`, `IConnection` | Pool Kusto connections; execute queries/commands; handle auth fallback. |
@@ -315,6 +318,12 @@ sequenceDiagram
 token from `IAuthenticationProvider` — i.e. a token the *client* obtained from VS Code's Microsoft
 account provider. This is what makes sign-in work uniformly across local, remote-SSH, WSL, and
 Codespaces.
+
+**Cancellation:** each run is keyed by the client request ID the client generated. `cancelQuery`
+(`kusto/cancelQuery`) makes `QueryManager.CancelQueryAsync` abort the local run and send a
+best-effort `.cancel query` to the cluster for the request ID actually executing — which, when
+stored query results are used, is the `;fetchStoredQueryResult`-suffixed ID during the fetch phase.
+The client resolves the run as cancelled immediately and ignores any late result.
 
 ### 4.4 Keeping symbols and diagnostics live
 
