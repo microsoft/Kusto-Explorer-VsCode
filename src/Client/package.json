@@ -2356,7 +2356,7 @@
     "eslint": "^9.0.0",
     "typescript": "^5.0.0",
     "typescript-eslint": "^8.62.0",
-    "vitest": "^4.1.11"
+    "vitest": "^4.1.12"
   },
   "overrides": {
     "diff": "^8.0.3",
