@@ -2364,7 +2364,7 @@
     ]
   },
   "dependencies": {
-    "azure-kusto-data": "7.2.0",
+    "azure-kusto-data": "8.0.0",
     "fast-xml-parser": "^5.10.1",
     "vscode-languageclient": "^9.0.0"
   },

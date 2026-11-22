@@ -3,7 +3,6 @@
 
 import { describe, it, expect } from 'vitest';
 import {
-    parseJsonPreservingBigInts,
     stripLeadingTrivia,
     isCommand,
     isClientDirective,
@@ -55,24 +54,6 @@ function v2Response(primary: { id: number; columns: [string, string][]; rows: un
     frames.push({ FrameType: 'DataSetCompletion', HasErrors: false, Cancelled: false });
     return frames;
 }
-
-describe('parseJsonPreservingBigInts', () => {
-    it('keeps unsafe integers as exact strings when the runtime exposes the source', () => {
-        const parsed = parseJsonPreservingBigInts('{"big":9007199254740993,"small":42,"neg":-9223372036854775808,"real":1.5e300}') as Record<string, unknown>;
-        // Node 22+ / Chromium expose context.source; older runtimes degrade to plain numbers.
-        const supportsSource = parsed['big'] !== 9007199254740992;
-        if (supportsSource) {
-            expect(parsed['big']).toBe('9007199254740993');
-            expect(parsed['neg']).toBe('-9223372036854775808');
-        }
-        expect(parsed['small']).toBe(42);
-        expect(parsed['real']).toBe(1.5e300);
-    });
-
-    it('throws on invalid JSON', () => {
-        expect(() => parseJsonPreservingBigInts('{')).toThrow();
-    });
-});
 
 describe('query text helpers', () => {
     it('strips leading whitespace and comment lines', () => {

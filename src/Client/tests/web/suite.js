@@ -71,6 +71,13 @@ async function run() {
     assert(primary.rows[0][0] === 1, `print x=1 returns 1: ${JSON.stringify(primary.rows)}`);
     log(`server.runQuery print x=1 -> ${JSON.stringify(primary.rows)}`);
 
+    const integers = await api.server.runQuery('print low=long(-9223372036854775808), high=long(9223372036854775807), nested=dynamic({"n":9223372036854775807})', CLUSTER, DATABASE);
+    assert(!integers?.error, `int64 query succeeds: ${JSON.stringify(integers?.error)}`);
+    const integerRow = integers.data.tables[0].rows[0];
+    assert(integerRow[0] === '-9223372036854775808' && integerRow[1] === '9223372036854775807', `int64 boundaries stay exact: ${JSON.stringify(integerRow)}`);
+    assert(integerRow[2]?.n === '9223372036854775807', `nested dynamic long stays exact: ${JSON.stringify(integerRow)}`);
+    log(`int64 and dynamic values -> ${JSON.stringify(integerRow)}`);
+
     const failed = await api.server.runQuery('print x=1\n| tkae 1', CLUSTER, DATABASE);
     assert(failed?.error?.range, `syntax error has a range: ${JSON.stringify(failed)}`);
     log(`syntax error -> ${failed.error.message} at ${JSON.stringify(failed.error.range)}`);

@@ -53,29 +53,6 @@ export class KustoInBandError extends Error {
 }
 
 // =============================================================================
-// JSON parsing
-// =============================================================================
-
-/**
- * Parses JSON, keeping integers outside the IEEE-754 safe range as their exact
- * decimal string instead of silently rounding them. Kusto `long` values above
- * 2^53 would otherwise display wrong. Uses the JSON.parse reviver `context.source`
- * argument where the runtime provides it (Chromium, recent Firefox/Safari);
- * elsewhere it degrades to plain JSON.parse, which is what desktop does today.
- */
-export function parseJsonPreservingBigInts(text: string): unknown {
-    return JSON.parse(text, function (_key: string, value: unknown, context?: { source?: string }) {
-        if (typeof value === 'number'
-            && !Number.isSafeInteger(value)
-            && context?.source !== undefined
-            && /^-?\d+$/.test(context.source)) {
-            return context.source;
-        }
-        return value;
-    } as (this: unknown, key: string, value: unknown) => unknown);
-}
-
-// =============================================================================
 // Query text helpers
 // =============================================================================
 

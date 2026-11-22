@@ -30,9 +30,6 @@ const options = {
         '@azure/identity': './web/azureIdentityStub.ts',
     },
     define: {
-        // Workaround for azure-kusto-data 7.2.0, whose clientDetails reads `window`
-        // unguarded; a web worker has no window (fix: Azure/azure-kusto-node#437).
-        window: 'globalThis',
         'process.env.NODE_ENV': '"production"',
     },
     logLevel: 'info',

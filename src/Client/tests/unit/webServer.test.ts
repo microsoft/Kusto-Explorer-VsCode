@@ -28,7 +28,6 @@ const PRINT_ONE = [
 /** A fake KustoClient that answers from a handler and records each call. */
 function fakeFactory(handler: (call: Call) => unknown | Promise<unknown>) {
     const calls: Call[] = [];
-    const closed: string[] = [];
     const factory = (clusterUrl: string, getToken: () => Promise<string>): KustoClientLike => {
         const run = async (endpoint: 'query' | 'mgmt', db: string, text: string, properties?: ClientRequestProperties) => {
             await getToken();
@@ -39,10 +38,9 @@ function fakeFactory(handler: (call: Call) => unknown | Promise<unknown>) {
         return {
             executeQuery: (db, text, properties) => run('query', db, text, properties),
             executeMgmt: (db, text, properties) => run('mgmt', db, text, properties),
-            close: () => { closed.push(clusterUrl); },
         };
     };
-    return { factory, calls, closed };
+    return { factory, calls };
 }
 
 function createServer(handler: (call: Call) => unknown | Promise<unknown>, documents: Record<string, string> = {}) {
@@ -54,7 +52,7 @@ function createServer(handler: (call: Call) => unknown | Promise<unknown>, docum
 
 describe('WebServer.runQuery', () => {
     it('runs queries against the v2 endpoint with request options', async () => {
-        const { server, calls, closed, getToken } = createServer(() => PRINT_ONE);
+        const { server, calls, getToken } = createServer(() => PRINT_ONE);
         const result = await server.runQuery('print 1', 'help.kusto.windows.net', 'Samples', true, 100, 'crid-1');
 
         expect(result).toEqual({
@@ -68,9 +66,9 @@ describe('WebServer.runQuery', () => {
         expect(calls[0]).toMatchObject({ endpoint: 'query', clusterUrl: 'https://help.kusto.windows.net', db: 'Samples', text: 'print 1' });
         expect(calls[0]!.properties?.clientRequestId).toBe('crid-1');
         expect(calls[0]!.properties?.raw).toBe(true);
+        expect(calls[0]!.properties?.largeIntegersAsStrings).toBe(true);
         expect(calls[0]!.properties?.getOption('request_readonly')).toBe(true);
         expect(calls[0]!.properties?.getOption('query_take_max_records')).toBe(100);
-        expect(closed).toHaveLength(1);
     });
 
     it('sends commands to the mgmt endpoint and uses the default database when none is set', async () => {
@@ -119,17 +117,15 @@ describe('WebServer.runQuery', () => {
 });
 
 describe('WebServer cancellation', () => {
-    it('closes the request and asks the service to cancel it', async () => {
+    it('aborts only the selected request through the SDK signal', async () => {
         let release: (v: unknown) => void = () => {};
-        const { server, calls, closed } = createServer(call => call.text.startsWith('.cancel')
-            ? v1(['RunningQueryCanceled'], [['True']])
-            : new Promise(resolve => { release = resolve; }));
+        const { server, calls } = createServer(() => new Promise(resolve => { release = resolve; }));
 
         const running = server.runQuery('print 1', 'help.kusto.windows.net', 'Samples', true, undefined, 'crid-2');
         await vi.waitFor(() => expect(calls).toHaveLength(1));
         await expect(server.cancelQuery('crid-2')).resolves.toBe(true);
-        expect(calls[1]).toMatchObject({ endpoint: 'mgmt', db: 'Samples', text: '.cancel query "crid-2"' });
-        expect(closed.length).toBeGreaterThanOrEqual(2);
+        expect(calls[0]!.properties?.abortSignal?.aborted).toBe(true);
+        expect(calls).toHaveLength(1);
 
         release(PRINT_ONE);
         await running;
