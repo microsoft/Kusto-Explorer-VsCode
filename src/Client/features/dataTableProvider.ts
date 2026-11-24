@@ -19,6 +19,7 @@ import { formatCfHtml } from './clipboard';
 import { resultTableToHtml } from './html';
 import { resultTableToMarkdown } from './markdown';
 import { resultTableToTsv, formatCellValue } from './tsv';
+import { WebviewLibraries, escapeForInlineScript } from './webviewHtml';
 import { computeSelectionStats, formatSelectionStats } from './selectionStats';
 
 // ─── Interfaces ─────────────────────────────────────────────────────────────
@@ -144,8 +145,8 @@ class DataTableView implements IDataTableView {
             columns: table.columns.map(c => ({ ...c })),
             rows: table.rows.map(row => row.map(cell => formatCellValue(cell)))
         };
-        const json = JSON.stringify(data).replace(/<\//g, '<\\/');
-        const viewJson = JSON.stringify(this.viewState ?? null).replace(/<\//g, '<\\/');
+        const json = escapeForInlineScript(JSON.stringify(data), false);
+        const viewJson = escapeForInlineScript(JSON.stringify(this.viewState ?? null), false);
         webview.setContent(`<table></table><div class="selection-stats" hidden></div>${this.buildInitScript(json, viewJson)}`);
         this.resolveExpression();
     }
@@ -342,8 +343,8 @@ class DataTableView implements IDataTableView {
     // ─── HTML Builders ──────────────────────────────────────────────────
 
     static buildHeadHtml(): string {
-        return `<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/simple-datatables@9/dist/style.min.css">
-    <script src="https://cdn.jsdelivr.net/npm/simple-datatables@9/dist/umd/simple-datatables.min.js"><\/script>
+        return `<link rel="stylesheet" href="${WebviewLibraries.simpleDataTablesStyle}">
+    <script src="${WebviewLibraries.simpleDataTablesScript}"><\/script>
     <style>
         /* Simple-DataTables overrides for VS Code theme */
         .datatable-wrapper {

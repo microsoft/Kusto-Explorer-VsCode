@@ -432,5 +432,6 @@ src/Client/PATH.TXT
 
 # VS Code integration test runner
 src/Client/.vscode-test/
+.vscode-test-web/
 src/Client/test-workspace/
 

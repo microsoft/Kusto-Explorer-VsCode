@@ -17,9 +17,23 @@ import type { IChartEditorProvider, IChartEditorView } from './chartEditorProvid
 import type { IDataTableProvider, IDataTableView } from './dataTableProvider';
 import type { IWebView } from './webview';
 import { escapeHtml } from './html';
+import { finalizeWebviewHtml } from './webviewHtml';
 
 /** The view type used for the custom results viewer. */
 const resultViewerViewType = 'msKustoExplorer_resultViewer';
+
+/** Assigns result HTML to a webview with bundled-library URIs resolved and the CSP applied. */
+function setWebviewHtml(webview: vscode.Webview, html: string, mediaRoot: vscode.Uri): void {
+    webview.html = finalizeWebviewHtml(html, {
+        cspSource: webview.cspSource,
+        mediaUri: webview.asWebviewUri(mediaRoot).toString(),
+    });
+}
+
+/** Webview options for result views: scripts on, local resources limited to the bundled media. */
+function resultWebviewOptions(mediaRoot: vscode.Uri): vscode.WebviewOptions {
+    return { enableScripts: true, localResourceRoots: [mediaRoot] };
+}
 
 /**
  * Controls which content sections are shown in a result view.
@@ -290,7 +304,7 @@ async function saveResults(source: { data: server.ResultData }): Promise<{ uri: 
         return { uri: finalUri, alreadyOpen: true };
     }
 
-    await vscode.workspace.fs.writeFile(finalUri, Buffer.from(content, 'utf-8'));
+    await vscode.workspace.fs.writeFile(finalUri, new TextEncoder().encode(content));
     return { uri: finalUri, alreadyOpen: false };
 }
 
@@ -403,6 +417,8 @@ interface IViewerPanelState {
     readonly editorWebViews: Map<vscode.WebviewPanel, WebViewAdapter>;
     readonly dataTableViews: Map<vscode.WebviewPanel, IDataTableView[]>;
     readonly dataTableWebViews: Map<vscode.WebviewPanel, WebViewAdapter[]>;
+    /** Folder of bundled webview libraries (`dist/media`). */
+    readonly mediaRoot: vscode.Uri;
     registerResultWebview(webview: vscode.WebviewPanel): void;
     wireChartView(view: IChartView): void;
 }
@@ -415,6 +431,7 @@ export class ResultsViewer {
     private readonly chartEditorProvider: IChartEditorProvider;
     private readonly dataTableProvider: IDataTableProvider;
     private readonly htmlBuilder: DocumentViewProvider;
+    private readonly mediaRoot: vscode.Uri;
 
     // ─── Per-panel state (exposed to DocumentViewProvider via IViewerPanelState) ─
     /** Map from webview to its viewer state. */
@@ -477,6 +494,7 @@ export class ResultsViewer {
             editorWebViews: this.editorWebViews,
             dataTableViews: this.dataTableViews,
             dataTableWebViews: this.dataTableWebViews,
+            mediaRoot: this.mediaRoot,
             registerResultWebview: (webview) => this.registerResultWebview(webview),
             wireChartView: (view) => this.wireChartView(view),
         };
@@ -488,6 +506,7 @@ export class ResultsViewer {
         this.chartProvider = chartProvider;
         this.chartEditorProvider = chartEditorProvider;
         this.dataTableProvider = dataTableProvider;
+        this.mediaRoot = vscode.Uri.joinPath(context.extensionUri, 'dist', 'media');
         this.htmlBuilder = new DocumentViewProvider(this.createPanelStateAccessor(), chartProvider, chartEditorProvider, dataTableProvider);
 
         context.subscriptions.push(
@@ -529,7 +548,7 @@ export class ResultsViewer {
                     panelReadyPromise = undefined;
                 }
                 webviewView.webview.options = {
-                    enableScripts: true,
+                    ...resultWebviewOptions(this.mediaRoot),
                     enableForms: false
                 };
 
@@ -582,7 +601,7 @@ export class ResultsViewer {
                         vscode.commands.executeCommand('setContext', 'msKustoExplorer.panelChartActive', message.viewId === 'chart');
                     }
                 });
-                webviewView.webview.html = '<html>no results</html>';
+                setWebviewHtml(webviewView.webview, '<html>no results</html>', this.mediaRoot);
             }
         }, {
             webviewOptions: {
@@ -970,7 +989,7 @@ export class ResultsViewer {
         }
 
         try {
-            this.resultsPanel.webview.html = html;
+            setWebviewHtml(this.resultsPanel.webview, html, this.mediaRoot);
 
             if (rowCount) {
                 this.resultsPanel.badge = { tooltip: `${rowCount} rows`, value: rowCount };
@@ -991,7 +1010,7 @@ export class ResultsViewer {
             await vscode.commands.executeCommand('msKustoExplorer_resultsView.focus');
             if (this.resultsPanel) {
                 try {
-                    this.resultsPanel.webview.html = html;
+                    setWebviewHtml(this.resultsPanel.webview, html, this.mediaRoot);
                     if (rowCount) {
                         this.resultsPanel.badge = { tooltip: `${rowCount} rows`, value: rowCount };
                     }
@@ -1005,7 +1024,7 @@ export class ResultsViewer {
 
     private clearResultsPanel(): void {
         if (this.resultsPanel) {
-            this.resultsPanel.webview.html = '<html>no results</html>';
+            setWebviewHtml(this.resultsPanel.webview, '<html>no results</html>', this.mediaRoot);
             this.resultsPanel.badge = undefined;
         }
         this.lastPanelResultData = undefined;
@@ -1027,7 +1046,7 @@ export class ResultsViewer {
             'msKustoExplorer_singletonView',
             title,
             { viewColumn, preserveFocus: true },
-            { enableScripts: true, retainContextWhenHidden: true }
+            { ...resultWebviewOptions(this.mediaRoot), retainContextWhenHidden: true }
         );
 
         vscode.commands.executeCommand('msKustoExplorer.singletonViewStateChanged');
@@ -1141,7 +1160,7 @@ export class ResultsViewer {
         vscode.commands.executeCommand('setContext', 'msKustoExplorer.resultViewerShowingData', !hasChart);
 
         this.singletonView!.title = title;
-        this.singletonView!.webview.html = html;
+        setWebviewHtml(this.singletonView!.webview, html, this.mediaRoot);
         // In beside mode, keep focus on the query editor; in main mode, activate the panel
         // so that activeWebviewPanelId is set and toolbar commands become available.
         this.singletonView!.reveal(viewColumn, /*preserveFocus*/ location === 'beside');
@@ -1188,7 +1207,7 @@ export class ResultsViewer {
             this.singletonWriteBackTimer = undefined;
             if (this.singletonBackingUri && this.singletonResultData) {
                 const content = JSON.stringify(this.singletonResultData, null, 2);
-                vscode.workspace.fs.writeFile(this.singletonBackingUri, Buffer.from(content, 'utf-8'))
+                vscode.workspace.fs.writeFile(this.singletonBackingUri, new TextEncoder().encode(content))
                     .then(undefined, error => console.error('Failed to write back result data:', error));
             }
         }, 1000);
@@ -1201,7 +1220,7 @@ export class ResultsViewer {
         }
         if (this.singletonBackingUri && this.singletonResultData) {
             const content = JSON.stringify(this.singletonResultData, null, 2);
-            vscode.workspace.fs.writeFile(this.singletonBackingUri, Buffer.from(content, 'utf-8'))
+            vscode.workspace.fs.writeFile(this.singletonBackingUri, new TextEncoder().encode(content))
                 .then(undefined, error => console.error('Failed to write back result data:', error));
         }
     }
@@ -1230,7 +1249,7 @@ export class ResultsViewer {
                 const tableNames = updated.tables.map(t => t.name);
                 const html = this.htmlBuilder.BuildMultiTabbedHtml(false, this.singletonMode ?? 'all', this.singletonWebView, this.singletonEditorWebView, undefined,
                     updated.query, updated.cluster, updated.database, updated.tables, this.singletonTableWebViews);
-                this.singletonView!.webview.html = injectMessageHandlerScripts(html);
+                setWebviewHtml(this.singletonView!.webview, injectMessageHandlerScripts(html), this.mediaRoot);
 
                 this.viewerStates.set(this.singletonView!, {
                     resultData: updated,
@@ -1612,9 +1631,7 @@ class DocumentViewProvider implements vscode.CustomTextEditorProvider {
         webviewPanel: vscode.WebviewPanel,
         _token: vscode.CancellationToken
     ): Promise<void> {
-        webviewPanel.webview.options = {
-            enableScripts: true
-        };
+        webviewPanel.webview.options = resultWebviewOptions(this.viewer.mediaRoot);
 
         // Track this results viewer webview for copy commands
         this.viewer.registerResultWebview(webviewPanel);
@@ -1773,12 +1790,12 @@ class DocumentViewProvider implements vscode.CustomTextEditorProvider {
         try {
             resultData = JSON.parse(text) as server.ResultData;
         } catch {
-            webviewPanel.webview.html = '<html><body><p>Invalid result file.</p></body></html>';
+            setWebviewHtml(webviewPanel.webview, '<html><body><p>Invalid result file.</p></body></html>', this.viewer.mediaRoot);
             return;
         }
 
         if (!resultData?.tables?.length) {
-            webviewPanel.webview.html = '<html><body><p>No result data found.</p></body></html>';
+            setWebviewHtml(webviewPanel.webview, '<html><body><p>No result data found.</p></body></html>', this.viewer.mediaRoot);
             return;
         }
 
@@ -1788,7 +1805,7 @@ class DocumentViewProvider implements vscode.CustomTextEditorProvider {
         const hasTable = !!resultData.tables.length;
 
         if (!hasTable && !hasChart) {
-            webviewPanel.webview.html = '<html><body><p>Failed to render results.</p></body></html>';
+            setWebviewHtml(webviewPanel.webview, '<html><body><p>Failed to render results.</p></body></html>', this.viewer.mediaRoot);
             return;
         }
 
@@ -1861,7 +1878,7 @@ class DocumentViewProvider implements vscode.CustomTextEditorProvider {
 
         const html = this.BuildMultiTabbedHtml(hasChart, 'all', docWebView, docEditorWebView, chartOptions,
             resultData.query, resultData.cluster, resultData.database, resultData.tables, docTableWebViews);
-        webviewPanel.webview.html = injectMessageHandlerScripts(html);
+        setWebviewHtml(webviewPanel.webview, injectMessageHandlerScripts(html), this.viewer.mediaRoot);
     }
 
     private async updateChartOnly(state: ResultViewerState, webviewPanel: vscode.WebviewPanel): Promise<void> {
@@ -1924,22 +1941,22 @@ class DocumentViewProvider implements vscode.CustomTextEditorProvider {
         let tabButtons = '';
         if (showTabs) {
             const chartButton = showChart
-                ? `<button class="active" data-view="chart" onclick="switchView('chart')">Chart</button>`
+                ? `<button class="active" data-view="chart">Chart</button>`
                 : '';
 
             let tableButtonsHtml = '';
             if (showTables) {
                 if (tables.length === 1) {
-                    tableButtonsHtml = `<button${showChart ? '' : ' class="active"'} data-view="table-0" onclick="switchView('table-0')">Data</button>`;
+                    tableButtonsHtml = `<button${showChart ? '' : ' class="active"'} data-view="table-0">Data</button>`;
                 } else {
                     tableButtonsHtml = tables.map((t, i) =>
-                        `<button${!showChart && i === 0 ? ' class="active"' : ''} data-view="table-${i}" onclick="switchView('table-${i}')">${this.escapeHtml(t.name)} (${t.rows.length})</button>`
+                        `<button${!showChart && i === 0 ? ' class="active"' : ''} data-view="table-${i}">${this.escapeHtml(t.name)} (${t.rows.length})</button>`
                     ).join('');
                 }
             }
 
             const queryButton = showQuery
-                ? `<button data-view="query" onclick="switchView('query')">Query</button>`
+                ? `<button data-view="query">Query</button>`
                 : '';
 
             tabButtons = chartButton + tableButtonsHtml + queryButton;
@@ -2085,6 +2102,15 @@ class DocumentViewProvider implements vscode.CustomTextEditorProvider {
         // Track whether the user wants the edit panel open
         var editPanelUserVisible = false;
 
+        // Scripts in chart HTML posted later are re-created below and need the
+        // page's CSP nonce to run.
+        var pageScriptNonce = document.currentScript ? document.currentScript.nonce : '';
+
+        document.addEventListener('click', function(e) {
+            var btn = e.target.closest ? e.target.closest('.view-toggle button[data-view]') : null;
+            if (btn) switchView(btn.getAttribute('data-view'));
+        });
+
         function switchView(viewId) {
             document.querySelectorAll('.view-content').forEach(function(el) { el.classList.remove('active'); });
             document.querySelectorAll('.view-toggle button[data-view]').forEach(function(el) { el.classList.remove('active'); });
@@ -2143,6 +2169,7 @@ class DocumentViewProvider implements vscode.CustomTextEditorProvider {
                 // Re-execute inline scripts (innerHTML doesn't execute them)
                 chartDiv.querySelectorAll('script').forEach(function(oldScript) {
                     var newScript = document.createElement('script');
+                    if (pageScriptNonce) { newScript.nonce = pageScriptNonce; }
                     if (oldScript.src) { newScript.src = oldScript.src; }
                     else { newScript.textContent = oldScript.textContent; }
                     oldScript.parentNode.replaceChild(newScript, oldScript);

@@ -6,6 +6,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { ScratchPadManager } from '../../features/scratchPadManager';
+import { NodeFileStore } from '../../features/nodeFileStore';
 import type * as vscode from 'vscode';
 
 /** Creates a minimal mock ExtensionContext pointing at a temp directory. */
@@ -35,7 +36,7 @@ describe('ScratchPadManager', () => {
     });
 
     function createManager(): ScratchPadManager {
-        return new ScratchPadManager(createMockContext(tmpDir));
+        return new ScratchPadManager(createMockContext(tmpDir), new NodeFileStore(scratchpadDir));
     }
 
     describe('constructor', () => {
@@ -270,21 +271,20 @@ describe('ScratchPadManager', () => {
     });
 
     describe('writeFile', () => {
-        it('writes content to the backing file', () => {
+        it('writes content to the backing file', async () => {
             const mgr = createManager();
             const content = new TextEncoder().encode('new content');
 
-            mgr.writeFile(scratchUri('ScratchPad1.kql'), content);
+            await mgr.writeFile(scratchUri('ScratchPad1.kql'), content);
 
             expect(fs.readFileSync(path.join(scratchpadDir, 'ScratchPad1.kql'), 'utf-8')).toBe('new content');
         });
     });
 
-    describe('diskPath', () => {
-        it('resolves URI to file path in scratchpads directory', () => {
+    describe('fileName', () => {
+        it('resolves URI to the backing file name in the store', () => {
             const mgr = createManager();
-            const result = mgr.diskPath(scratchUri('Test.kql'));
-            expect(result).toBe(path.join(scratchpadDir, 'Test.kql'));
+            expect(mgr.fileName(scratchUri('Test.kql'))).toBe('Test.kql');
         });
     });
 

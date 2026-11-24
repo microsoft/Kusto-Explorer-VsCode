@@ -72,7 +72,7 @@ function isTokenExpiringSoon(accessToken: string): boolean {
         // base64url -> base64
         const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
         const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4);
-        const json = Buffer.from(padded, 'base64').toString('utf8');
+        const json = new TextDecoder().decode(Uint8Array.from(atob(padded), c => c.charCodeAt(0)));
         const payload = JSON.parse(json) as { exp?: number };
         if (typeof payload.exp !== 'number') {
             return true;

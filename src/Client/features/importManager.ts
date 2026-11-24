@@ -3,35 +3,28 @@
 
 /*
  * This module implements the ImportManager class, which handles the logic
- * of importing connections and scratch pads from desktop Kusto Explorer.
- * It is UI-free — the Importer class handles prompts and messages.
+ * of importing connections and scratch pads from desktop Kusto Explorer
+ * (from its local data folder or from files the user picks), and of exporting
+ * and importing this extension's connections as JSON.
+ * It is UI-free and host-independent — the Importer class handles prompts and
+ * messages, and desktop-only access to %LOCALAPPDATA% lives in kustoExplorerLocalData.ts.
  */
 
-import * as path from 'path';
-import * as fs from 'fs';
 import { XMLParser } from 'fast-xml-parser';
 import { type ConnectionManager, isServerGroup } from './connectionManager';
-import type { ServerInfo, ServerGroupInfo } from './connectionManager';
+import type { ServerInfo, ServerGroupInfo, ServerOrGroup } from './connectionManager';
 import type { ScratchPadManager } from './scratchPadManager';
+import { pathBaseName } from './fileStore';
 
 // =============================================================================
 // Constants
 // =============================================================================
 
-/** Kusto Explorer user data directory name under %LOCALAPPDATA%. */
-const KUSTO_EXPLORER_DIR = 'Kusto.Explorer';
-
-/** Filename for the groups index. */
-const GROUPS_FILE = 'UserConnectionGroups.xml';
-
 /** Default group name used by Kusto Explorer for ungrouped connections. */
 const DEFAULT_GROUP_NAME = 'Connections';
 
-/** Recovery directory under Kusto Explorer for scratch pad backup files. */
-const RECOVERY_DIR = 'Recovery';
-
-/** Extension for Kusto Explorer scratch pad backup files. */
-const RECOVERY_EXT = '.kebak';
+/** Format marker of this extension's connections export file. */
+export const CONNECTIONS_EXPORT_FORMAT = 'msKustoExplorer.connections';
 
 // =============================================================================
 // Types
@@ -57,33 +50,99 @@ export interface ImportScratchPadsResult {
     importedCount: number;
 }
 
+/** Contents of this extension's connections export file. */
+export interface ConnectionsExport {
+    format: typeof CONNECTIONS_EXPORT_FORMAT;
+    version: 1;
+    items: ServerOrGroup[];
+}
+
+/**
+ * Read access to a desktop Kusto Explorer installation's data folder
+ * (%LOCALAPPDATA%\Kusto.Explorer). Not available on the web.
+ */
+export interface IKustoExplorerLocalData {
+    /** True if UserConnectionGroups.xml exists. */
+    hasGroupsFile(): boolean;
+    /** Contents of UserConnectionGroups.xml, or undefined if it doesn't exist. */
+    readGroupsFile(): Promise<string | undefined>;
+    /** Contents of a group connections file referenced by the groups file, or undefined if it doesn't exist. */
+    readFile(filePath: string): Promise<string | undefined>;
+    /** True if any scratch pad recovery (.kebak) file exists. */
+    hasRecoveryFiles(): boolean;
+    /** Raw contents of the scratch pad recovery (.kebak) files. */
+    readRecoveryFiles(): string[];
+}
+
+/** A file picked by the user for import. */
+export interface ImportFile {
+    /** File name, used in messages. */
+    name: string;
+    text: string;
+    /**
+     * Reads a file referenced by path from inside this file (the group files listed
+     * in a Kusto Explorer UserConnectionGroups.xml). Returns undefined if unreadable.
+     */
+    readReferencedFile?(filePath: string): Promise<string | undefined>;
+}
+
+/** What kind of content an import file holds. */
+export type ImportFileKind = 'connectionsExport' | 'connectionsXml' | 'groupsXml' | 'recovery' | 'unknown';
+
+/** Result of importing user-picked files. */
+export interface ImportFilesResult {
+    importedConnections: number;
+    skippedConnections: number;
+    importedScratchPads: number;
+    /** Names of files whose content wasn't recognized. */
+    unrecognizedFiles: string[];
+    /** Group connection files referenced by a groups file that couldn't be read. */
+    missingGroupFiles: string[];
+    /** True if any file was a connections export, whose connections come without their secrets. */
+    importedConnectionsExport: boolean;
+}
+
+/** A group of servers to import; an undefined name means the root level. */
+interface ImportGroup {
+    name: string | undefined;
+    servers: ServerInfo[];
+}
+
 // =============================================================================
 // ImportManager Class
 // =============================================================================
 
 /**
- * Handles the logic of importing connections and scratch pads from desktop Kusto Explorer.
+ * Handles the logic of importing connections and scratch pads from desktop Kusto Explorer,
+ * and of exporting and importing this extension's connections.
  * This class is UI-free — the Importer class handles prompts and messages.
  */
 export class ImportManager {
+    /**
+     * @param localData access to a local Kusto Explorer installation; undefined where
+     *   the local file system isn't readable (the web build).
+     */
     constructor(
         private readonly scratchPadManager: ScratchPadManager,
         private readonly connections: ConnectionManager,
+        private readonly localData?: IKustoExplorerLocalData,
     ) {}
 
     // ─── Discovery ───────────────────────────────────────────────────
 
+    /** True if a local Kusto Explorer installation can be read on this host. */
+    get canReadKustoExplorerData(): boolean {
+        return this.localData !== undefined;
+    }
+
     /** Returns true if there are connections from Kusto Explorer to import. */
     hasConnectionsToImport(): boolean {
-        const groupsPath = this.getGroupsFilePath();
-        return !!groupsPath && fs.existsSync(groupsPath);
+        return this.localData?.hasGroupsFile() ?? false;
     }
 
     /** Returns true if there are scratch pads from Kusto Explorer to import. */
     hasScratchPadsToImport(): boolean {
-        const recoveryDir = this.getRecoveryDirPath();
-        if (!recoveryDir || !fs.existsSync(recoveryDir)) { return false; }
-        return fs.readdirSync(recoveryDir).some(f => f.endsWith(RECOVERY_EXT));
+        return this.localData?.hasRecoveryFiles() ?? false;
     }
 
     /** Returns the number of scratch pads from Kusto Explorer to import. */
@@ -100,34 +159,46 @@ export class ImportManager {
      * @returns The result with imported and skipped counts, or undefined if no groups file found.
      */
     async importConnections(): Promise<ImportConnectionsResult | undefined> {
-        const groupsPath = this.getGroupsFilePath();
-        if (!groupsPath || !fs.existsSync(groupsPath)) {
+        const groupsXml = await this.localData?.readGroupsFile();
+        if (groupsXml === undefined) {
             return undefined;
         }
 
-        const groups = parseGroupsXml(await fs.promises.readFile(groupsPath, 'utf-8'));
+        const groups = parseGroupsXml(groupsXml);
         if (groups.length === 0) {
             return { importedCount: 0, skippedCount: 0 };
         }
 
+        const importGroups: ImportGroup[] = [];
+        for (const group of groups) {
+            const xml = await this.localData!.readFile(group.filePath);
+            if (xml === undefined) {
+                continue;
+            }
+            importGroups.push(await this.toImportGroup(group.name, xml));
+        }
+
+        return this.importGroups(importGroups);
+    }
+
+    /** Parses a Kusto Explorer connections XML file into a group to import. */
+    private async toImportGroup(groupName: string | undefined, xml: string): Promise<ImportGroup> {
+        const servers = await parseConnectionsXml(xml, this.connections);
+        return { name: groupName === DEFAULT_GROUP_NAME ? undefined : groupName, servers };
+    }
+
+    /** Adds servers to the ConnectionManager, creating groups as needed and skipping duplicate clusters. */
+    private async importGroups(groups: ImportGroup[]): Promise<ImportConnectionsResult> {
         let importedCount = 0;
         let skippedCount = 0;
 
         for (const group of groups) {
-            if (!fs.existsSync(group.filePath)) {
+            if (group.servers.length === 0) {
                 continue;
             }
 
-            const xml = await fs.promises.readFile(group.filePath, 'utf-8');
-            const servers = await parseConnectionsXml(xml, this.connections);
-            if (servers.length === 0) {
-                continue;
-            }
-
-            const isDefaultGroup = group.name === DEFAULT_GROUP_NAME;
-
-            // Ensure the group exists (unless it's the default root group)
-            if (!isDefaultGroup) {
+            // Ensure the group exists (unless it's the root level)
+            if (group.name !== undefined) {
                 const existing = this.connections.getServersAndGroups();
                 const groupExists = existing.items.some(
                     item => isServerGroup(item) && item.name === group.name
@@ -138,14 +209,14 @@ export class ImportManager {
                 }
             }
 
-            for (const server of servers) {
+            for (const server of group.servers) {
                 // Check for duplicates by cluster hostname
                 if (this.connections.findServerInfo(server.cluster)) {
                     skippedCount++;
                     continue;
                 }
 
-                await this.connections.addServer(server, isDefaultGroup ? undefined : group.name);
+                await this.connections.addServer(server, group.name);
                 importedCount++;
             }
         }
@@ -160,28 +231,15 @@ export class ImportManager {
      * Returns undefined if none are found.
      */
     private getScratchPadRecoveryFiles(): KustoExplorerRecoveryFile[] | undefined {
-        const recoveryDir = this.getRecoveryDirPath();
-        if (!recoveryDir || !fs.existsSync(recoveryDir)) {
-            return undefined;
-        }
-
-        const kebakFiles = fs.readdirSync(recoveryDir).filter(f => f.endsWith(RECOVERY_EXT));
-        if (kebakFiles.length === 0) {
+        if (!this.localData?.hasRecoveryFiles()) {
             return undefined;
         }
 
         const entries: KustoExplorerRecoveryFile[] = [];
-        for (const file of kebakFiles) {
-            try {
-                const raw = fs.readFileSync(path.join(recoveryDir, file), 'utf-8');
-                const entry: KustoExplorerRecoveryFile = JSON.parse(raw);
-                // Only import scratch pad documents (no FullPath). Files with a
-                // FullPath were already saved to disk and are just recovery backups.
-                if (entry.QueryText?.trim() && !entry.FullPath?.trim()) {
-                    entries.push(entry);
-                }
-            } catch {
-                // Skip malformed files
+        for (const raw of this.localData.readRecoveryFiles()) {
+            const entry = parseRecoveryFile(raw);
+            if (entry) {
+                entries.push(entry);
             }
         }
 
@@ -271,20 +329,92 @@ export class ImportManager {
         return importedCount;
     }
 
-    // ─── Path Helpers ────────────────────────────────────────────────
+    // ─── Import from Files ───────────────────────────────────────────
 
-    /** Returns the path to UserConnectionGroups.xml, or undefined. */
-    private getGroupsFilePath(): string | undefined {
-        const localAppData = process.env.LOCALAPPDATA;
-        if (!localAppData) { return undefined; }
-        return path.join(localAppData, KUSTO_EXPLORER_DIR, GROUPS_FILE);
+    /**
+     * Imports user-picked files: Kusto Explorer connection files (UserConnections.xml,
+     * group files, or UserConnectionGroups.xml), Kusto Explorer scratch pad recovery
+     * (.kebak) files, and this extension's connections export (JSON).
+     */
+    async importFiles(files: ImportFile[]): Promise<ImportFilesResult> {
+        const result: ImportFilesResult = {
+            importedConnections: 0,
+            skippedConnections: 0,
+            importedScratchPads: 0,
+            unrecognizedFiles: [],
+            missingGroupFiles: [],
+            importedConnectionsExport: false,
+        };
+        const recoveryFiles: KustoExplorerRecoveryFile[] = [];
+
+        // Groups files go first so a group file picked together with its UserConnectionGroups.xml
+        // is imported once, into its group, rather than again at the root level.
+        const classified = files.map(file => ({ file, kind: classifyImportFile(file.text) }));
+        classified.sort((a, b) => Number(b.kind === 'groupsXml') - Number(a.kind === 'groupsXml'));
+        const referencedFileNames = new Set<string>();
+
+        for (const { file, kind } of classified) {
+            const groups: ImportGroup[] = [];
+            switch (kind) {
+                case 'connectionsExport':
+                    groups.push(...exportToImportGroups(JSON.parse(file.text) as ConnectionsExport));
+                    result.importedConnectionsExport = true;
+                    break;
+                case 'connectionsXml':
+                    if (!referencedFileNames.has(file.name.toLowerCase())) {
+                        groups.push(await this.toImportGroup(undefined, file.text));
+                    }
+                    break;
+                case 'groupsXml':
+                    for (const group of parseGroupsXml(file.text)) {
+                        const xml = await file.readReferencedFile?.(group.filePath);
+                        if (xml === undefined) {
+                            result.missingGroupFiles.push(group.filePath);
+                            continue;
+                        }
+                        referencedFileNames.add(pathBaseName(group.filePath).toLowerCase());
+                        groups.push(await this.toImportGroup(group.name, xml));
+                    }
+                    break;
+                case 'recovery': {
+                    const entry = parseRecoveryFile(file.text);
+                    if (entry) {
+                        recoveryFiles.push(entry);
+                    }
+                    break;
+                }
+                default:
+                    result.unrecognizedFiles.push(file.name);
+                    break;
+            }
+
+            const counts = await this.importGroups(groups);
+            result.importedConnections += counts.importedCount;
+            result.skippedConnections += counts.skippedCount;
+        }
+
+        recoveryFiles.sort((a, b) => (a.TabOrdinal ?? 0) - (b.TabOrdinal ?? 0));
+        result.importedScratchPads = await this.importRecoveryFiles(recoveryFiles);
+        return result;
     }
 
-    /** Returns the path to the Kusto Explorer Recovery directory, or undefined. */
-    private getRecoveryDirPath(): string | undefined {
-        const localAppData = process.env.LOCALAPPDATA;
-        if (!localAppData) { return undefined; }
-        return path.join(localAppData, KUSTO_EXPLORER_DIR, RECOVERY_DIR);
+    // ─── Export Connections ──────────────────────────────────────────
+
+    /**
+     * Serializes all configured servers and groups to this extension's JSON export format.
+     * Secrets (passwords, application keys, tokens, certificate private keys) are removed
+     * from the connection strings so the file is safe to share.
+     */
+    exportConnections(): string {
+        const stripServer = (server: ServerInfo): ServerInfo =>
+            ({ ...server, connection: removeConnectionStringSecrets(server.connection) });
+        const data: ConnectionsExport = {
+            format: CONNECTIONS_EXPORT_FORMAT,
+            version: 1,
+            items: this.connections.getServersAndGroups().items.map(item =>
+                isServerGroup(item) ? { ...item, servers: item.servers.map(stripServer) } : stripServer(item)),
+        };
+        return JSON.stringify(data, null, 2);
     }
 }
 
@@ -313,6 +443,79 @@ export function parseDatabaseFromConnectionString(connectionString: string): str
         return undefined;
     }
     return database;
+}
+
+/**
+ * Secret-bearing connection string keywords and their aliases, lowercased with whitespace
+ * removed. Taken from the keywords Kusto.Data's KustoConnectionStringBuilder masks
+ * (Password, Application Key, Application Token, User Token) plus the certificate private
+ * key keyword azure-kusto-data marks as secret. A client secret is the Application Key.
+ */
+export const SECRET_CONNECTION_STRING_KEYWORDS: ReadonlySet<string> = new Set([
+    'password', 'pwd',
+    'applicationkey', 'appkey',
+    'applicationtoken', 'apptoken',
+    'usertoken', 'usrtoken',
+    'applicationcertificateprivatekey',
+]);
+
+/**
+ * Removes secret-bearing `keyword=value` parts from a Kusto connection string, keeping every
+ * other part verbatim. Keywords match case-insensitively and ignoring whitespace. Values may be
+ * quoted with ' or " (a doubled quote escapes it), so a quoted secret containing ';' is removed
+ * whole; an unterminated quote removes the rest of the string.
+ */
+export function removeConnectionStringSecrets(connectionString: string): string {
+    const kept: string[] = [];
+    let removed = false;
+    let i = 0;
+    while (i < connectionString.length) {
+        const start = i;
+        // Keyword: up to the first '=' that isn't doubled ('==' is a literal '=' in a keyword).
+        let eq = -1;
+        while (i < connectionString.length && connectionString[i] !== ';') {
+            if (connectionString[i] === '=') {
+                if (connectionString[i + 1] === '=') {
+                    i += 2;
+                    continue;
+                }
+                eq = i;
+                break;
+            }
+            i++;
+        }
+        if (eq >= 0) {
+            i = eq + 1;
+            while (i < connectionString.length && /\s/.test(connectionString[i]!)) {
+                i++;
+            }
+            const quote = connectionString[i];
+            if (quote === '"' || quote === "'") {
+                i++;
+                while (i < connectionString.length) {
+                    if (connectionString[i] === quote) {
+                        if (connectionString[i + 1] !== quote) {
+                            break;
+                        }
+                        i++;
+                    }
+                    i++;
+                }
+            }
+            while (i < connectionString.length && connectionString[i] !== ';') {
+                i++;
+            }
+        }
+        const part = connectionString.substring(start, i);
+        i++;
+        const keyword = eq >= 0 ? connectionString.substring(start, eq).replace(/==/g, '=').replace(/\s+/g, '').toLowerCase() : undefined;
+        if (keyword !== undefined && SECRET_CONNECTION_STRING_KEYWORDS.has(keyword)) {
+            removed = true;
+        } else {
+            kept.push(part);
+        }
+    }
+    return removed ? kept.join(';') : connectionString;
 }
 
 /**
@@ -369,3 +572,75 @@ export async function parseConnectionsXml(xml: string, connections: ConnectionMa
 
     return results;
 }
+
+/**
+ * Parses a Kusto Explorer scratch pad recovery (.kebak) file. Returns undefined for
+ * malformed files and for documents that were saved to disk (they have a FullPath and
+ * are only recovery backups).
+ */
+export function parseRecoveryFile(raw: string): KustoExplorerRecoveryFile | undefined {
+    try {
+        const entry: KustoExplorerRecoveryFile = JSON.parse(raw);
+        if (entry?.QueryText?.trim() && !entry.FullPath?.trim()) {
+            return entry;
+        }
+    } catch {
+        // Malformed file
+    }
+    return undefined;
+}
+
+/** Determines what an import file holds from its content. */
+export function classifyImportFile(text: string): ImportFileKind {
+    const trimmed = text.replace(/^\uFEFF/, '').trimStart();
+    if (trimmed.startsWith('{')) {
+        try {
+            const json = JSON.parse(trimmed);
+            if (json?.format === CONNECTIONS_EXPORT_FORMAT && Array.isArray(json.items)) {
+                return 'connectionsExport';
+            }
+            if (typeof json?.QueryText === 'string') {
+                return 'recovery';
+            }
+        } catch {
+            // Not JSON
+        }
+        return 'unknown';
+    }
+    if (trimmed.startsWith('<')) {
+        if (/<ArrayOfServerGroupDescription[\s>]/.test(trimmed)) {
+            return 'groupsXml';
+        }
+        if (/<ArrayOfServerDescriptionBase[\s>]/.test(trimmed)) {
+            return 'connectionsXml';
+        }
+    }
+    return 'unknown';
+}
+
+/** Converts a connections export into groups to import, keeping only well-formed entries and known fields. */
+function exportToImportGroups(data: ConnectionsExport): ImportGroup[] {
+    const toServers = (items: unknown[]): ServerInfo[] => items.flatMap(item => {
+        const s = item as Partial<ServerInfo> | null;
+        if (typeof s?.connection !== 'string' || typeof s.cluster !== 'string' || !s.cluster) {
+            return [];
+        }
+        const server: ServerInfo = { connection: s.connection, cluster: s.cluster };
+        if (typeof s.displayName === 'string') { server.displayName = s.displayName; }
+        if (typeof s.serverKind === 'string') { server.serverKind = s.serverKind; }
+        return [server];
+    });
+
+    const root: ImportGroup = { name: undefined, servers: [] };
+    const groups: ImportGroup[] = [root];
+    for (const item of data.items as unknown[]) {
+        const group = item as Partial<ServerGroupInfo> | null;
+        if (typeof group?.name === 'string' && Array.isArray(group.servers)) {
+            groups.push({ name: group.name, servers: toServers(group.servers) });
+        } else {
+            root.servers.push(...toServers([item]));
+        }
+    }
+    return groups;
+}
+

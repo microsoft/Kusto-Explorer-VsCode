@@ -42,12 +42,22 @@ export interface IClipboard {
     copyText(text: string): Promise<void>;
 }
 
+/** Places multiple data formats on the system clipboard (host-specific). */
+export type MultiFormatCopier = (items: ClipboardItem[]) => Promise<void>;
+
 /**
  * Manages clipboard operations with rich context metadata.
  */
 export class Clipboard implements IClipboard {
     /** Stored clipboard context from the last copy operation with context. */
     private clipboardContext: ClipboardContext | undefined;
+
+    /**
+     * @param multiFormatCopier copies rich formats (HTML, PNG, …) where the host supports it
+     *   (desktop Windows); without it only plain text is copied.
+     */
+    constructor(private readonly multiFormatCopier?: MultiFormatCopier) {
+    }
 
     /**
      * Stores clipboard context alongside the system clipboard text.
@@ -73,12 +83,12 @@ export class Clipboard implements IClipboard {
 
     /**
      * Copies multiple data formats to the clipboard.
-     * On Windows, uses PowerShell to set multiple clipboard formats (HTML, PNG, etc.).
-     * On other platforms, falls back to plain text only using VS Code's clipboard API.
+     * Uses the host's multi-format copier when there is one (PowerShell on Windows);
+     * otherwise falls back to plain text only using VS Code's clipboard API.
      */
     async copyItems(items: ClipboardItem[]): Promise<void> {
-        if (process.platform === 'win32') {
-            return copyToClipboardWindows(items);
+        if (this.multiFormatCopier) {
+            return this.multiFormatCopier(items);
         } else {
             return copyToClipboardFallback(items);
         }
@@ -112,10 +122,11 @@ export function formatCfHtml(html: string): string {
     const prefix = '<html><body>\r\n<!--StartFragment-->';
     const suffix = '<!--EndFragment-->\r\n</body></html>';
 
-    const headerBytes = Buffer.byteLength(header, 'utf8');
-    const prefixBytes = Buffer.byteLength(prefix, 'utf8');
-    const htmlBytes = Buffer.byteLength(html, 'utf8');
-    const suffixBytes = Buffer.byteLength(suffix, 'utf8');
+    const encoder = new TextEncoder();
+    const headerBytes = encoder.encode(header).length;
+    const prefixBytes = encoder.encode(prefix).length;
+    const htmlBytes = encoder.encode(html).length;
+    const suffixBytes = encoder.encode(suffix).length;
 
     const startHtml = headerBytes;
     const startFragment = headerBytes + prefixBytes;
@@ -136,7 +147,7 @@ export function formatCfHtml(html: string): string {
 
 /**
  * Copies to clipboard using VS Code's plain text API.
- * Used as fallback on non-Windows platforms.
+ * Used as fallback where the host has no multi-format copier.
  */
 async function copyToClipboardFallback(items: ClipboardItem[]): Promise<void> {
     // Find the best text item to use
@@ -153,69 +164,4 @@ async function copyToClipboardFallback(items: ClipboardItem[]): Promise<void> {
             await vscode.env.clipboard.writeText(firstItem.data);
         }
     }
-}
-
-/**
- * Copies multiple data formats to the Windows clipboard using PowerShell.
- * Uses System.Windows.Forms.Clipboard to support multiple formats.
- */
-function copyToClipboardWindows(items: ClipboardItem[]): Promise<void> {
-    const { spawn } = require('child_process') as typeof import('child_process');
-
-    // Use PowerShell to set the clipboard data in multiple formats
-    // because vscode does not supply a way to set non-text clipboard data and we want to support both PNG and SVG formats for charts.
-    return new Promise<void>((resolve, reject) => {
-        const psScript = `
-            Add-Type -AssemblyName System.Windows.Forms
-            $json = $input | Out-String
-            $items = ($json | ConvertFrom-Json)
-            $data = New-Object System.Windows.Forms.DataObject
-            $streams = @()
-            foreach ($item in $items) {
-                if ($item.encoding -eq 'text') {
-                    $data.SetData($item.format, $item.data)
-                } else {
-                    if ($item.encoding -eq 'base64') {
-                        $bytes = [Convert]::FromBase64String($item.data)
-                    } else {
-                        $bytes = [System.Text.Encoding]::UTF8.GetBytes($item.data)
-                    }
-                    $stream = New-Object System.IO.MemoryStream(,$bytes)
-                    $streams += $stream
-                    $data.SetData($item.format, $false, $stream)
-                    # Also set as standard bitmap so Electron apps (Teams, Discord) can paste it
-                    if ($item.format -eq 'PNG') {
-                        Add-Type -AssemblyName System.Drawing
-                        $imgStream = New-Object System.IO.MemoryStream(,$bytes)
-                        $streams += $imgStream
-                        $bitmap = [System.Drawing.Image]::FromStream($imgStream)
-                        # Force 96 DPI so the bitmap renders at full pixel size on HiDPI displays
-                        # (otherwise it inherits the screen DPI and appears the same logical size)
-                        $bitmap.SetResolution(96, 96)
-                        $data.SetImage($bitmap)
-                    }
-                }
-            }
-            [System.Windows.Forms.Clipboard]::SetDataObject($data, $true)
-            foreach ($s in $streams) { $s.Dispose() }
-        `;
-
-        const ps = spawn('powershell', ['-sta', '-NoProfile', '-Command', psScript]);
-
-        const payload = JSON.stringify(items);
-        ps.stdin.write(payload);
-        ps.stdin.end();
-
-        ps.on('close', (code: number) => {
-            if (code === 0) {
-                resolve();
-            } else {
-                reject(new Error(`PowerShell exited with code ${code}`));
-            }
-        });
-
-        ps.on('error', (err: Error) => {
-            reject(err);
-        });
-    });
 }

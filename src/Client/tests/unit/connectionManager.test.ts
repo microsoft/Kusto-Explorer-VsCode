@@ -146,7 +146,7 @@ describe('ConnectionManager', () => {
 
         it('addServer notifies the language server', async () => {
             await mgr.addServer(makeServer('cluster1.kusto.windows.net'));
-            expect(server.sendConnectionsUpdated).toHaveBeenCalled();
+            expect(server.sendConnectionsUpdated).toHaveBeenCalledWith(['https://cluster1.kusto.windows.net']);
         });
 
         it('addServerGroup adds a group', async () => {
@@ -282,6 +282,20 @@ describe('ConnectionManager', () => {
             const connections = mgr.getConfiguredConnections();
             expect(connections).toContain('root.kusto.windows.net');
             expect(connections).toContain('grouped.kusto.windows.net');
+        });
+    });
+
+    describe('getConfiguredConnectionStrings', () => {
+        it('returns connection strings from both root and groups', async () => {
+            await mgr.addServer(makeServer('root.kusto.windows.net', 'Data Source=https://root.kusto.windows.net:8080;Initial Catalog=Root'));
+            await mgr.addServerGroup(makeGroup('G', [
+                makeServer('grouped.kusto.windows.net', 'Data Source=https://grouped.kusto.windows.net:8443;Initial Catalog=Grouped'),
+            ]));
+
+            expect(mgr.getConfiguredConnectionStrings()).toEqual([
+                'Data Source=https://root.kusto.windows.net:8080;Initial Catalog=Root',
+                'Data Source=https://grouped.kusto.windows.net:8443;Initial Catalog=Grouped',
+            ]);
         });
     });
 

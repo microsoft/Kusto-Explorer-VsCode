@@ -10,13 +10,8 @@ import type { HistoryEntry } from '../../features/historyManager';
 import { computeHistoryDisplayLabel } from '../../features/historyManager';
 import type { ResultData, IServer } from '../../features/server';
 import { NullServer } from '../../features/server';
+import { NodeFileStore } from '../../features/nodeFileStore';
 import type * as vscode from 'vscode';
-
-function createMockContext(storageDir: string): vscode.ExtensionContext {
-    return {
-        globalStorageUri: { fsPath: storageDir },
-    } as unknown as vscode.ExtensionContext;
-}
 
 function makeResultData(query: string, rows: number = 1): ResultData {
     return {
@@ -45,7 +40,7 @@ describe('HistoryManager', () => {
     });
 
     function createManager(server?: IServer): HistoryManager {
-        return new HistoryManager(createMockContext(tmpDir), server ?? new NullServer());
+        return new HistoryManager(server ?? new NullServer(), new NodeFileStore(historyDir));
     }
 
     function seedHistoryEntries(count: number): HistoryEntry[] {

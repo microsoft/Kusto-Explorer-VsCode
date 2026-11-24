@@ -33,8 +33,12 @@ and prefer small, focused changes.
   onto the editor.
 - **Webview house style.** Webview UIs build an HTML **string** with inline `<script>`, use
   `acquireVsCodeApi()` + document-level click delegation, and post messages back to the extension.
-  There is **no React/bundler** for webview content; CDN libraries (Plotly, Cytoscape, simple-datatables)
-  are loaded directly. Match this pattern; don't introduce a webview framework.
+  There is **no React/bundler** for webview content; the libraries (Plotly, Cytoscape, simple-datatables)
+  are copied into `dist/media` and loaded under a strict nonce CSP (`features/webviewHtml.ts`), so no
+  CDN URLs and no inline `on*=` handlers. Match this pattern; don't introduce a webview framework.
+- **Two extension hosts.** `extension.ts` (desktop) and `extension.web.ts` (VS Code for the Web, where
+  `WebServer` replaces the C# server) share `features/activation.ts`. Only the desktop-only modules
+  listed in `ARCHITECTURE.md` §3.1 may use Node APIs; `scripts/build-web.mjs` rejects leaks.
 - **Interface-first seams.** `IServer`, `IConnection`, `ISchemaSource`, `IChartProvider`,
   `IDataTableProvider`, etc. exist so implementations can be swapped or stubbed. Preserve them and
   provide Null/test variants for new seams.

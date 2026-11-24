@@ -6,9 +6,8 @@
  */
 
 import * as vscode from 'vscode';
-import * as path from 'path';
-import * as fs from 'fs';
 import * as server from './server';
+import { toText, uriFileName, type IFileStore } from './fileStore';
 
 // =============================================================================
 // Constants
@@ -18,7 +17,8 @@ import * as server from './server';
 const MAX_HISTORY_ENTRIES = 200;
 
 /** Filename for the lightweight index that powers the tree view. */
-const INDEX_FILE = 'history-index.json';
+export const HISTORY_INDEX_FILE = 'history-index.json';
+const INDEX_FILE = HISTORY_INDEX_FILE;
 
 /** Lightweight metadata for a history entry (stored in the index file). */
 export interface HistoryEntry {
@@ -156,8 +156,6 @@ export function computeHistoryDisplayLabel(query: string | undefined, minifiedQu
  * Manages a persitent list of query history data
  */
 export class HistoryManager {
-    private readonly historyDir: string;
-    private readonly indexPath: string;
     private readonly server: server.IServer;
     private readonly _onDidChange = new vscode.EventEmitter<void>();
     private readonly _onDidAddEntry = new vscode.EventEmitter<HistoryEntry>();
@@ -168,26 +166,27 @@ export class HistoryManager {
     /** Fires after a new entry is added, carrying its metadata for UI reveal. */
     readonly onDidAddEntry = this._onDidAddEntry.event;
 
-    constructor(context: vscode.ExtensionContext, server: server.IServer) {
+    /**
+     * @param store the history directory (desktop: `<globalStorage>/history` on disk).
+     *   The index file must be readable synchronously.
+     */
+    constructor(server: server.IServer, private readonly store: IFileStore) {
         this.server = server;
-        this.historyDir = path.join(context.globalStorageUri.fsPath, 'history');
-        fs.mkdirSync(this.historyDir, { recursive: true });
-        this.indexPath = path.join(this.historyDir, INDEX_FILE);
     }
 
     // ─── Index I/O ──────────────────────────────────────────────────────
 
     private readIndex(): HistoryEntry[] {
         try {
-            if (fs.existsSync(this.indexPath)) {
-                return JSON.parse(fs.readFileSync(this.indexPath, 'utf-8')) as HistoryEntry[];
+            if (this.store.exists(INDEX_FILE)) {
+                return JSON.parse(toText(this.store.read(INDEX_FILE))) as HistoryEntry[];
             }
         } catch { /* corrupt index — start fresh */ }
         return [];
     }
 
     private writeIndex(entries: HistoryEntry[]): void {
-        fs.writeFileSync(this.indexPath, JSON.stringify(entries, null, 2), 'utf-8');
+        this.store.write(INDEX_FILE, JSON.stringify(entries, null, 2));
     }
 
     // ─── Public API ─────────────────────────────────────────────────────
@@ -239,9 +238,8 @@ export class HistoryManager {
         const safeName = querySnippet.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').slice(0, 40);
         const fileName = `${datePart}_${safeName}.kqr`;
 
-        const filePath = path.join(this.historyDir, fileName);
         const content = JSON.stringify(resultData, null, 2);
-        await fs.promises.writeFile(filePath, content, 'utf-8');
+        await this.store.writeAsync(fileName, content);
 
         const rowCount = resultData.tables.reduce((sum, t) => sum + (t.rows?.length ?? 0), 0);
         const queryHash = minifiedQuery !== undefined ? this.hashMinifiedQuery(minifiedQuery) : undefined;
@@ -270,21 +268,20 @@ export class HistoryManager {
             // Remove oldest entries and delete their files
             const removed = index.splice(MAX_HISTORY_ENTRIES);
             for (const entry of removed) {
-                const p = path.join(this.historyDir, entry.fileName);
-                try { await fs.promises.unlink(p); } catch { /* ignore */ }
+                try { await this.store.deleteAsync(entry.fileName); } catch { /* ignore */ }
             }
         }
         this.writeIndex(index);
         this._onDidChange.fire();
         this._onDidAddEntry.fire(meta);
 
-        return vscode.Uri.file(filePath);
+        return this.store.uri(fileName);
     }
 
     /** Reads the ResultData from a history .kqr file. */
     async readHistoryFile(uri: vscode.Uri): Promise<server.ResultData | undefined> {
         try {
-            const content = await fs.promises.readFile(uri.fsPath, 'utf-8');
+            const content = toText(await this.store.readAsync(uriFileName(uri)));
             return JSON.parse(content) as server.ResultData;
         } catch {
             return undefined;
@@ -294,12 +291,12 @@ export class HistoryManager {
     /** Writes updated ResultData back to a history .kqr file. */
     async writeHistoryFile(uri: vscode.Uri, data: server.ResultData): Promise<void> {
         const content = JSON.stringify(data, null, 2);
-        await fs.promises.writeFile(uri.fsPath, content, 'utf-8');
+        await this.store.writeAsync(uriFileName(uri), content);
     }
 
     /** Returns the URI for a history entry's backing file. */
     getHistoryFileUri(fileName: string): vscode.Uri {
-        return vscode.Uri.file(path.join(this.historyDir, fileName));
+        return this.store.uri(fileName);
     }
 
     /**
@@ -330,8 +327,7 @@ export class HistoryManager {
 
     /** Deletes a single history entry's file and removes it from the index. */
     async deleteEntry(fileName: string): Promise<void> {
-        const filePath = path.join(this.historyDir, fileName);
-        try { await fs.promises.unlink(filePath); } catch { /* ignore */ }
+        try { await this.store.deleteAsync(fileName); } catch { /* ignore */ }
 
         const index = this.readIndex();
         const filtered = index.filter(e => e.fileName !== fileName);
@@ -343,8 +339,7 @@ export class HistoryManager {
     async clearAllEntries(): Promise<void> {
         const index = this.readIndex();
         for (const entry of index) {
-            const filePath = path.join(this.historyDir, entry.fileName);
-            try { await fs.promises.unlink(filePath); } catch { /* ignore */ }
+            try { await this.store.deleteAsync(entry.fileName); } catch { /* ignore */ }
         }
         this.writeIndex([]);
         this._onDidChange.fire();

@@ -22,6 +22,6 @@ module.exports = tseslint.config(
         },
     },
     {
-        ignores: ['out/**', 'dist/**', 'server/**', '.vscode-test/**', 'node_modules/**', 'tests/**'],
+        ignores: ['out/**', 'dist/**', 'server/**', '.vscode-test/**', '.vscode-test-web/**', 'node_modules/**', 'tests/**'],
     }
 );

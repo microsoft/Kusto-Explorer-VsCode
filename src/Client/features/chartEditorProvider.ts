@@ -435,17 +435,17 @@ class ChartEditorView implements IChartEditorView {
             var upBtn = document.createElement('button');
             upBtn.innerHTML = '&uarr;';
             upBtn.title = 'Move up';
-            upBtn.onclick = function() { _editorMoveColumnItem(upBtn, -1); };
+            upBtn.setAttribute('data-editor-click', 'move-up');
             li.appendChild(upBtn);
             var downBtn = document.createElement('button');
             downBtn.innerHTML = '&darr;';
             downBtn.title = 'Move down';
-            downBtn.onclick = function() { _editorMoveColumnItem(downBtn, 1); };
+            downBtn.setAttribute('data-editor-click', 'move-down');
             li.appendChild(downBtn);
             var removeBtn = document.createElement('button');
             removeBtn.innerHTML = '&times;';
             removeBtn.title = 'Remove';
-            removeBtn.onclick = function() { _editorRemoveColumnItem(removeBtn); };
+            removeBtn.setAttribute('data-editor-click', 'remove');
             li.appendChild(removeBtn);
             list.appendChild(li);
             picker.selectedIndex = 0;
@@ -550,6 +550,32 @@ class ChartEditorView implements IChartEditorView {
             var menus = document.querySelectorAll('.header-menu.visible');
             menus.forEach(function(menu) { menu.classList.remove('visible'); });
         });
+
+        // Form controls declare their behaviour with data-editor-{click,change,input}
+        // attributes instead of inline handlers, which the webview CSP blocks.
+        document.addEventListener('click', function(e) {
+            var el = e.target.closest ? e.target.closest('[data-editor-click]') : null;
+            if (!el) return;
+            switch (el.getAttribute('data-editor-click')) {
+                case 'move-up': _editorMoveColumnItem(el, -1); break;
+                case 'move-down': _editorMoveColumnItem(el, 1); break;
+                case 'remove': _editorRemoveColumnItem(el); break;
+                case 'toggle-section': _editorToggleSection(el); break;
+                case 'toggle-defaults-menu': _editorToggleDefaultsMenu(el); break;
+                case 'capture-defaults': _editorRunDefaultsAction('capture'); break;
+                case 'restore-defaults': _editorRunDefaultsAction('restore'); break;
+            }
+        });
+
+        function _editorOnFieldEvent(e) {
+            var el = e.target;
+            var action = el && el.getAttribute ? el.getAttribute('data-editor-' + e.type) : null;
+            if (action === 'option') _editorOnChartOptionChanged();
+            else if (action === 'add-column') _editorAddColumnItem(el.id, el.id.replace(/-picker$/, '-list'));
+            else if (action === 'nodes-table') _editorOnNodesTableChanged();
+        }
+        document.addEventListener('change', _editorOnFieldEvent);
+        document.addEventListener('input', _editorOnFieldEvent);
 
         function _editorCollectChartOptions() {
             var opts = {};
@@ -814,15 +840,15 @@ class ChartEditorView implements IChartEditorView {
         const anomalyColPickerOptions = makeColPickerOptions((opts.anomalyColumns ?? []).length > 0);
 
         const yColumnsItems = (opts.yColumns ?? []).map(c =>
-            `<li><span>${escapeHtml(c)}</span><button onclick="_editorMoveColumnItem(this,-1)" title="Move up">&uarr;</button><button onclick="_editorMoveColumnItem(this,1)" title="Move down">&darr;</button><button onclick="_editorRemoveColumnItem(this)" title="Remove">&times;</button></li>`
+            `<li><span>${escapeHtml(c)}</span><button data-editor-click="move-up" title="Move up">&uarr;</button><button data-editor-click="move-down" title="Move down">&darr;</button><button data-editor-click="remove" title="Remove">&times;</button></li>`
         ).join('');
 
         const seriesItems = (opts.seriesColumns ?? []).map(c =>
-            `<li><span>${escapeHtml(c)}</span><button onclick="_editorMoveColumnItem(this,-1)" title="Move up">&uarr;</button><button onclick="_editorMoveColumnItem(this,1)" title="Move down">&darr;</button><button onclick="_editorRemoveColumnItem(this)" title="Remove">&times;</button></li>`
+            `<li><span>${escapeHtml(c)}</span><button data-editor-click="move-up" title="Move up">&uarr;</button><button data-editor-click="move-down" title="Move down">&darr;</button><button data-editor-click="remove" title="Remove">&times;</button></li>`
         ).join('');
 
         const anomalyColumnsItems = (opts.anomalyColumns ?? []).map(c =>
-            `<li><span>${escapeHtml(c)}</span><button onclick="_editorMoveColumnItem(this,-1)" title="Move up">&uarr;</button><button onclick="_editorMoveColumnItem(this,1)" title="Move down">&darr;</button><button onclick="_editorRemoveColumnItem(this)" title="Remove">&times;</button></li>`
+            `<li><span>${escapeHtml(c)}</span><button data-editor-click="move-up" title="Move up">&uarr;</button><button data-editor-click="move-down" title="Move down">&darr;</button><button data-editor-click="remove" title="Remove">&times;</button></li>`
         ).join('');
 
         const currentMarkerShape = opts.markerShape ?? '';
@@ -887,230 +913,230 @@ class ChartEditorView implements IChartEditorView {
             `<option value="${a}"${a === yTickAngleValue ? ' selected' : ''}>${a ? a + '°' : formatDefaultLabel(formatAngleLabel(defaultYTickAngleValue))}</option>`
         ).join('');
 
-        return `<div class="panel-header"><h3>Chart Options</h3><div class="header-actions"><button type="button" class="icon-button" title="Chart Actions..." aria-label="Chart Actions..." onclick="_editorToggleDefaultsMenu(this)">&hellip;</button><div class="header-menu"><button type="button" class="menu-item" onclick="_editorRunDefaultsAction('capture')">Capture Defaults</button><button type="button" class="menu-item" onclick="_editorRunDefaultsAction('restore')">Restore Defaults</button></div></div></div>
+        return `<div class="panel-header"><h3>Chart Options</h3><div class="header-actions"><button type="button" class="icon-button" title="Chart Actions..." aria-label="Chart Actions..." data-editor-click="toggle-defaults-menu">&hellip;</button><div class="header-menu"><button type="button" class="menu-item" data-editor-click="capture-defaults">Capture Defaults</button><button type="button" class="menu-item" data-editor-click="restore-defaults">Restore Defaults</button></div></div></div>
 
-            <div class="section-header" onclick="_editorToggleSection(this)">
+            <div class="section-header" data-editor-click="toggle-section">
                 <span class="chevron">&#9662;</span>General
             </div>
             <div class="section-body">
                 <div class="field">
                     <label for="opt-type">Type</label>
-                    <select id="opt-type" onchange="_editorOnChartOptionChanged()">${typeOptions}</select>
+                    <select id="opt-type" data-editor-change="option">${typeOptions}</select>
                 </div>
                 <div class="field">
                     <label for="opt-legendPosition">Legend</label>
-                    <select id="opt-legendPosition" onchange="_editorOnChartOptionChanged()">${legendPosOptions}</select>
+                    <select id="opt-legendPosition" data-editor-change="option">${legendPosOptions}</select>
                 </div>
                 <div class="field">
                     <label for="opt-sort">Axis Order</label>
-                    <select id="opt-sort" onchange="_editorOnChartOptionChanged()">${sortOptions}</select>
+                    <select id="opt-sort" data-editor-change="option">${sortOptions}</select>
                 </div>
                 <div class="field">
                     <label for="opt-mode">Mode</label>
-                    <select id="opt-mode" onchange="_editorOnChartOptionChanged()">${modeOptions}</select>
+                    <select id="opt-mode" data-editor-change="option">${modeOptions}</select>
                 </div>
                 <div class="field">
                     <label for="opt-aspectRatio">Aspect Ratio</label>
-                    <select id="opt-aspectRatio" data-default-value="${escapeHtml(defaultAspectRatioValue)}" onchange="_editorOnChartOptionChanged()">${aspectRatioOptions}</select>
+                    <select id="opt-aspectRatio" data-default-value="${escapeHtml(defaultAspectRatioValue)}" data-editor-change="option">${aspectRatioOptions}</select>
                 </div>
                 <div class="field">
                     <label for="opt-textSize">Text Size</label>
-                    <select id="opt-textSize" data-default-value="${escapeHtml(defaultTextSizeValue)}" onchange="_editorOnChartOptionChanged()">${textSizeOptions}</select>
+                    <select id="opt-textSize" data-default-value="${escapeHtml(defaultTextSizeValue)}" data-editor-change="option">${textSizeOptions}</select>
                 </div>
                 <div class="field">
                     <label for="opt-yLayout">Multi Y Layout</label>
-                    <select id="opt-yLayout" onchange="_editorOnChartOptionChanged()">${yLayoutOptions}</select>
+                    <select id="opt-yLayout" data-editor-change="option">${yLayoutOptions}</select>
                 </div>
             </div>
 
-            <div class="section-header collapsed" onclick="_editorToggleSection(this)">
+            <div class="section-header collapsed" data-editor-click="toggle-section">
                 <span class="chevron">&#9662;</span>Data
             </div>
             <div class="section-body collapsed">
                 <div class="field">
                     <label for="opt-xColumn">X Column</label>
-                    <select id="opt-xColumn" onchange="_editorOnChartOptionChanged()">${xColOptions}</select>
+                    <select id="opt-xColumn" data-editor-change="option">${xColOptions}</select>
                 </div>
                 <div class="field">
                     <label>Y Columns</label>
                     <ul id="opt-yColumns-list" class="column-list">${yColumnsItems}</ul>
-                    <select id="opt-yColumns-picker" onchange="_editorAddColumnItem('opt-yColumns-picker','opt-yColumns-list')">${yColPickerOptions}</select>
+                    <select id="opt-yColumns-picker" data-editor-change="add-column">${yColPickerOptions}</select>
                 </div>
                 <div class="field">
                     <label>Series Columns</label>
                     <ul id="opt-seriesColumns-list" class="column-list">${seriesItems}</ul>
-                    <select id="opt-seriesColumns-picker" onchange="_editorAddColumnItem('opt-seriesColumns-picker','opt-seriesColumns-list')">${seriesColPickerOptions}</select>
+                    <select id="opt-seriesColumns-picker" data-editor-change="add-column">${seriesColPickerOptions}</select>
                 </div>
                 <div class="field">
                     <label>Anomaly Columns</label>
                     <ul id="opt-anomalyColumns-list" class="column-list">${anomalyColumnsItems}</ul>
-                    <select id="opt-anomalyColumns-picker" onchange="_editorAddColumnItem('opt-anomalyColumns-picker','opt-anomalyColumns-list')">${anomalyColPickerOptions}</select>
+                    <select id="opt-anomalyColumns-picker" data-editor-change="add-column">${anomalyColPickerOptions}</select>
                 </div>
                 <div class="field">
                     <label for="opt-accumulate">Accumulate</label>
-                    <select id="opt-accumulate" onchange="_editorOnChartOptionChanged()">${accumulateOptions}</select>
+                    <select id="opt-accumulate" data-editor-change="option">${accumulateOptions}</select>
                 </div>
                 <div class="field">
                     <label for="opt-binSize">Bin Size</label>
-                    <input type="text" id="opt-binSize" value="${escapeHtml(opts.binSize ?? '')}" placeholder="e.g. 1h, 1d, 10" onchange="_editorOnChartOptionChanged()">
+                    <input type="text" id="opt-binSize" value="${escapeHtml(opts.binSize ?? '')}" placeholder="e.g. 1h, 1d, 10" data-editor-change="option">
                 </div>
                 <div class="field">
                     <label for="opt-aggregation">Bin Aggregation</label>
-                    <select id="opt-aggregation" onchange="_editorOnChartOptionChanged()">${aggregationOpts}</select>
+                    <select id="opt-aggregation" data-editor-change="option">${aggregationOpts}</select>
                 </div>
                 <div class="field">
                     <label for="opt-maxSeries">Max Series (top N)</label>
-                    <select id="opt-maxSeries" onchange="_editorOnChartOptionChanged()">${maxSeriesOpts}</select>
+                    <select id="opt-maxSeries" data-editor-change="option">${maxSeriesOpts}</select>
                 </div>
                 <div class="field">
                     <label for="opt-maxPointsPerSeries">Max Points per Series (downsample)</label>
-                    <select id="opt-maxPointsPerSeries" onchange="_editorOnChartOptionChanged()">${maxPointsOpts}</select>
+                    <select id="opt-maxPointsPerSeries" data-editor-change="option">${maxPointsOpts}</select>
                 </div>
             </div>
 
-            <div class="section-header collapsed" onclick="_editorToggleSection(this)">
+            <div class="section-header collapsed" data-editor-click="toggle-section">
                 <span class="chevron">&#9662;</span>Markers
             </div>
             <div class="section-body collapsed">
                 <div class="field">
                     <label for="opt-markerShape">Shape</label>
-                    <select id="opt-markerShape" onchange="_editorOnChartOptionChanged()">${markerShapeOpts}</select>
+                    <select id="opt-markerShape" data-editor-change="option">${markerShapeOpts}</select>
                 </div>
                 <div class="field">
                     <label for="opt-markerSize">Size</label>
-                    <select id="opt-markerSize" onchange="_editorOnChartOptionChanged()">${markerSizeOpts}</select>
+                    <select id="opt-markerSize" data-editor-change="option">${markerSizeOpts}</select>
                 </div>
                 <div class="field">
                     <label for="opt-cycleMarkerShapes">Cycle Shapes</label>
-                    <select id="opt-cycleMarkerShapes" onchange="_editorOnChartOptionChanged()">${cycleMarkerShapesOptions}</select>
+                    <select id="opt-cycleMarkerShapes" data-editor-change="option">${cycleMarkerShapesOptions}</select>
                 </div>
                 <div class="field">
                     <label for="opt-showMarkers">Show on Lines</label>
-                    <select id="opt-showMarkers" onchange="_editorOnChartOptionChanged()">${showMarkersOptions}</select>
+                    <select id="opt-showMarkers" data-editor-change="option">${showMarkersOptions}</select>
                 </div>
                 <div class="field">
                     <label for="opt-markerOutline">Outline</label>
-                    <select id="opt-markerOutline" onchange="_editorOnChartOptionChanged()">${markerOutlineOptions}</select>
+                    <select id="opt-markerOutline" data-editor-change="option">${markerOutlineOptions}</select>
                 </div>
                 <div class="field">
                     <label for="opt-showValues">Show Values</label>
-                    <select id="opt-showValues" onchange="_editorOnChartOptionChanged()">${showValuesOptions}</select>
+                    <select id="opt-showValues" data-editor-change="option">${showValuesOptions}</select>
                 </div>
             </div>
 
-            <div class="section-header collapsed" onclick="_editorToggleSection(this)">
+            <div class="section-header collapsed" data-editor-click="toggle-section">
                 <span class="chevron">&#9662;</span>Titles
             </div>
             <div class="section-body collapsed">
                 <div class="field">
                     <label for="opt-title">Title</label>
-                    <input type="text" id="opt-title" value="${escapeHtml(opts.title ?? '')}" oninput="_editorOnChartOptionChanged()">
+                    <input type="text" id="opt-title" value="${escapeHtml(opts.title ?? '')}" data-editor-input="option">
                 </div>
                 <div class="field">
                     <label for="opt-xTitle">X-Axis Title</label>
-                    <input type="text" id="opt-xTitle" value="${escapeHtml(opts.xTitle ?? '')}" oninput="_editorOnChartOptionChanged()">
+                    <input type="text" id="opt-xTitle" value="${escapeHtml(opts.xTitle ?? '')}" data-editor-input="option">
                 </div>
                 <div class="field">
                     <label for="opt-yTitle">Y-Axis Title</label>
-                    <input type="text" id="opt-yTitle" value="${escapeHtml(opts.yTitle ?? '')}" oninput="_editorOnChartOptionChanged()">
+                    <input type="text" id="opt-yTitle" value="${escapeHtml(opts.yTitle ?? '')}" data-editor-input="option">
                 </div>
                 <div class="field">
                     <label for="opt-zTitle">Z-Axis Title</label>
-                    <input type="text" id="opt-zTitle" value="${escapeHtml(opts.zTitle ?? '')}" oninput="_editorOnChartOptionChanged()">
+                    <input type="text" id="opt-zTitle" value="${escapeHtml(opts.zTitle ?? '')}" data-editor-input="option">
                 </div>
             </div>
 
-            <div class="section-header collapsed" onclick="_editorToggleSection(this)">
+            <div class="section-header collapsed" data-editor-click="toggle-section">
                 <span class="chevron">&#9662;</span>X Axis
             </div>
             <div class="section-body collapsed">
                 <div class="field">
                     <label for="opt-xAxis">Type</label>
-                    <select id="opt-xAxis" onchange="_editorOnChartOptionChanged()">${xAxisOptions}</select>
+                    <select id="opt-xAxis" data-editor-change="option">${xAxisOptions}</select>
                 </div>
                 <div class="field-row">
                     <div class="field">
                         <label for="opt-xMin">Min</label>
-                        <input type="text" id="opt-xMin" value="${escapeHtml(String(opts.xMin ?? ''))}" oninput="_editorOnChartOptionChanged()">
+                        <input type="text" id="opt-xMin" value="${escapeHtml(String(opts.xMin ?? ''))}" data-editor-input="option">
                     </div>
                     <div class="field">
                         <label for="opt-xMax">Max</label>
-                        <input type="text" id="opt-xMax" value="${escapeHtml(String(opts.xMax ?? ''))}" oninput="_editorOnChartOptionChanged()">
+                        <input type="text" id="opt-xMax" value="${escapeHtml(String(opts.xMax ?? ''))}" data-editor-input="option">
                     </div>
                 </div>
                 <div class="field">
                     <label for="opt-xShowTicks">Show Tick Marks</label>
-                    <select id="opt-xShowTicks" onchange="_editorOnChartOptionChanged()">${xShowTicksOptions}</select>
+                    <select id="opt-xShowTicks" data-editor-change="option">${xShowTicksOptions}</select>
                 </div>
                 <div class="field">
                     <label for="opt-xShowGrid">Show Grid Lines</label>
-                    <select id="opt-xShowGrid" onchange="_editorOnChartOptionChanged()">${xShowGridOptions}</select>
+                    <select id="opt-xShowGrid" data-editor-change="option">${xShowGridOptions}</select>
                 </div>
                 <div class="field">
                     <label for="opt-xTickAngle">Tick Label Angle</label>
-                    <select id="opt-xTickAngle" onchange="_editorOnChartOptionChanged()">${xTickAngleOptions}</select>
+                    <select id="opt-xTickAngle" data-editor-change="option">${xTickAngleOptions}</select>
                 </div>
             </div>
 
-            <div class="section-header collapsed" onclick="_editorToggleSection(this)">
+            <div class="section-header collapsed" data-editor-click="toggle-section">
                 <span class="chevron">&#9662;</span>Y Axis
             </div>
             <div class="section-body collapsed">
                 <div class="field">
                     <label for="opt-yAxis">Type</label>
-                    <select id="opt-yAxis" onchange="_editorOnChartOptionChanged()">${yAxisOptions}</select>
+                    <select id="opt-yAxis" data-editor-change="option">${yAxisOptions}</select>
                 </div>
                 <div class="field-row">
                     <div class="field">
                         <label for="opt-yMin">Min</label>
-                        <input type="text" id="opt-yMin" value="${escapeHtml(String(opts.yMin ?? ''))}" oninput="_editorOnChartOptionChanged()">
+                        <input type="text" id="opt-yMin" value="${escapeHtml(String(opts.yMin ?? ''))}" data-editor-input="option">
                     </div>
                     <div class="field">
                         <label for="opt-yMax">Max</label>
-                        <input type="text" id="opt-yMax" value="${escapeHtml(String(opts.yMax ?? ''))}" oninput="_editorOnChartOptionChanged()">
+                        <input type="text" id="opt-yMax" value="${escapeHtml(String(opts.yMax ?? ''))}" data-editor-input="option">
                     </div>
                 </div>
                 <div class="field">
                     <label for="opt-yShowTicks">Show Tick Marks</label>
-                    <select id="opt-yShowTicks" onchange="_editorOnChartOptionChanged()">${yShowTicksOptions}</select>
+                    <select id="opt-yShowTicks" data-editor-change="option">${yShowTicksOptions}</select>
                 </div>
                 <div class="field">
                     <label for="opt-yMirror">Mirror Axis</label>
-                    <select id="opt-yMirror" onchange="_editorOnChartOptionChanged()">${yMirrorOptions}</select>
+                    <select id="opt-yMirror" data-editor-change="option">${yMirrorOptions}</select>
                 </div>
                 <div class="field">
                     <label for="opt-yShowGrid">Show Grid Lines</label>
-                    <select id="opt-yShowGrid" onchange="_editorOnChartOptionChanged()">${yShowGridOptions}</select>
+                    <select id="opt-yShowGrid" data-editor-change="option">${yShowGridOptions}</select>
                 </div>
                 <div class="field">
                     <label for="opt-yTickAngle">Tick Label Angle</label>
-                    <select id="opt-yTickAngle" onchange="_editorOnChartOptionChanged()">${yTickAngleOptions}</select>
+                    <select id="opt-yTickAngle" data-editor-change="option">${yTickAngleOptions}</select>
                 </div>
             </div>
 
-            <div class="section-header collapsed" onclick="_editorToggleSection(this)">
+            <div class="section-header collapsed" data-editor-click="toggle-section">
                 <span class="chevron">&#9662;</span>Graph
             </div>
             <div class="section-body collapsed">
                 <div class="field">
                     <label for="opt-nodesTable">Nodes Table</label>
-                    <select id="opt-nodesTable" data-node-columns="${nodeColumnsByTableJson}" onchange="_editorOnNodesTableChanged()">${nodesTableOptions}</select>
+                    <select id="opt-nodesTable" data-node-columns="${nodeColumnsByTableJson}" data-editor-change="nodes-table">${nodesTableOptions}</select>
                 </div>
                 <div class="field">
                     <label for="opt-nodeIdColumn">Node Id Column</label>
-                    <select id="opt-nodeIdColumn" onchange="_editorOnChartOptionChanged()">${nodeIdColumnOptions}</select>
+                    <select id="opt-nodeIdColumn" data-editor-change="option">${nodeIdColumnOptions}</select>
                 </div>
                 <div class="field">
                     <label for="opt-nodeLabelColumn">Node Label Column</label>
-                    <select id="opt-nodeLabelColumn" onchange="_editorOnChartOptionChanged()">${nodeLabelColumnOptions}</select>
+                    <select id="opt-nodeLabelColumn" data-editor-change="option">${nodeLabelColumnOptions}</select>
                 </div>
                 <div class="field">
                     <label for="opt-nodeKindColumn">Node Kind Column</label>
-                    <select id="opt-nodeKindColumn" onchange="_editorOnChartOptionChanged()">${nodeKindColumnOptions}</select>
+                    <select id="opt-nodeKindColumn" data-editor-change="option">${nodeKindColumnOptions}</select>
                 </div>
                 <div class="field">
                     <label for="opt-edgeKindColumn">Edge Kind Column</label>
-                    <select id="opt-edgeKindColumn" onchange="_editorOnChartOptionChanged()">${edgeKindColumnOptions}</select>
+                    <select id="opt-edgeKindColumn" data-editor-change="option">${edgeKindColumnOptions}</select>
                 </div>
             </div>`;
     }
