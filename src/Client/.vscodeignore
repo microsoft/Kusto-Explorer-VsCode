@@ -1,6 +1,7 @@
 # Source files
 features/**/*.ts
 *.ts
+*.mts
 tsconfig.json
 
 # Build artifacts not needed in package

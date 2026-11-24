@@ -27,6 +27,6 @@
     "esModuleInterop": true,
     "moduleResolution": "bundler"
   },
-  "include": [ "**/*.ts" ],
+  "include": [ "**/*.ts", "**/*.mts" ],
   "exclude": [ "node_modules", "out", "tests" ]
 }
