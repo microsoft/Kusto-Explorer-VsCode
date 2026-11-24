@@ -2,7 +2,7 @@ const tseslint = require('typescript-eslint');
 
 module.exports = tseslint.config(
     {
-        files: ['**/*.ts'],
+        files: ['**/*.ts', '**/*.mts'],
         languageOptions: {
             parser: tseslint.parser,
             parserOptions: {
