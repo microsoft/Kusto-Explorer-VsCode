@@ -271,11 +271,11 @@ describe('ScratchPadManager', () => {
     });
 
     describe('writeFile', () => {
-        it('writes content to the backing file', () => {
+        it('writes content to the backing file', async () => {
             const mgr = createManager();
             const content = new TextEncoder().encode('new content');
 
-            mgr.writeFile(scratchUri('ScratchPad1.kql'), content);
+            await mgr.writeFile(scratchUri('ScratchPad1.kql'), content);
 
             expect(fs.readFileSync(path.join(scratchpadDir, 'ScratchPad1.kql'), 'utf-8')).toBe('new content');
         });

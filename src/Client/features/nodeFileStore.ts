@@ -24,6 +24,10 @@ export class NodeFileStore implements IFileStore {
         return vscode.Uri.file(this.filePath(name));
     }
 
+    async refresh(): Promise<void> {
+        // Reads already consult disk directly.
+    }
+
     list(): string[] {
         return fs.existsSync(this.dirPath) ? fs.readdirSync(this.dirPath) : [];
     }

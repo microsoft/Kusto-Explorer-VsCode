@@ -85,6 +85,35 @@ describe('query ranges', () => {
         ]);
     });
 
+    it.each(['```', '~~~'])('keeps blank lines within %s strings, but not after closing', fence => {
+        const query = `print x=${fence}first\n\nlast${fence}\n\nprint 2`;
+        expect(findQueryRanges(query)).toEqual([
+            { start: { line: 0, character: 0 }, end: { line: 2, character: 7 } },
+            { start: { line: 4, character: 0 }, end: { line: 4, character: 7 } },
+        ]);
+    });
+
+    it.each([
+        ['comment', '// ```'],
+        ['double-quoted string', 'print "```"'],
+        ['single-quoted string', "print '```'"],
+        ['escaped quote', 'print "escaped \\" ```"'],
+        ['verbatim string with doubled quote', 'print @"escaped "" ```"'],
+    ])('ignores a fence inside a %s before an actual multiline string', (_kind, prefix) => {
+        const query = `${prefix}\n\nprint x=\`\`\`first\n\nlast\`\`\`\n\nprint 2`;
+        expect(findQueryRanges(query)).toEqual([
+            { start: { line: 0, character: 0 }, end: { line: 0, character: prefix.length } },
+            { start: { line: 2, character: 0 }, end: { line: 4, character: 7 } },
+            { start: { line: 6, character: 0 }, end: { line: 6, character: 7 } },
+        ]);
+    });
+
+    it('keeps the rest of the document in an unterminated multiline string', () => {
+        expect(findQueryRanges('print x=~~~first\n\nlast\n\n')).toEqual([
+            { start: { line: 0, character: 0 }, end: { line: 4, character: 0 } },
+        ]);
+    });
+
     it('resolves the block at, before or after a position', () => {
         expect(findQueryRangeAt(text, { line: 1, character: 2 })?.start.line).toBe(0);
         expect(findQueryRangeAt(text, { line: 3, character: 0 })?.start.line).toBe(0);

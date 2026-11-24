@@ -247,7 +247,7 @@ export class ConnectionsPanel {
      */
     async initialize(): Promise<void> {
         // Send initial connections list to server
-        const initialConnections = this.connections.getConfiguredConnections();
+        const initialConnections = this.connections.getConfiguredConnectionStrings();
         this.server.sendConnectionsUpdated(initialConnections);
 
         // Load document connections on startup

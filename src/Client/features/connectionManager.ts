@@ -222,7 +222,7 @@ export class ConnectionManager {
      */
     private async saveServersAndGroups(): Promise<void> {
         await this.context.globalState.update(SERVERS_STORAGE_KEY, this.serversAndGroups);
-        const connectionsList = this.getConfiguredConnections();
+        const connectionsList = this.getConfiguredConnectionStrings();
         this.server.sendConnectionsUpdated(connectionsList);
     }
 
@@ -880,6 +880,23 @@ export class ConnectionManager {
             }
         }
         return servers;
+    }
+
+    /**
+     * Gets the list of configured server connection strings.
+     */
+    getConfiguredConnectionStrings(): string[] {
+        const connections: string[] = [];
+        for (const item of this.serversAndGroups.items) {
+            if (isServerGroup(item)) {
+                for (const server of item.servers) {
+                    connections.push(server.connection);
+                }
+            } else {
+                connections.push(item.connection);
+            }
+        }
+        return connections;
     }
 
     /**

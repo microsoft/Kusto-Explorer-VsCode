@@ -12,7 +12,7 @@
 import * as vscode from 'vscode';
 import { NullServer } from './server';
 import type {
-    DatabaseInfo, DecodeConnectionStringResult, Position, QueryRangesResult, Range,
+    DatabaseInfo, DecodeConnectionStringResult, DocumentReadyNotification, Position, QueryRangesResult, Range,
     RunQueryResult, ServerInfoResult, ServerKindResult
 } from './server';
 import {
@@ -39,6 +39,11 @@ export class WebServer extends NullServer {
     private readonly getDocumentText: (uri: string) => string | undefined;
     /** Cluster endpoint URLs by host name, remembered from connection strings seen so far. */
     private readonly clusterUrls = new Map<string, string>();
+    /** Configured endpoint URLs by host name, refreshed from connection updates. */
+    private readonly configuredClusterUrls = new Map<string, string>();
+    /** Configured default databases by host name, refreshed from connection updates. */
+    private readonly clusterDatabases = new Map<string, string>();
+    private readonly documentReady = new vscode.EventEmitter<DocumentReadyNotification>();
 
     constructor(getToken: ClusterTokenProvider, options: WebServerOptions = {}) {
         super();
@@ -56,22 +61,43 @@ export class WebServer extends NullServer {
             throw new Error(`Invalid connection: ${connection}`);
         }
         // A bare host name maps back to the URL of a full connection string seen earlier (custom ports).
-        const known = this.clusterUrls.get(parsed.cluster);
+        const known = this.configuredClusterUrls.get(parsed.cluster) ?? this.clusterUrls.get(parsed.cluster);
         if (known && !/[:/;=]/.test(connection.trim())) {
-            return { ...parsed, clusterUrl: known };
+            const database = parsed.database ?? this.clusterDatabases.get(parsed.cluster);
+            return {
+                ...parsed,
+                clusterUrl: known,
+                ...(database !== undefined ? { database } : {}),
+            };
         }
         this.clusterUrls.set(parsed.cluster, parsed.clusterUrl);
         return parsed;
     }
 
     override sendConnectionsUpdated(connections: string[]): void {
+        this.clusterUrls.clear();
+        this.configuredClusterUrls.clear();
+        this.clusterDatabases.clear();
         for (const connection of connections) {
             try {
-                this.resolve(connection);
+                const parsed = this.resolve(connection);
+                this.configuredClusterUrls.set(parsed.cluster, parsed.clusterUrl);
+                if (parsed.database !== undefined) {
+                    this.clusterDatabases.set(parsed.cluster, parsed.database);
+                }
             } catch {
                 // Ignore connections that can't be parsed; they fail when used.
             }
         }
+    }
+
+    override ensureDocument(uri: string, _text: string): Promise<void> {
+        this.documentReady.fire({ uri });
+        return Promise.resolve();
+    }
+
+    override onDocumentReady(handler: (params: DocumentReadyNotification) => void): vscode.Disposable {
+        return this.documentReady.event(handler);
     }
 
     override decodeConnectionString(connectionString: string): Promise<DecodeConnectionStringResult | null> {
@@ -175,9 +201,10 @@ export class WebServer extends NullServer {
         }
 
         const options: KustoRequestOptions = { clientRequestId, readOnly: isReadOnly, maxRows };
+        const effectiveDatabase = database ?? connection.database;
         try {
-            const response = await this.client.execute(connection.clusterUrl, database, query, options);
-            return { data: toResultData(response, query, connection.cluster, database) };
+            const response = await this.client.execute(connection.clusterUrl, effectiveDatabase, query, options);
+            return { data: toResultData(response, query, connection.cluster, effectiveDatabase) };
         } catch (error) {
             if (error instanceof KustoRequestError || error instanceof KustoInBandError) {
                 return { error: diagnosticFromError(error.body, query, error.message) };

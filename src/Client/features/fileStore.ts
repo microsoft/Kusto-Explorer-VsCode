@@ -20,6 +20,8 @@ export interface FileStoreStat {
 export interface IFileStore {
     /** Names of the files in the directory. */
     list(): string[];
+    /** Refreshes the in-memory view from storage. */
+    refresh(): Promise<void>;
     exists(name: string): boolean;
     stat(name: string): FileStoreStat;
     /** Reads a file synchronously. Throws if the file does not exist. */
@@ -109,6 +111,36 @@ export class WorkspaceFileStore implements IFileStore {
             store.entries.set(name, entry);
         }
         return store;
+    }
+
+    async refresh(): Promise<void> {
+        await this.pending;
+        const before = new Map(this.entries);
+        const refreshed = new Map<string, CachedEntry>();
+        for (const [name, type] of await vscode.workspace.fs.readDirectory(this.dir)) {
+            if (type !== vscode.FileType.File) {
+                continue;
+            }
+            const uri = this.uri(name);
+            const s = await vscode.workspace.fs.stat(uri);
+            const entry: CachedEntry = { stat: { ctime: s.ctime, mtime: s.mtime, size: s.size } };
+            if (this.shouldCache(name)) {
+                entry.content = await vscode.workspace.fs.readFile(uri);
+            }
+            refreshed.set(name, entry);
+        }
+        // A local write can update the cache while the directory is being read.
+        for (const name of new Set([...before.keys(), ...refreshed.keys()])) {
+            if (this.entries.get(name) !== before.get(name)) {
+                continue;
+            }
+            const entry = refreshed.get(name);
+            if (entry) {
+                this.entries.set(name, entry);
+            } else {
+                this.entries.delete(name);
+            }
+        }
     }
 
     /** Resolves when all queued writes have been persisted. */

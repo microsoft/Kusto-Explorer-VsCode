@@ -71,6 +71,51 @@ describe('WebServer.runQuery', () => {
         expect(calls[0]!.properties?.getOption('query_take_max_records')).toBe(100);
     });
 
+    it('uses the database from a connection string when no database is provided', async () => {
+        const { server, calls } = createServer(() => PRINT_ONE);
+        const result = await server.runQuery(
+            'T | take 1',
+            'Data Source=https://c.kusto.windows.net;Initial Catalog=Analytics',
+        );
+
+        expect(calls[0]).toMatchObject({ db: 'Analytics' });
+        expect(result?.data?.database).toBe('Analytics');
+    });
+
+    it('uses the configured database for hostname queries unless a database is explicitly selected', async () => {
+        const { server, calls } = createServer(() => PRINT_ONE);
+        server.sendConnectionsUpdated([
+            'Data Source=https://c.kusto.windows.net;Initial Catalog=Analytics',
+        ]);
+
+        const configured = await server.runQuery('T | take 1', 'c.kusto.windows.net');
+        expect(calls[0]?.db).toBe('Analytics');
+        expect(configured?.data?.database).toBe('Analytics');
+
+        const overridden = await server.runQuery('T | take 1', 'c.kusto.windows.net', 'Override');
+        expect(calls[1]?.db).toBe('Override');
+        expect(overridden?.data?.database).toBe('Override');
+
+        server.sendConnectionsUpdated(['c.kusto.windows.net']);
+        const afterUpdate = await server.runQuery('T | take 1', 'c.kusto.windows.net');
+        expect(calls[2]?.db).toBe('NetDefaultDB');
+        expect(afterUpdate?.data?.database).toBeUndefined();
+    });
+
+    it('does not replace the configured database after an ad-hoc connection string query', async () => {
+        const { server, calls } = createServer(() => PRINT_ONE);
+        server.sendConnectionsUpdated([
+            'Data Source=https://c.kusto.windows.net;Initial Catalog=Analytics',
+        ]);
+
+        await server.runQuery('T | take 1', 'Data Source=https://c.kusto.windows.net;Initial Catalog=Other');
+        const configured = await server.runQuery('T | take 1', 'c.kusto.windows.net');
+
+        expect(calls[0]?.db).toBe('Other');
+        expect(calls[1]?.db).toBe('Analytics');
+        expect(configured?.data?.database).toBe('Analytics');
+    });
+
     it('sends commands to the mgmt endpoint and uses the default database when none is set', async () => {
         const { server, calls } = createServer(() => v1(['Version'], [['1.0']]));
         const result = await server.runQuery('// comment\n.show version', 'Data Source=https://help.kusto.windows.net');
@@ -154,6 +199,16 @@ describe('WebServer cancellation', () => {
 });
 
 describe('WebServer schema and connections', () => {
+    it('notifies listeners when a document is ready', async () => {
+        const { server } = createServer(() => PRINT_ONE);
+        const onDocumentReady = vi.fn();
+        server.onDocumentReady(onDocumentReady);
+
+        await server.ensureDocument('file:///query.kql', 'print 1');
+
+        expect(onDocumentReady).toHaveBeenCalledWith({ uri: 'file:///query.kql' });
+    });
+
     it('decodes connection strings', async () => {
         const { server } = createServer(() => PRINT_ONE);
         await expect(server.decodeConnectionString('Data Source=https://help.kusto.windows.net;Initial Catalog=Samples'))
@@ -209,6 +264,32 @@ describe('WebServer schema and connections', () => {
         server.sendConnectionsUpdated(['Data Source=https://localhost:8080;Initial Catalog=db', 'not a ; = valid']);
         await server.runQuery('print 1', 'localhost', 'db');
         expect(calls[0]?.clusterUrl).toBe('https://localhost:8080');
+    });
+
+    it('keeps configured endpoints authoritative and remembers on-demand endpoints', async () => {
+        const { server, calls } = createServer(() => PRINT_ONE);
+        server.sendConnectionsUpdated(['Data Source=https://localhost:8080;Initial Catalog=Analytics']);
+
+        await server.runQuery('print 1', 'Data Source=https://localhost:9090;Initial Catalog=Other');
+        await server.runQuery('print 1', 'localhost');
+        await server.runQuery('print 1', 'Data Source=https://on-demand:9090');
+        await server.runQuery('print 1', 'on-demand');
+
+        expect(calls[0]?.clusterUrl).toBe('https://localhost:9090');
+        expect(calls[2]?.clusterUrl).toBe('https://on-demand:9090');
+        expect(calls[3]?.clusterUrl).toBe('https://on-demand:9090');
+        expect(calls[1]?.clusterUrl).toBe('https://localhost:8080');
+        expect(calls[1]?.db).toBe('Analytics');
+    });
+
+    it('forgets previous endpoint URLs when connections are updated', async () => {
+        const { server, calls } = createServer(() => PRINT_ONE);
+        server.sendConnectionsUpdated(['Data Source=https://localhost:8080']);
+        server.sendConnectionsUpdated(['localhost']);
+
+        await server.runQuery('print 1', 'localhost');
+
+        expect(calls[0]?.clusterUrl).toBe('https://localhost');
     });
 });
 

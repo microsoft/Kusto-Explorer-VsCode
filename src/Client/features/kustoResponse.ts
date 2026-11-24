@@ -94,13 +94,58 @@ export function kustoBracketedName(name: string): string {
 // Query ranges (blank-line separated blocks)
 // =============================================================================
 
+/** Marks lines that begin inside a triple-backtick or triple-tilde string. */
+function linesInsideMultilineStrings(lines: string[]): Set<number> {
+    const inside = new Set<number>();
+    let fence: string | undefined;
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i]!;
+        if (fence) {
+            inside.add(i);
+        }
+        let j = 0;
+        while (j < line.length) {
+            if (fence) {
+                const end = line.indexOf(fence, j);
+                if (end < 0) {
+                    break;
+                }
+                j = end + fence.length;
+                fence = undefined;
+            } else if (line.startsWith('//', j)) {
+                break;
+            } else if (line.startsWith('```', j) || line.startsWith('~~~', j)) {
+                fence = line.slice(j, j + 3);
+                j += 3;
+            } else if (line[j] === '"' || line[j] === "'") {
+                const quote = line[j]!;
+                const verbatim = j > 0 && line[j - 1] === '@';
+                j++;
+                while (j < line.length) {
+                    if (verbatim && line[j] === quote && line[j + 1] === quote) {
+                        j += 2;
+                    } else if (!verbatim && line[j] === '\\') {
+                        j += 2;
+                    } else if (line[j++] === quote) {
+                        break;
+                    }
+                }
+            } else {
+                j++;
+            }
+        }
+    }
+    return inside;
+}
+
 /** Returns the ranges of all blank-line separated query blocks in the text. */
 export function findQueryRanges(text: string): Range[] {
     const lines = text.split('\n').map(l => l.endsWith('\r') ? l.slice(0, -1) : l);
+    const multilineLines = linesInsideMultilineStrings(lines);
     const ranges: Range[] = [];
     let start = -1;
     for (let i = 0; i <= lines.length; i++) {
-        const blank = i === lines.length || lines[i]!.trim() === '';
+        const blank = i === lines.length || (lines[i]!.trim() === '' && !multilineLines.has(i));
         if (!blank && start < 0) {
             start = i;
         } else if (blank && start >= 0) {

@@ -169,6 +169,7 @@ export class ScratchPadPanel {
     }
 
     private async openOrCreateDefaultScratchPad(): Promise<void> {
+        await this.manager.store.refresh();
         const files = this.manager.getScratchPadFiles();
         let name: string;
         if (files.length > 0) {
@@ -181,6 +182,7 @@ export class ScratchPadPanel {
     }
 
     async createScratchPad(): Promise<void> {
+        await this.manager.store.refresh();
         const existing = this.manager.getScratchPadFiles();
         const name = this.manager.nextScratchPadFileName(existing);
 
@@ -319,7 +321,7 @@ export class ScratchPadPanel {
             const fileName = pathBaseName(scratchUriValue.path.replace(/^\//, ''));
             this.manager.deleteScratchPadFile(scratchUriValue, fileName);
         } else if (action === 'Keep and Clear') {
-            this.manager.writeFile(scratchUriValue, new Uint8Array());
+            await this.manager.writeFile(scratchUriValue, new Uint8Array());
         }
 
         const newDoc = await vscode.workspace.openTextDocument(target);

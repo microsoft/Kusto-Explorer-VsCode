@@ -129,6 +129,7 @@ export class ScratchPadManager {
      * Returns the final filename used.
      */
     async addScratchPadFile(name: string | null, content: string): Promise<string> {
+        await this.store.refresh();
         const existing = this.getScratchPadFiles();
         let finalName = name ?? this.nextScratchPadFileName(existing);
         if (!finalName.endsWith('.kql')) {
@@ -174,8 +175,8 @@ export class ScratchPadManager {
     }
 
     /** Writes content to a scratch pad backing file via the filesystem provider. */
-    writeFile(uri: vscode.Uri, content: Uint8Array): void {
-        this.scratchFs.writeFile(uri, content, { create: false, overwrite: true });
+    writeFile(uri: vscode.Uri, content: Uint8Array): Promise<void> {
+        return this.scratchFs.writeFile(uri, content, { create: false, overwrite: true });
     }
 
     // ─── Private helpers ─────────────────────────────────────────────
@@ -223,17 +224,14 @@ class ScratchPadFileSystemProvider implements vscode.FileSystemProvider {
         return this.manager.getScratchPadFiles().map(f => [f, vscode.FileType.File]);
     }
 
-    // FileSystemProvider methods are synchronous because the VS Code
-    // FileSystemProvider interface is invoked synchronously by the editor for
-    // document open/save operations. While the interface accepts Thenable returns,
-    // async I/O here risks interleaving with editor state. These files are small
-    // scratch pads, so blocking is negligible (on the web the store serves them from memory).
+    // Reads use the synchronous store view; saves await persistence so failures
+    // propagate to VS Code rather than marking an unwritten document as saved.
     readFile(uri: vscode.Uri): Uint8Array {
         return this.manager.store.read(this.manager.fileName(uri));
     }
 
-    writeFile(uri: vscode.Uri, content: Uint8Array, _options: { create: boolean; overwrite: boolean }): void {
-        this.manager.store.write(this.manager.fileName(uri), content);
+    async writeFile(uri: vscode.Uri, content: Uint8Array, _options: { create: boolean; overwrite: boolean }): Promise<void> {
+        await this.manager.store.writeAsync(this.manager.fileName(uri), content);
         this._onDidChangeFile.fire([{ type: vscode.FileChangeType.Changed, uri }]);
     }
 

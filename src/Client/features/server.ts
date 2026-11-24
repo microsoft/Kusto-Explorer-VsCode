@@ -77,12 +77,12 @@ export class NullServer implements IServer {
     refreshSchema(_cluster: string, _database?: string): Promise<void> { return Promise.resolve(); }
     refreshDocumentSchema(): Promise<void> { return Promise.resolve(); }
     inferDocumentConnection(): Promise<InferDocumentConnectionResult | null> { return Promise.resolve(null); }
-    ensureDocument(): Promise<void> { return Promise.resolve(); }
+    ensureDocument(_uri: string, _text: string): Promise<void> { return Promise.resolve(); }
     validateQuery(): Promise<ValidateQueryResult | null> { return Promise.resolve(null); }
     getMinifiedQuery(): Promise<GetMinifiedQueryResult | null> { return Promise.resolve(null); }
     sendConnectionsUpdated(_connections: string[]): void {}
     sendDocumentConnectionChanged(): void {}
-    onDocumentReady(): Disposable { return NullServer.noopDisposable; }
+    onDocumentReady(_handler: (params: DocumentReadyNotification) => void): Disposable { return NullServer.noopDisposable; }
     onSemanticTokensRefresh(): Disposable { return NullServer.noopDisposable; }
     get initializeResult(): undefined { return undefined; }
 }
